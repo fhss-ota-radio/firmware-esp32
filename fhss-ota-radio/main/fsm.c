@@ -44,10 +44,11 @@ static const char *s_event_names[FSM_EVENT_COUNT] = {
 /*
  * 상태별 전이. 전역 전이(EV_ERROR, EV_SYNC_LOST)는 fsm_task()에서 별도 처리하므로 여기 넣지 않는다.
  *
- * 주의: 이 표에는 FHSS 홉 추종(hop tracking)이 없다 — 그것은 이 FSM의 상태가 아니라
- * 동기 획득(EV_SYNC_ACQUIRED) 이후 별도 태스크(fhss_link, 팀5)가 RX_AUDIO 등 다른
- * 상태와 무관하게 계속 실행하는 병행 프로세스다. 이 FSM은 그 태스크가 올리는
- * EV_SYNC_ACQUIRED / EV_SYNC_LOST 두 이벤트만 소비한다.
+ * 주의: 이 표에는 FHSS 홉 타이밍 보정이 없다 — 그것은 이 FSM의 상태가 아니라
+ * nRF24L01 수신 드라이버(팀5)가 매 패킷 검증 성공 시 그 자리에서 홉 타이머를
+ * 보정하는 이벤트 기반 로직이다. 정상 수신은 이벤트로 올라오지 않고, 연속
+ * 수신 실패로 완전 동기 상실이 판정될 때만 EV_SYNC_LOST가 올라온다. 이 FSM은
+ * 그 결과인 EV_SYNC_ACQUIRED / EV_SYNC_LOST 두 이벤트만 소비한다.
  */
 typedef struct {
     fsm_state_t state;

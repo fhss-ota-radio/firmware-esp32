@@ -5,47 +5,45 @@ ESP32-S3 무선기 단말(`firmware-esp32`)의 최상위 애플리케이션 상�
 ## 1. 설계 전제
 
 - 음성 링크(nRF24L01, 2.4GHz)와 OTA 링크(CC1101, Sub-GHz)는 서로 다른 RF 모듈을 쓰지만, 같은 CPU/플래시를 공유한다. OTA 이미지 기록(flash write) 중에는 실시간 오디오 처리가 지터를 겪을 수 있으므로, **OTA 수신·적용 중에는 음성 송수신을 일시 중단**하는 것을 기본 정책으로 한다.
-- **`FHSS_SYNC` 상태 ≠ 홉 유지(hop maintenance).** `FHSS_SYNC`는 "아직 동기가 없는" 두 경우에만 존재한다: (1) 최초 부팅 후 최초 동기 획득, (2) 동기를 완전히 잃어 재획득이 필요한 경우. 일단 동기가 잡히면(`EV_SYNC_ACQUIRED`) 이후의 홉 추종·타이밍 드리프트 보정은 **이 최상위 FSM과 별개로 항상 병행 실행되는 프로세스**(FHSS 태스크, 팀5 담당)가 맡는다. 즉 홉 추종은 `IDLE`/`TX_AUDIO`/`RX_AUDIO`/`OTA_*` 어떤 상태에서도 끊기지 않고 계속 돈다 — 애초에 RX_AUDIO로 프레임을 받을 수 있는 것 자체가 홉 추종이 그 순간에도 맞물려 돌고 있기 때문이다. 자세한 동시성 구조는 [§1.1](#11-동시성-모델-fhss-홉-추종-vs-최상위-fsm) 참고.
-- `EV_SYNC_LOST`는 위 (2)의 "동기 완전 상실"에서만 발생하는 전역(global) 이벤트다. 이 경우에는 현재 어떤 최상위 상태에 있든(설령 RX_AUDIO 도중이라도) 통신 자체가 불가능해지므로 강제로 `FHSS_SYNC`로 전이한다. 미세한 타이밍 오차 보정은 이벤트로 올라오지 않고 FHSS 태스크 내부에서 조용히 처리된다.
+- **`FHSS_SYNC` 상태 ≠ 홉 타이밍 보정.** `FHSS_SYNC`는 "아직 동기가 없는" 두 경우에만 존재한다: (1) 최초 부팅 후 최초 동기 획득, (2) 연속 수신 실패로 동기를 완전히 잃어 재획득(재탐색)이 필요한 경우. 일단 동기가 잡히면(`EV_SYNC_ACQUIRED`) 이후의 타이밍 유지는 **별도 태스크가 계속 도는 방식이 아니라, 매 수신 패킷 검증에 성공할 때마다 그 자리에서 보정하는 이벤트 기반(event-driven) 방식**이다. 자세한 내용은 [§1.1](#11-동시성-모델-fhss-홉-추종-vs-최상위-fsm) 참고.
+- `EV_SYNC_LOST`는 위 (2), 즉 "기대되는 수신 윈도우에서 연속 N회 유효 패킷을 받지 못함(검증 실패 포함)"으로 판정될 때만 발생하는 전역(global) 이벤트다. 이 경우에는 현재 어떤 최상위 상태에 있든(설령 RX_AUDIO 도중이라도) 통신 자체가 불가능해지므로 강제로 `FHSS_SYNC`로 전이한다.
 - 치명적 오류(`EV_ERROR`)도 전역 이벤트로, 어느 상태에서든 `ERROR` 상태로 강제 전이한다.
 
 ### 1.1 동시성 모델: FHSS 홉 추종 vs 최상위 FSM
 
-이 문서의 상태기계(§2~§4, `fsm.c`)는 **애플리케이션 동작 모드**만 표현한다. FHSS 홉 시퀀스를 계속 따라가는 일(주파수 테이블 인덱스 증가, 슬롯 타이밍 정렬, 드리프트 보정)은 별도의 상시 실행 태스크(가칭 `fhss_link`)가 담당하며, 이 FSM의 "상태"가 아니라 `FHSS_SYNC → (상태 무관하게 계속 실행)` 형태의 병행 프로세스다.
+이 문서의 상태기계(§2~§4, `fsm.c`)는 **애플리케이션 동작 모드**만 표현한다. 홉 타이밍 유지는 별도의 상시 실행 태스크가 프리러닝 타이머로 도는 것이 **아니라**, nRF24L01 수신 경로(패킷 핸들러) 안에 내장된 로직이다:
+
+1. 매 홉 슬롯마다 패킷을 수신 시도한다.
+2. **패킷이 도착해 CRC/주소 검증에 성공하면**, 그 즉시 그 패킷의 실제 도착 시각을 기준으로 다음 홉 타이머(슬롯 시작 시각)를 재정렬한다 — 이게 곧 "동기 유지"다. 이 보정은 audio 프레임이든 keepalive/비콘성 패킷이든, 유효하게 검증되기만 하면 매번 일어난다.
+3. **패킷 검증에 실패하거나 아예 수신되지 않으면**, 내부 카운터만 증가시키고 이전 타이밍을 그대로 유지(추정)한다.
+4. 이 카운터가 임계값(연속 N회 미수신/검증 실패)을 넘기면 그때 비로소 "동기 완전 상실"로 판정하고 `EV_SYNC_LOST`를 올려 `FHSS_SYNC`(재탐색) 상태로 강제 전이한다.
+
+즉 보정 자체는 `IDLE`/`RX_AUDIO` 등 수신이 일어나는 모든 상태에서 수신 이벤트에 얹혀 자연히 일어나며, FSM은 이를 이벤트로 인지하지 않는다 — FSM이 신경 쓰는 것은 "동기가 있다(`EV_SYNC_ACQUIRED` 이후)"와 "완전히 끊겼다(`EV_SYNC_LOST`)" 두 가지뿐이다.
 
 ```mermaid
-stateDiagram-v2
-    [*] --> BOOT_INIT
-    BOOT_INIT --> FHSS_SYNC : EV_INIT_DONE
+sequenceDiagram
+    participant Radio as nRF24L01 수신 드라이버
+    participant App as 상위 FSM (fsm.c)
 
-    FHSS_SYNC --> OPERATIONAL : EV_SYNC_ACQUIRED
-    OPERATIONAL --> FHSS_SYNC : EV_SYNC_LOST (동기 완전 상실)
+    Note over Radio: 매 홉 슬롯마다 수신 시도
+    Radio->>Radio: 패킷 CRC/주소 검증 성공
+    Radio->>Radio: 도착 시각 기준 홉 타이머 보정 (동기 유지)
+    Radio-->>App: (audio 프레임이면) EV_RX_FRAME
 
-    state OPERATIONAL {
-        [*] --> IDLE
-        IDLE --> TX_AUDIO : EV_PTT_PRESS
-        TX_AUDIO --> IDLE : EV_PTT_RELEASE
-        IDLE --> RX_AUDIO : EV_RX_FRAME
-        RX_AUDIO --> IDLE : EV_RX_DONE
-        IDLE --> OTA_RECEIVING : EV_OTA_START
-        TX_AUDIO --> OTA_RECEIVING : EV_OTA_START
-        RX_AUDIO --> OTA_RECEIVING : EV_OTA_START
-        OTA_RECEIVING --> OTA_RECEIVING : EV_OTA_CHUNK
-        OTA_RECEIVING --> OTA_APPLYING : EV_OTA_COMPLETE
-        --
-        [*] --> HOP_TRACKING
-        HOP_TRACKING --> HOP_TRACKING : 홉 타이머 tick / 드리프트 보정 (팀5, fhss_link 태스크)
-    }
+    Note over Radio: 다음 슬롯에서 검증 실패/무수신
+    Radio->>Radio: 미수신 카운터 증가 (타이밍은 이전 값 유지)
+
+    Note over Radio: 연속 N회 실패 누적
+    Radio-->>App: EV_SYNC_LOST
+    App->>App: 어떤 상태에 있었든 FHSS_SYNC로 강제 전이
 ```
-
-`OPERATIONAL` 안의 두 영역(위: 동작 모드, 아래: `HOP_TRACKING`)은 서로 독립적으로 동시에 활성화된다. `RX_AUDIO`에 있는 동안에도 `HOP_TRACKING`은 계속 돌고 있으며, 이 둘은 배타 관계가 아니다.
 
 ## 2. 상태 (States)
 
 | 상태 | 설명 | 담당(스펙 기준) |
 |---|---|---|
 | `BOOT_INIT` | 전원 인가 직후. I2S(마이크/스피커), OLED, SPI(nRF24L01, CC1101), PTT 버튼 GPIO 초기화 | 팀1, 팀2 |
-| `FHSS_SYNC` | 피어/네트워크와 주파수 호핑 동기 **획득/재획득**. 최초 부팅 시, 또는 동기를 완전히 잃었을 때만 진입한다. 동기 유지(홉 추종)는 이 상태가 아니라 [§1.1](#11-동시성-모델-fhss-홉-추종-vs-최상위-fsm)의 병행 프로세스가 담당 | 팀5 |
+| `FHSS_SYNC` | 피어/네트워크와 주파수 호핑 동기 **획득/재획득**. 최초 부팅 시, 또는 연속 수신 실패로 동기를 완전히 잃었을 때만 진입한다. 동기 유지(타이밍 보정)는 이 상태가 아니라 [§1.1](#11-동시성-모델-fhss-홉-추종-vs-최상위-fsm)처럼 매 수신 패킷 검증 성공 시 이벤트 기반으로 이루어진다 | 팀5 |
 | `IDLE` | 동기 완료, 호핑 시퀀스를 따라가며 PTT 입력 또는 수신 프레임 대기 | 팀1, 팀5 |
 | `TX_AUDIO` | PTT 눌림. 마이크 캡처 → Opus 인코딩 → FHSS 채널 송신 | 팀1, 팀2 |
 | `RX_AUDIO` | 상대 단말로부터 음성 프레임 수신 중 → Opus 디코딩 → 스피커 재생 | 팀1, 팀2 |
@@ -136,7 +134,7 @@ stateDiagram-v2
 
 ## 6. 구현 매핑
 
-- 코드: [`main/fsm.h`](../main/fsm.h), [`main/fsm.c`](../main/fsm.c) — 테이블 기반 상태기계, FreeRTOS 큐로 이벤트 수신. **이 파일은 애플리케이션 동작 모드만 다루며, FHSS 홉 추종 자체는 구현하지 않는다.**
-- FHSS 홉 추종(주파수 인덱스 증가, 슬롯 타이밍, 드리프트 보정)은 팀5가 별도 모듈(가칭 `fhss_link.c`)과 상시 실행 태스크로 구현한다. 이 태스크는 동기를 처음 잡으면 `FSM_EVENT_SYNC_ACQUIRED`를, 재획득 불가 수준으로 동기를 완전히 잃으면 `FSM_EVENT_SYNC_LOST`를 `fsm_post_event()`로 올리는 것 외에는 최상위 FSM과 독립적으로 계속 동작한다.
+- 코드: [`main/fsm.h`](../main/fsm.h), [`main/fsm.c`](../main/fsm.c) — 테이블 기반 상태기계, FreeRTOS 큐로 이벤트 수신. **이 파일은 애플리케이션 동작 모드만 다루며, FHSS 홉 타이밍 보정 자체는 구현하지 않는다.**
+- FHSS 홉 타이밍 보정(주파수 인덱스 증가, 매 수신 패킷 검증 성공 시 슬롯 타이머 재정렬)은 팀5가 nRF24L01 수신 드라이버/태스크 안에 구현한다. 별도의 프리러닝 타이머 태스크가 아니라 **수신 이벤트 처리 로직에 내장**되며, 연속 N회 수신 실패로 동기를 완전히 잃었을 때만 `FSM_EVENT_SYNC_LOST`를, 재획득에 성공하면 `FSM_EVENT_SYNC_ACQUIRED`를 `fsm_post_event()`로 올린다. 정상적인 매 수신 성공은 FSM에 이벤트로 올라오지 않는다(암묵적으로 동기가 유지되고 있다는 뜻).
 - 각 모듈(PTT 버튼 태스크, nRF24L01 수신 태스크, CC1101 수신 태스크, FHSS 동기 로직)은 하드웨어 이벤트 발생 시 `fsm_post_event()`만 호출하고, 실제 상태 전이/부수효과는 FSM 태스크 하나에서만 처리한다 (경쟁 상태 방지).
 - 상태 진입/이탈 시 수행할 하드웨어 동작(마이크 시작/정지, OLED 상태 표시 등)은 `fsm.c`의 `on_enter_*` 스텁에 각 담당 팀이 채워 넣는다.
