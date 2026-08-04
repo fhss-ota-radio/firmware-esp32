@@ -1,9 +1,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
 #include "esp_err.h"
 #include "esp_image_format.h"
 #include "esp_log.h"
@@ -15,6 +18,24 @@
 static const char *TAG = "ota_practice";
 
 #define OTA_COPY_CHUNK_SIZE 4096
+
+static void configure_usb_console_input(void)
+{
+    usb_serial_jtag_vfs_set_rx_line_endings(ESP_LINE_ENDINGS_CR);
+    usb_serial_jtag_vfs_set_tx_line_endings(ESP_LINE_ENDINGS_CRLF);
+
+    usb_serial_jtag_driver_config_t config = {
+        .tx_buffer_size = 256,
+        .rx_buffer_size = 256,
+    };
+
+    ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&config));
+    usb_serial_jtag_vfs_use_driver();
+
+    fcntl(fileno(stdin), F_SETFL, 0);
+    fcntl(fileno(stdout), F_SETFL, 0);
+    setvbuf(stdin, NULL, _IONBF, 0);
+}
 
 static void print_flash_size(void)
 {
@@ -208,6 +229,7 @@ static void console_task(void *arg)
 
 void app_main(void)
 {
+    configure_usb_console_input();
     print_flash_size();
     print_partition_info();
     xTaskCreate(console_task, "ota_console", 4096, NULL, 5, NULL);
