@@ -32,9 +32,7 @@ static void configure_usb_console_input(void)
     ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&config));
     usb_serial_jtag_vfs_use_driver();
 
-    fcntl(fileno(stdin), F_SETFL, 0);
     fcntl(fileno(stdout), F_SETFL, 0);
-    setvbuf(stdin, NULL, _IONBF, 0);
 }
 
 static void print_flash_size(void)
@@ -190,16 +188,55 @@ cleanup:
     return err;
 }
 
+static void read_usb_command(char *command, size_t capacity)
+{
+    size_t length = 0;
+
+    while (true) {
+        uint8_t character;
+        int received = usb_serial_jtag_read_bytes(&character, 1, portMAX_DELAY);
+
+        if (received <= 0) {
+            continue;
+        }
+
+        if (character == '\r' || character == '\n') {
+            if (length == 0) {
+                continue;
+            }
+            command[length] = '\0';
+            printf("\r\n");
+            fflush(stdout);
+            return;
+        }
+
+        if (character == '\b' || character == 0x7f) {
+            if (length > 0) {
+                length--;
+                printf("\b \b");
+                fflush(stdout);
+            }
+            continue;
+        }
+
+        if (character >= 0x20 && character <= 0x7e && length + 1 < capacity) {
+            command[length++] = (char)character;
+            putchar(character);
+            fflush(stdout);
+        }
+    }
+}
+
 static void console_task(void *arg)
 {
     char command[32];
 
     printf("\nOTA practice commands: info, ota, confirm, rollback, help\n");
-    printf("> ");
-    fflush(stdout);
 
-    while (fgets(command, sizeof(command), stdin) != NULL) {
-        command[strcspn(command, "\r\n")] = '\0';
+    while (true) {
+        printf("> ");
+        fflush(stdout);
+        read_usb_command(command, sizeof(command));
 
         if (strcmp(command, "info") == 0) {
             print_partition_info();
@@ -219,12 +256,7 @@ static void console_task(void *arg)
         } else if (command[0] != '\0') {
             printf("Unknown command: %s (type 'help')\n", command);
         }
-
-        printf("> ");
-        fflush(stdout);
     }
-
-    vTaskDelete(NULL);
 }
 
 void app_main(void)
