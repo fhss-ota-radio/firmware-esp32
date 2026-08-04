@@ -45,10 +45,13 @@ static const char *s_event_names[FSM_EVENT_COUNT] = {
  * 상태별 전이. 전역 전이(EV_ERROR, EV_SYNC_LOST)는 fsm_task()에서 별도 처리하므로 여기 넣지 않는다.
  *
  * 주의: 이 표에는 FHSS 홉 타이밍 보정이 없다 — 그것은 이 FSM의 상태가 아니라
- * nRF24L01 수신 드라이버(팀5)가 매 패킷 검증 성공 시 그 자리에서 홉 타이머를
+ * CC1101 수신 드라이버(팀5)가 매 패킷 검증 성공 시 그 자리에서 홉 타이머를
  * 보정하는 이벤트 기반 로직이다. 정상 수신은 이벤트로 올라오지 않고, 연속
  * 수신 실패로 완전 동기 상실이 판정될 때만 EV_SYNC_LOST가 올라온다. 이 FSM은
  * 그 결과인 EV_SYNC_ACQUIRED / EV_SYNC_LOST 두 이벤트만 소비한다.
+ *
+ * 음성(FHSS)과 OTA는 같은 CC1101 라디오를 쓰는 단일 반이중 트랜시버이므로,
+ * OTA_START로 인한 TX_AUDIO/RX_AUDIO 강제 종료는 정책이 아니라 하드웨어 제약이다.
  */
 typedef struct {
     fsm_state_t state;
@@ -80,7 +83,7 @@ static const fsm_transition_t s_transitions[] = {
 };
 
 /* 상태별 진입 동작. 실제 하드웨어 제어는 각 담당(TODO)이 채운다. */
-static void on_enter_boot_init(void)     { /* TODO(팀1/2): I2S, OLED, SPI(nRF24L01/CC1101), PTT GPIO 초기화 */ }
+static void on_enter_boot_init(void)     { /* TODO(팀1/2): I2S, OLED, SPI(CC1101), PTT GPIO 초기화 */ }
 static void on_enter_fhss_sync(void)     { /* TODO(팀5): 호핑 시퀀스 동기화 시작 */ }
 static void on_enter_idle(void)          { /* TODO(팀1): OLED "대기" 표시 */ }
 static void on_enter_tx_audio(void)      { /* TODO(팀1/2): 마이크 캡처 + Opus 인코딩 시작 */ }
