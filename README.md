@@ -36,14 +36,19 @@ firmware-esp32/
 └── docs/
 ```
 
-## 현재 구현 현황 (`develop`)
+## 현재 구현 현황 (`feature/oled_display_i2c_component`)
 - [x] `components/audio_codec/` — Speex 코덱 컴포넌트
   - `speex/` — xiph/speex 원본 (git submodule, pristine 유지)
   - `CMakeLists.txt` — ESP-IDF 빌드용 래퍼 (협대역 전용 소스만 선별)
   - `audio_codec.h` / `audio_codec.c` — encode/decode 얇은 래퍼
 - [x] `main/fsm.c` / `main/fsm.h` — 단말 전체 통합 FSM (설계는 [docs/fsm-design.md](fhss-ota-radio/docs/fsm-design.md) 참고), `main.c`에서 `fsm_init()`으로 wiring
-- [ ] audio_codec은 아직 FSM/오디오 파이프라인에 연결되지 않음 (컴포넌트만 빌드되는 상태)
-- [ ] I2S 마이크/스피커, PTT, OLED, FHSS 호핑, CC1101 OTA 등 나머지 기능은 아직 미구현 — `components/{audio_io, display_ui, ota_client, fhss_core, rf_transport}`는 목표 구조일 뿐 아직 생성 전
+- [x] `components/display_ui/` — 0.96" I2C OLED(SSD1306, 128x64) 상태 표시 컴포넌트
+  - `display_ui_config.h` — I2C 핀(SDA/SCL, placeholder)·주소·해상도 매크로 (배선 확정 시 이 파일만 수정)
+  - `display_ui.h` / `display_ui.c` — `driver/i2c_master.h`(ESP-IDF v5.2+ 신규 API) 기반 SSD1306 드라이버
+  - `font8x8_basic.h` — 공개도메인 8x8 비트맵 폰트 ([dhepper/font8x8](https://github.com/dhepper/font8x8) 원본과 바이트 단위 대조 검증)
+  - 공개 API: `display_ui_init()`, `display_ui_clear()`, `oled_update_text(row, text)`, `oled_update_text_fmt(row, fmt, ...)`
+- [ ] audio_codec / display_ui 모두 아직 FSM/실제 앱 로직에 연결되지 않음 (컴포넌트만 빌드되는 상태, `main.c`는 손대지 않음)
+- [ ] I2S 마이크/스피커, PTT, FHSS 호핑, CC1101 OTA 등 나머지 기능은 아직 미구현 — `components/{audio_io, ota_client, fhss_core, rf_transport}`는 목표 구조일 뿐 아직 생성 전
 
 ## 담당
 팀원1 (오디오/OLED), 팀원2 (OTA/부트로더), 팀원5 (FHSS)
