@@ -1,5 +1,5 @@
-# components/speex(서브모듈, xiph/speex 원본, pristine 유지)를
-# ESP-IDF 컴포넌트로 빌드하기 위한 래퍼.
+# audio_codec 컴포넌트: audio_codec.h/.c(encode/decode 래퍼) + speex(서브모듈,
+# xiph/speex 원본, pristine 유지)를 ESP-IDF용으로 함께 빌드한다.
 #
 # 서브모듈 안에는 이 CMakeLists.txt를 두지 않는다 — 서브모듈 워킹트리에 파일을
 # 추가해도 부모 레포는 그 파일을 추적하지 못하므로(서브모듈은 커밋 SHA만 기록),
@@ -10,10 +10,11 @@
 # Ogg 스타일 헤더(speex_header, 우리는 프레임을 직접 RF로 실어 나르므로 불필요)는
 # 제외했다. 필요해지면 이 목록에 추가하면 된다.
 
-set(SPEEX_DIR "${CMAKE_CURRENT_LIST_DIR}/../speex")
+set(SPEEX_DIR "${CMAKE_CURRENT_LIST_DIR}/speex")
 
 idf_component_register(
     SRCS
+        "audio_codec.c"
         "${SPEEX_DIR}/libspeex/bits.c"
         "${SPEEX_DIR}/libspeex/cb_search.c"
         "${SPEEX_DIR}/libspeex/exc_10_16_table.c"
@@ -39,6 +40,7 @@ idf_component_register(
         "${SPEEX_DIR}/libspeex/vq.c"
         "${SPEEX_DIR}/libspeex/window.c"
     INCLUDE_DIRS
+        "."                       # audio_codec.h (이 컴포넌트를 REQUIRES하는 쪽에 공개)
         "${SPEEX_DIR}/include"    # 공개 헤더: speex/speex.h, speex/speex_bits.h ...
         "generated"               # speex_config_types.h (autotools 생성물 대체)
     PRIV_INCLUDE_DIRS
@@ -52,7 +54,7 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE
     EXPORT=
 )
 
-# 서드파티 코드라 경고를 프로젝트 전체 -Werror 정책에 종속시키지 않는다.
+# 서드파티 코드(speex)라 경고를 프로젝트 전체 -Werror 정책에 종속시키지 않는다.
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wno-unused-but-set-variable
     -Wno-unused-variable
