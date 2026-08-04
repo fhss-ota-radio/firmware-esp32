@@ -2,6 +2,20 @@
 
 ESP32-S3 기반 무전기 단말 펌웨어. FHSS 음성 통신 + RF OTA 수신 담당.
 
+## ⚠️ 빌드 전 준비 (필독)
+
+`components/audio_codec/speex`는 git submodule(xiph/speex 원본)이라 **일반 clone만으로는 비어있습니다.** 빌드 전에 반드시 아래 중 하나를 실행하세요.
+
+```bash
+# 처음 clone할 때
+git clone --recurse-submodules <repo-url>
+
+# 이미 clone한 경우
+git submodule update --init --recursive
+```
+
+이 폴더는 실제 소스가 아니라 "xiph/speex의 어느 커밋을 쓸지" 가리키는 포인터만 저장소에 커밋돼 있는 구조라, 각자 clone한 뒤 한 번씩 위 명령을 실행해야 합니다 (누가 먼저 실행했는지와 무관하게 매 clone마다 필요).
+
 ## 핵심 기능
 - I2S 마이크/스피커 입출력, PTT 제어
 - Speex Narrowband(8kHz) 음성 압축/해제
@@ -22,13 +36,14 @@ firmware-esp32/
 └── docs/
 ```
 
-## 현재 브랜치 구현 현황 (`feature/impl-speex-on-esp`)
+## 현재 구현 현황 (`develop`)
 - [x] `components/audio_codec/` — Speex 코덱 컴포넌트
   - `speex/` — xiph/speex 원본 (git submodule, pristine 유지)
   - `CMakeLists.txt` — ESP-IDF 빌드용 래퍼 (협대역 전용 소스만 선별)
   - `audio_codec.h` / `audio_codec.c` — encode/decode 얇은 래퍼
-- [ ] `main.c`는 아직 스켈레톤 상태(wiring 없음) — audio_codec은 컴포넌트로만 빌드되고 아직 연결되지 않았다
-- [ ] I2S 마이크/스피커, PTT, OLED, FHSS 호핑, CC1101 OTA 등 나머지 기능은 아직 미구현
+- [x] `main/fsm.c` / `main/fsm.h` — 단말 전체 통합 FSM (설계는 [docs/fsm-design.md](fhss-ota-radio/docs/fsm-design.md) 참고), `main.c`에서 `fsm_init()`으로 wiring
+- [ ] audio_codec은 아직 FSM/오디오 파이프라인에 연결되지 않음 (컴포넌트만 빌드되는 상태)
+- [ ] I2S 마이크/스피커, PTT, OLED, FHSS 호핑, CC1101 OTA 등 나머지 기능은 아직 미구현 — `components/{audio_io, display_ui, ota_client, fhss_core, rf_transport}`는 목표 구조일 뿐 아직 생성 전
 
 ## 담당
 팀원1 (오디오/OLED), 팀원2 (OTA/부트로더), 팀원5 (FHSS)
