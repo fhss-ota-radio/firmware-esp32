@@ -1,0 +1,68 @@
+#pragma once
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* 상태/이벤트 정의 및 전이표는 docs/fsm-design.md 참고 */
+
+/*
+ * FSM_STATE_FHSS_SYNC는 홉 동기 "획득/재획득" 전용 상태다 (최초 부팅 또는
+ * 연속 수신 실패로 동기를 완전히 잃었을 때만 진입). 동기가 잡힌 뒤의 타이밍
+ * 유지는 별도 태스크가 계속 도는 방식이 아니라, CC1101 수신 드라이버가
+ * 매 패킷 검증 성공 시 그 자리에서 홉 타이머를 보정하는 이벤트 기반 방식이다
+ * (팀5 담당). 정상 수신은 FSM에 이벤트로 올라오지 않으며, 연속 N회 검증
+ * 실패로 완전 동기 상실이 판정될 때만 FSM_EVENT_SYNC_LOST가 올라온다.
+ *
+ * 음성(FHSS)과 OTA는 같은 CC1101 라디오를 공유한다(단일 반이중 트랜시버).
+ * OTA_RECEIVING 동안은 CC1101이 의도적으로 음성 호핑을 이탈하므로, 그 사이의
+ * 미수신은 동기 상실로 세지 않는다.
+ * 자세한 내용은 docs/fsm-design.md §1.1 참고.
+ */
+typedef enum {
+    FSM_STATE_BOOT_INIT = 0,
+    FSM_STATE_FHSS_SYNC,
+    FSM_STATE_IDLE,
+    FSM_STATE_TX_AUDIO,
+    FSM_STATE_RX_AUDIO,
+    FSM_STATE_OTA_RECEIVING,
+    FSM_STATE_OTA_APPLYING,
+    FSM_STATE_ERROR,
+    FSM_STATE_COUNT,
+} fsm_state_t;
+
+typedef enum {
+    FSM_EVENT_INIT_DONE = 0,
+    FSM_EVENT_SYNC_ACQUIRED,
+    FSM_EVENT_SYNC_LOST,
+    FSM_EVENT_PTT_PRESS,
+    FSM_EVENT_PTT_RELEASE,
+    FSM_EVENT_RX_FRAME,
+    FSM_EVENT_RX_DONE,
+    FSM_EVENT_OTA_START,
+    FSM_EVENT_OTA_CHUNK,
+    FSM_EVENT_OTA_COMPLETE,
+    FSM_EVENT_OTA_VERIFY_OK,
+    FSM_EVENT_OTA_VERIFY_FAIL,
+    FSM_EVENT_ERROR,
+    FSM_EVENT_RETRY,
+    FSM_EVENT_COUNT,
+} fsm_event_t;
+
+/* FSM 태스크와 이벤트 큐를 생성한다. app_main()에서 한 번 호출. */
+void fsm_init(void);
+
+/* 다른 태스크/ISR에서 이벤트를 큐에 넣는다 (ISR에서는 안전하지 않음, 디퍼드 처리 필요). */
+void fsm_post_event(fsm_event_t event);
+
+/* 현재 상태 조회 (디버그/OLED 표시용). */
+fsm_state_t fsm_get_state(void);
+
+const char *fsm_state_name(fsm_state_t state);
+const char *fsm_event_name(fsm_event_t event);
+
+#ifdef __cplusplus
+}
+#endif
