@@ -1,0 +1,3 @@
+[submodule "fhss-ota-radio/components/speex"]
+	path = fhss-ota-radio/components/audio_codec/speex
+	url = https://github.com/xiph/speex.git
