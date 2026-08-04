@@ -1,5 +1,6 @@
 # Editor / IDE (머신별 절대경로 포함 - VSCode ESP-IDF 확장이 idf.currentSetup, clangd.path 등을 여기 저장함)
 .vscode/
+.claude/
 
 # macOS
 .DS_Store

@@ -16,7 +16,8 @@ static fsm_state_t s_state = FSM_STATE_BOOT_INIT;
 static const char *s_state_names[FSM_STATE_COUNT] = {
     [FSM_STATE_BOOT_INIT]     = "BOOT_INIT",
     [FSM_STATE_FHSS_SYNC]     = "FHSS_SYNC",
-    [FSM_STATE_IDLE]          = "IDLE",
+    [FSM_STATE_MENU_IDLE]     = "MENU_IDLE",
+    [FSM_STATE_MENU_OTA]      = "MENU_OTA",
     [FSM_STATE_TX_AUDIO]      = "TX_AUDIO",
     [FSM_STATE_RX_AUDIO]      = "RX_AUDIO",
     [FSM_STATE_OTA_RECEIVING] = "OTA_RECEIVING",
@@ -28,6 +29,8 @@ static const char *s_event_names[FSM_EVENT_COUNT] = {
     [FSM_EVENT_INIT_DONE]      = "INIT_DONE",
     [FSM_EVENT_SYNC_ACQUIRED]  = "SYNC_ACQUIRED",
     [FSM_EVENT_SYNC_LOST]      = "SYNC_LOST",
+    [FSM_EVENT_MENU_SELECT_IDLE] = "MENU_SELECT_IDLE",
+    [FSM_EVENT_MENU_SELECT_OTA]  = "MENU_SELECT_OTA",
     [FSM_EVENT_PTT_PRESS]      = "PTT_PRESS",
     [FSM_EVENT_PTT_RELEASE]    = "PTT_RELEASE",
     [FSM_EVENT_RX_FRAME]       = "RX_FRAME",
@@ -51,7 +54,14 @@ static const char *s_event_names[FSM_EVENT_COUNT] = {
  * 그 결과인 EV_SYNC_ACQUIRED / EV_SYNC_LOST 두 이벤트만 소비한다.
  *
  * 음성(FHSS)과 OTA는 같은 CC1101 라디오를 쓰는 단일 반이중 트랜시버이므로,
- * OTA_START로 인한 TX_AUDIO/RX_AUDIO 강제 종료는 정책이 아니라 하드웨어 제약이다.
+ * OTA_RECEIVING 진입 시 음성 호핑 이탈은 정책이 아니라 하드웨어 제약이다.
+ *
+ * MENU_IDLE/MENU_OTA는 수신 패킷 해석을 게이팅하는 메뉴 모드다. 메뉴 전환
+ * 이벤트(MENU_SELECT_IDLE/OTA)는 이 둘 사이에서만 정의돼있고 TX_AUDIO/
+ * RX_AUDIO/OTA_RECEIVING/OTA_APPLYING에는 없다 — 그 상태에서 메뉴 전환
+ * 이벤트가 오면 unhandled로 무시되며, 이게 곧 "활동 중 메뉴 변경 불가"의
+ * 구현이다. 같은 이유로 OTA_START는 MENU_OTA에서만 유효해서, 음성 통화
+ * 중(TX_AUDIO/RX_AUDIO)에는 OTA가 끼어들 수 없다.
  */
 typedef struct {
     fsm_state_t state;
@@ -61,31 +71,33 @@ typedef struct {
 
 static const fsm_transition_t s_transitions[] = {
     { FSM_STATE_BOOT_INIT,     FSM_EVENT_INIT_DONE,      FSM_STATE_FHSS_SYNC },
-    { FSM_STATE_FHSS_SYNC,     FSM_EVENT_SYNC_ACQUIRED,  FSM_STATE_IDLE },
+    { FSM_STATE_FHSS_SYNC,     FSM_EVENT_SYNC_ACQUIRED,  FSM_STATE_MENU_IDLE },
 
-    { FSM_STATE_IDLE,          FSM_EVENT_PTT_PRESS,      FSM_STATE_TX_AUDIO },
-    { FSM_STATE_IDLE,          FSM_EVENT_RX_FRAME,       FSM_STATE_RX_AUDIO },
-    { FSM_STATE_IDLE,          FSM_EVENT_OTA_START,      FSM_STATE_OTA_RECEIVING },
+    { FSM_STATE_MENU_IDLE,     FSM_EVENT_PTT_PRESS,      FSM_STATE_TX_AUDIO },
+    { FSM_STATE_MENU_IDLE,     FSM_EVENT_RX_FRAME,       FSM_STATE_RX_AUDIO },
+    { FSM_STATE_MENU_IDLE,     FSM_EVENT_MENU_SELECT_OTA, FSM_STATE_MENU_OTA },
 
-    { FSM_STATE_TX_AUDIO,      FSM_EVENT_PTT_RELEASE,    FSM_STATE_IDLE },
-    { FSM_STATE_TX_AUDIO,      FSM_EVENT_OTA_START,      FSM_STATE_OTA_RECEIVING },
+    { FSM_STATE_MENU_OTA,      FSM_EVENT_MENU_SELECT_IDLE, FSM_STATE_MENU_IDLE },
+    { FSM_STATE_MENU_OTA,      FSM_EVENT_OTA_START,      FSM_STATE_OTA_RECEIVING },
 
-    { FSM_STATE_RX_AUDIO,      FSM_EVENT_RX_DONE,        FSM_STATE_IDLE },
-    { FSM_STATE_RX_AUDIO,      FSM_EVENT_OTA_START,      FSM_STATE_OTA_RECEIVING },
+    { FSM_STATE_TX_AUDIO,      FSM_EVENT_PTT_RELEASE,    FSM_STATE_MENU_IDLE },
+
+    { FSM_STATE_RX_AUDIO,      FSM_EVENT_RX_DONE,        FSM_STATE_MENU_IDLE },
 
     { FSM_STATE_OTA_RECEIVING, FSM_EVENT_OTA_CHUNK,      FSM_STATE_OTA_RECEIVING },
     { FSM_STATE_OTA_RECEIVING, FSM_EVENT_OTA_COMPLETE,   FSM_STATE_OTA_APPLYING },
 
     { FSM_STATE_OTA_APPLYING,  FSM_EVENT_OTA_VERIFY_OK,   FSM_STATE_BOOT_INIT },
-    { FSM_STATE_OTA_APPLYING,  FSM_EVENT_OTA_VERIFY_FAIL, FSM_STATE_IDLE },
+    { FSM_STATE_OTA_APPLYING,  FSM_EVENT_OTA_VERIFY_FAIL, FSM_STATE_MENU_OTA },
 
     { FSM_STATE_ERROR,         FSM_EVENT_RETRY,          FSM_STATE_BOOT_INIT },
 };
 
 /* 상태별 진입 동작. 실제 하드웨어 제어는 각 담당(TODO)이 채운다. */
-static void on_enter_boot_init(void)     { /* TODO(팀1/2): I2S, OLED, SPI(CC1101), PTT GPIO 초기화 */ }
+static void on_enter_boot_init(void)     { /* TODO(팀1/2): I2S, OLED, 로터리 엔코더, SPI(CC1101), PTT GPIO 초기화 */ }
 static void on_enter_fhss_sync(void)     { /* TODO(팀5): 호핑 시퀀스 동기화 시작 */ }
-static void on_enter_idle(void)          { /* TODO(팀1): OLED "대기" 표시 */ }
+static void on_enter_menu_idle(void)     { /* TODO(팀1): OLED "IDLE(음성)" 메뉴 표시 */ }
+static void on_enter_menu_ota(void)      { /* TODO(팀1/2): OLED "OTA 대기" 메뉴 표시, CC1101 OTA 채널 리스닝 준비 */ }
 static void on_enter_tx_audio(void)      { /* TODO(팀1/2): 마이크 캡처 + Opus 인코딩 시작 */ }
 static void on_enter_rx_audio(void)      { /* TODO(팀1/2): Opus 디코딩 + 스피커 재생 시작 */ }
 static void on_enter_ota_receiving(void) { /* TODO(팀2): OTA 수신 버퍼 초기화, 음성 태스크 일시 중단 */ }
@@ -95,7 +107,8 @@ static void on_enter_error(void)         { /* TODO(팀1/PM): 오류 로깅, 안�
 static void (*const s_enter_actions[FSM_STATE_COUNT])(void) = {
     [FSM_STATE_BOOT_INIT]     = on_enter_boot_init,
     [FSM_STATE_FHSS_SYNC]     = on_enter_fhss_sync,
-    [FSM_STATE_IDLE]          = on_enter_idle,
+    [FSM_STATE_MENU_IDLE]     = on_enter_menu_idle,
+    [FSM_STATE_MENU_OTA]      = on_enter_menu_ota,
     [FSM_STATE_TX_AUDIO]      = on_enter_tx_audio,
     [FSM_STATE_RX_AUDIO]      = on_enter_rx_audio,
     [FSM_STATE_OTA_RECEIVING] = on_enter_ota_receiving,

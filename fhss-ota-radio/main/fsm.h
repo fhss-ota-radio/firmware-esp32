@@ -19,12 +19,20 @@ extern "C" {
  * 음성(FHSS)과 OTA는 같은 CC1101 라디오를 공유한다(단일 반이중 트랜시버).
  * OTA_RECEIVING 동안은 CC1101이 의도적으로 음성 호핑을 이탈하므로, 그 사이의
  * 미수신은 동기 상실로 세지 않는다.
- * 자세한 내용은 docs/fsm-design.md §1.1 참고.
+ *
+ * FSM_STATE_MENU_IDLE(음성, 기본)과 FSM_STATE_MENU_OTA(OTA 대기)는 수신 패킷의
+ * 해석 자체를 게이팅한다 — MENU_IDLE에서 받은 패킷은 음성, MENU_OTA에서 받은
+ * 패킷은 펌웨어 청크로 간주한다. 메뉴 전환(FSM_EVENT_MENU_SELECT_IDLE/OTA)은
+ * 로터리 엔코더 클릭으로만 발생하며, 이 두 메뉴 상태 사이에서만 정의되어 있어
+ * TX_AUDIO/RX_AUDIO/OTA_RECEIVING/OTA_APPLYING 중에는 전이가 없다 = 메뉴 변경 불가.
+ * 회전(커서 이동)은 FSM 이벤트가 아니라 display_ui 로컬 상태다.
+ * 자세한 내용은 docs/fsm-design.md §1, §1.1 참고.
  */
 typedef enum {
     FSM_STATE_BOOT_INIT = 0,
     FSM_STATE_FHSS_SYNC,
-    FSM_STATE_IDLE,
+    FSM_STATE_MENU_IDLE,
+    FSM_STATE_MENU_OTA,
     FSM_STATE_TX_AUDIO,
     FSM_STATE_RX_AUDIO,
     FSM_STATE_OTA_RECEIVING,
@@ -37,6 +45,8 @@ typedef enum {
     FSM_EVENT_INIT_DONE = 0,
     FSM_EVENT_SYNC_ACQUIRED,
     FSM_EVENT_SYNC_LOST,
+    FSM_EVENT_MENU_SELECT_IDLE,
+    FSM_EVENT_MENU_SELECT_OTA,
     FSM_EVENT_PTT_PRESS,
     FSM_EVENT_PTT_RELEASE,
     FSM_EVENT_RX_FRAME,
