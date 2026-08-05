@@ -38,7 +38,7 @@ firmware-esp32/
 └── docs/
 ```
 
-## 현재 구현 현황 (`feature/ptt-button`)
+## 현재 구현 현황 (`feature/rotary-encoder(menu-selector)`)
 - [x] `components/audio_codec/` — Speex 코덱 컴포넌트
   - `speex/` — xiph/speex 원본 (git submodule, pristine 유지)
   - `CMakeLists.txt` — ESP-IDF 빌드용 래퍼 (협대역 전용 소스만 선별)
@@ -55,8 +55,11 @@ firmware-esp32/
   - `ptt_button_config.h` — 핀(placeholder)/active level/디바운스 파라미터
   - `ptt_button.h` / `ptt_button.c` — 폴링 기반 디바운스(ISR 미사용), 콜백/폴링 API 제공
   - 공개 API: `ptt_button_init()`, `ptt_button_set_callback(cb, ctx)`, `ptt_button_is_pressed()`
-- [ ] audio_codec / display_ui / ptt_button 모두 아직 FSM/실제 앱 로직에 연결되지 않음 (컴포넌트만 빌드되는 상태, `main.c`는 손대지 않음) — ptt_button 콜백에서 `fsm_post_event(EV_PTT_PRESS/RELEASE)` 호출하는 배선은 TODO
-- [ ] 로터리 엔코더(`components/rotary_encoder`, 메뉴 선택용) 컴포넌트는 아직 생성 전 — `fsm.h`/`fsm.c`에 이벤트/전이만 먼저 반영된 상태
+- [x] `components/rotary_encoder/` — 메뉴 선택용 로터리 엔코더(A/B/SW) 컴포넌트
+  - `rotary_encoder_config.h` — 핀(A/B/SW, placeholder)/디바운스/detent 파라미터
+  - `rotary_encoder.h` / `rotary_encoder.c` — quadrature 폴링 디코딩 + SW 디바운스, 커서 이동은 순환(`MENU_IDLE ↔ MENU_OTA`)
+  - 공개 API: `rotary_encoder_init()`, `rotary_encoder_set_cursor_callback()`, `rotary_encoder_set_select_callback()`, `rotary_encoder_get_cursor()`
+- [ ] audio_codec / display_ui / ptt_button / rotary_encoder 모두 아직 FSM/실제 앱 로직에 연결되지 않음 (컴포넌트만 빌드되는 상태, `main.c`는 손대지 않음) — 각 컴포넌트 콜백에서 해당 `fsm_post_event()` 호출하는 배선은 TODO
 - [ ] I2S 마이크/스피커, FHSS 호핑, CC1101 OTA 등 나머지 기능은 아직 미구현 — `components/{audio_io, ota_client, fhss_core, rf_transport}`는 목표 구조일 뿐 아직 생성 전
 
 ## 담당
