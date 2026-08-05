@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "source/ota_client.c"
+        "source/ota_writer.c"
+    INCLUDE_DIRS
+        "include"
+    PRIV_INCLUDE_DIRS
+        "source"
+    PRIV_REQUIRES
+        app_update
+        esp_partition
+)
