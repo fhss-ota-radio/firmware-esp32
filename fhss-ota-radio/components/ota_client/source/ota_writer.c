@@ -70,3 +70,42 @@ esp_err_t ota_writer_write(
 
     return ESP_OK;
 }
+
+esp_err_t ota_writer_finish(
+    ota_writer_t *writer
+)
+{
+    if (writer == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!writer->active || writer->partition == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (writer->written_size != writer->image_size) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    esp_err_t err = esp_ota_end(writer->handle);
+
+    /*
+     * esp_ota_end() 호출 후에는 성공 여부와 관계없이
+     * handle이 더 이상 유효하지 않다.
+     */
+    writer->handle = 0;
+    writer->active = false;
+
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = esp_ota_set_boot_partition(writer->partition);
+
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    return ESP_OK;
+}
+
