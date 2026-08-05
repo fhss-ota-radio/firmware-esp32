@@ -1,1 +1,40 @@
 #include "ota_writer.h"
+
+esp_err_t ota_writer_begin(
+    ota_writer_t *writer,
+    size_t image_size
+)
+{
+    if (writer == NULL || image_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (writer->active) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
+    if (update_partition == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    if (image_size > update_partition->size) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    
+    
+    esp_ota_handle_t handle = 0; // 값 변경될 위험 있으므로 새 변수에 
+    esp_err_t err = esp_ota_begin(update_partition, image_size, &handle);
+    
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    writer->partition = update_partition;
+    writer->handle = handle;
+    writer->image_size = image_size;
+    writer->written_size = 0;
+    writer->active = true;
+
+    return ESP_OK;
+
+}
