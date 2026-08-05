@@ -21,7 +21,6 @@ esp_err_t ota_writer_begin(
         return ESP_ERR_INVALID_SIZE;
     }
     
-    
     esp_ota_handle_t handle = 0; // 값 변경될 위험 있으므로 새 변수에 
     esp_err_t err = esp_ota_begin(update_partition, image_size, &handle);
     
@@ -36,5 +35,38 @@ esp_err_t ota_writer_begin(
     writer->active = true;
 
     return ESP_OK;
+}
 
+esp_err_t ota_writer_write(
+    ota_writer_t *writer,
+    const void *data,
+    size_t data_size
+)
+{
+    if (writer == NULL || data == NULL || data_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!writer->active) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (writer->written_size > writer->image_size ||
+        data_size > writer->image_size - writer->written_size) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    esp_err_t err = esp_ota_write(
+        writer->handle,
+        data,
+        data_size
+    );
+
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    writer->written_size += data_size;
+
+    return ESP_OK;
 }
