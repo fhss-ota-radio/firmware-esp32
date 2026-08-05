@@ -7,6 +7,10 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 
+#include "display_ui.h"
+#include "ptt_button.h"
+#include "rotary_encoder.h"
+
 static const char *TAG = "fsm";
 
 static QueueHandle_t s_event_queue;
@@ -93,11 +97,50 @@ static const fsm_transition_t s_transitions[] = {
     { FSM_STATE_ERROR,         FSM_EVENT_RETRY,          FSM_STATE_BOOT_INIT },
 };
 
+/*
+ * UI 컴포넌트(display_ui/ptt_button/rotary_encoder) 콜백 — 각 컴포넌트는 FSM을
+ * 모르므로, 이 콜백들이 fsm_post_event()로 매핑하는 접착부 역할을 한다.
+ * audio_io/rf_transport 등 아직 없는 컴포넌트에 걸린 전이(TX_AUDIO 진입 시
+ * 마이크 캡처 등)는 그대로 TODO로 남겨둔다 — 지금 여기서 채우면 실제 API가
+ * 없는 상태라 추측성 코드가 되고, 나중에 다시 갈아엎어야 한다.
+ */
+static void on_ptt_event(bool pressed, void *ctx)
+{
+    fsm_post_event(pressed ? FSM_EVENT_PTT_PRESS : FSM_EVENT_PTT_RELEASE);
+}
+
+static void on_menu_select(rotary_encoder_menu_t selected, void *ctx)
+{
+    fsm_post_event(selected == ROTARY_ENCODER_MENU_OTA
+                       ? FSM_EVENT_MENU_SELECT_OTA
+                       : FSM_EVENT_MENU_SELECT_IDLE);
+}
+
+/* 로터리 회전만으로는 FSM 이벤트가 없다 (docs/fsm-design.md §메뉴 게이팅) —
+ * 클릭으로 확정하기 전까지는 화면에 미리보기 하이라이트만 갱신한다. */
+static void on_menu_cursor(rotary_encoder_menu_t cursor, void *ctx)
+{
+    /* TODO(팀1): 실제 메뉴 UI 레이아웃은 display_ui 담당자가 다듬을 것 (지금은 1줄짜리 placeholder) */
+    oled_update_text(1, cursor == ROTARY_ENCODER_MENU_OTA ? "> OTA" : "> IDLE");
+}
+
 /* 상태별 진입 동작. 실제 하드웨어 제어는 각 담당(TODO)이 채운다. */
-static void on_enter_boot_init(void)     { /* TODO(팀1/2): I2S, OLED, 로터리 엔코더, SPI(CC1101), PTT GPIO 초기화 */ }
+static void on_enter_boot_init(void)
+{
+    display_ui_init();
+
+    ptt_button_init();
+    ptt_button_set_callback(on_ptt_event, NULL);
+
+    rotary_encoder_init();
+    rotary_encoder_set_select_callback(on_menu_select, NULL);
+    rotary_encoder_set_cursor_callback(on_menu_cursor, NULL);
+
+    /* TODO(팀1/2): I2S(audio_io), SPI(rf_transport/CC1101) 초기화 — 해당 컴포넌트 생기면 추가 */
+}
 static void on_enter_fhss_sync(void)     { /* TODO(팀5): 호핑 시퀀스 동기화 시작 */ }
-static void on_enter_menu_idle(void)     { /* TODO(팀1): OLED "IDLE(음성)" 메뉴 표시 */ }
-static void on_enter_menu_ota(void)      { /* TODO(팀1/2): OLED "OTA 대기" 메뉴 표시, CC1101 OTA 채널 리스닝 준비 */ }
+static void on_enter_menu_idle(void)     { oled_update_text(0, "MODE: IDLE"); }
+static void on_enter_menu_ota(void)      { oled_update_text(0, "MODE: OTA"); /* TODO(팀2): CC1101 OTA 채널 리스닝 준비 */ }
 static void on_enter_tx_audio(void)      { /* TODO(팀1/2): 마이크 캡처 + Opus 인코딩 시작 */ }
 static void on_enter_rx_audio(void)      { /* TODO(팀1/2): Opus 디코딩 + 스피커 재생 시작 */ }
 static void on_enter_ota_receiving(void) { /* TODO(팀2): OTA 수신 버퍼 초기화, 음성 태스크 일시 중단 */ }
