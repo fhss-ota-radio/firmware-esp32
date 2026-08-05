@@ -109,3 +109,28 @@ esp_err_t ota_writer_finish(
     return ESP_OK;
 }
 
+esp_err_t ota_writer_abort(
+    ota_writer_t *writer
+)
+{
+    if (writer == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!writer->active) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t err = esp_ota_abort(writer->handle);
+
+    /*
+     * 성공 여부와 관계없이 현재 세션은 더 이상 사용하지 않는다.
+     */
+    writer->partition = NULL;
+    writer->handle = 0;
+    writer->image_size = 0;
+    writer->written_size = 0;
+    writer->active = false;
+
+    return err;
+}
