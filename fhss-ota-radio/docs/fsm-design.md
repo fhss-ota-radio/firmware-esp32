@@ -24,6 +24,7 @@ ESP32-S3 무선기 단말(`firmware-esp32`)의 최상위 애플리케이션 상�
 |---|---|---|
 | 2026-08-04 | nRF24L01 폐기, **CC1101 하나**로 음성 FHSS + OTA 수신 겸용 | 두 칩이 같은 보드 위에 있어 이원화 실익 없음. 반이중 트랜시버라 음성·OTA 동시 수신 불가 → [§1 하드웨어 공유](#하드웨어-공유) |
 | 2026-08-04 | 로터리 엔코더로 `MENU_IDLE`/`MENU_OTA` **수동 선택**, 활동 중 전환 잠금 | 의도치 않은 OTA 수신/플래싱 방지가 우선. 트레이드오프: "1:N 동시 업데이트"는 각 단말이 사전에 `MENU_OTA`로 전환돼 있어야 성립(운영 절차 전제) → [§1 메뉴 게이팅](#메뉴-게이팅) |
+| 2026-08-05 | `rf_transport`/`fhss_core` 없는 동안 `FHSS_SYNC` 자동 통과용 임시 bypass **넣지 않음** | `FSM_EVENT_SYNC_ACQUIRED`를 인위로 쏘면 마치 동기화가 동작하는 것처럼 보여 나중에 놓치기 쉬움. 대가로 `MENU_IDLE`/`MENU_OTA`(PTT·로터리 와이어링 포함) 실기기 end-to-end 테스트는 `rf_transport` 생기기 전까지 불가, 컴파일·개별 컴포넌트 검증까지만 가능 |
 
 ## 1. 설계 전제
 
@@ -174,8 +175,9 @@ stateDiagram-v2
 ## 6. 구현 매핑
 
 - 코드: [`main/fsm.h`](../main/fsm.h), [`main/fsm.c`](../main/fsm.c) — 테이블 기반 상태기계, FreeRTOS 큐로 이벤트 수신. **이 파일은 애플리케이션 동작 모드만 다루며, FHSS 홉 타이밍 보정 자체는 구현하지 않는다.**
-  - **미반영 (TODO)**: 현재 코드의 `fsm_state_t`/`fsm_event_t`는 이 문서의 이전 버전(`FSM_STATE_IDLE` 단일 상태) 기준이다. `MENU_IDLE`/`MENU_OTA` 분리, `EV_MENU_SELECT_IDLE`/`EV_MENU_SELECT_OTA` 추가를 `fsm.h`/`fsm.c`/전이표 구현에 반영해야 한다.
+  - `MENU_IDLE`/`MENU_OTA` 분리, `FSM_EVENT_MENU_SELECT_IDLE`/`FSM_EVENT_MENU_SELECT_OTA`는 `fsm.h`/`fsm.c`/전이표에 반영 완료.
+  - `display_ui`/`ptt_button`/`rotary_encoder` wiring도 `fsm.c`의 `on_enter_boot_init()`(각 컴포넌트 init + 콜백 등록)에 반영 완료. `audio_io`/`rf_transport`가 필요한 `on_enter_tx_audio`/`rx_audio`/`fhss_sync`/`ota_*`는 해당 컴포넌트가 없어 아직 TODO — 지금 채우면 실제 API 없이 추측성 코드가 되므로 의도적으로 비워둠.
 - 음성 FHSS 홉 타이밍 보정과 OTA 수신은 **같은 CC1101 SPI 드라이버/태스크**(팀2+팀5 공동) 안에서 모드 전환으로 구현한다. 홉 타이밍 보정은 별도의 프리러닝 타이머 태스크가 아니라 **수신 이벤트 처리 로직에 내장**되며, 연속 N회 수신 실패로 동기를 완전히 잃었을 때만 `FSM_EVENT_SYNC_LOST`를, 재획득에 성공하면 `FSM_EVENT_SYNC_ACQUIRED`를 `fsm_post_event()`로 올린다. 정상적인 매 수신 성공은 FSM에 이벤트로 올라오지 않는다(암묵적으로 동기가 유지되고 있다는 뜻). `OTA_RECEIVING` 진입/이탈 시 이 태스크는 음성 호핑 스케줄 추종을 명시적으로 멈추고/재개한다. **수신 패킷을 음성/OTA 중 무엇으로 해석할지는 이 태스크가 현재 메뉴 모드(`fsm_get_state()`가 `MENU_IDLE`인지 `MENU_OTA`인지)를 참조해 결정한다.**
-- 로터리 엔코더 태스크(신규, `components/rotary_encoder`, 팀1 담당 예정)는 회전 시 로컬 커서만 갱신(FSM 이벤트 없음), 클릭 시 그 시점 커서에 해당하는 `EV_MENU_SELECT_IDLE`/`EV_MENU_SELECT_OTA`를 `fsm_post_event()`로 올린다.
+- 로터리 엔코더 태스크(`components/rotary_encoder`, 팀1)는 회전 시 로컬 커서만 갱신(FSM 이벤트 없음, `fsm.c`가 이를 받아 OLED 미리보기만 갱신), 클릭 시 그 시점 커서에 해당하는 `FSM_EVENT_MENU_SELECT_IDLE`/`FSM_EVENT_MENU_SELECT_OTA`를 `fsm_post_event()`로 올린다.
 - 각 모듈(PTT 버튼 태스크, 로터리 엔코더 태스크, CC1101 수신 태스크, OTA 적용 로직)은 하드웨어 이벤트 발생 시 `fsm_post_event()`만 호출하고, 실제 상태 전이/부수효과는 FSM 태스크 하나에서만 처리한다 (경쟁 상태 방지).
 - 상태 진입/이탈 시 수행할 하드웨어 동작(마이크 시작/정지, OLED 상태 표시 등)은 `fsm.c`의 `on_enter_*` 스텁에 각 담당 팀이 채워 넣는다.
