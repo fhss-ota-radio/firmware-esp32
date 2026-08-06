@@ -38,7 +38,7 @@ firmware-esp32/
 └── docs/
 ```
 
-## 현재 구현 현황 (`feature/audio_io` → `develop` 병합 후)
+## 현재 구현 현황 (`feature/fsm-audio-wiring`)
 - [x] `components/audio_codec/` — Speex 코덱 컴포넌트
   - `speex/` — xiph/speex 원본 (git submodule, pristine 유지)
   - `CMakeLists.txt` — ESP-IDF 빌드용 래퍼 (협대역 전용 소스만 선별)
@@ -63,13 +63,13 @@ firmware-esp32/
   - `audio_io_config.h` — 마이크/스피커 I2S 포트·핀(placeholder) 설정
   - 마이크(RX)=`I2S_NUM_0`, 스피커(TX)=`I2S_NUM_1` 별도 포트 고정 배정 (재설정 없이 동시 존재)
   - 공개 API: `audio_io_init()`, `audio_io_capture_encode(out, cap)`, `audio_io_decode_play(data, len)` — 내부에서 `audio_codec_encode/decode` 호출
-- [x] **`display_ui`/`ptt_button`/`rotary_encoder` → FSM wiring 완료** (`main/fsm.c`의 `on_enter_boot_init()`)
-  - 부팅 시 세 컴포넌트 `init()` + 콜백 등록: `ptt_button` press/release → `FSM_EVENT_PTT_PRESS/RELEASE`, `rotary_encoder` 클릭 → `FSM_EVENT_MENU_SELECT_IDLE/OTA`, 로터리 회전 → `oled_update_text()`로 미리보기만 갱신(FSM 이벤트 아님)
+- [x] **`display_ui`/`ptt_button`/`rotary_encoder`/`audio_io` → FSM wiring 완료** (`main/fsm.c`)
+  - 부팅 시(`on_enter_boot_init()`) 네 컴포넌트 `init()` + 콜백 등록: `ptt_button` press/release → `FSM_EVENT_PTT_PRESS/RELEASE`, `rotary_encoder` 클릭 → `FSM_EVENT_MENU_SELECT_IDLE/OTA`, 로터리 회전 → `oled_update_text()`로 미리보기만 갱신(FSM 이벤트 아님), `audio_codec_init()`/`audio_io_init()`
   - `on_enter_menu_idle`/`on_enter_menu_ota`에서 OLED에 현재 모드 표시
-  - **의도적으로 안 채운 것**: `audio_io`/`rf_transport`가 필요한 `on_enter_tx_audio`/`rx_audio`/`fhss_sync`/`ota_*`는 그대로 TODO — `audio_io`가 이제 존재하지만 아직 이 wiring에는 반영 안 됨 (다음 작업 대상)
-  - **알려진 제약**: `rf_transport`/`fhss_core`가 없어 `FSM_EVENT_SYNC_ACQUIRED`를 아무도 안 올림 → 부팅 후 `FHSS_SYNC`에서 멈추고 `MENU_IDLE`(PTT/로터리가 실제로 쓰이는 상태)에 도달 못 함. 임시 bypass는 의도적으로 넣지 않음(이유는 `docs/fsm-design.md` 결정 이력 2026-08-05 참고) — 그래서 이 wiring은 컴파일/개별 컴포넌트 단위 검증까지만 가능하고, `rf_transport` 생기기 전까지 실기기 end-to-end 테스트는 불가
+  - `on_enter_tx_audio()`: 20ms 주기로 `audio_io_capture_encode()` 호출하는 캡처 태스크 시작, PTT_RELEASE로 `MENU_IDLE` 재진입 시(`on_enter_menu_idle()`) 태스크 정리
+  - **의도적으로 안 채운 것**: `on_enter_rx_audio()`/`fhss_sync`/`ota_*`는 그대로 TODO — `rf_transport`가 없어 캡처한 프레임을 보낼 곳도, 수신 프레임을 받아올 곳도 없음. 특히 RX 재생은 `fsm_event_t`가 페이로드 없는 enum이라 `FSM_EVENT_RX_FRAME`에 프레임 데이터를 실어 나를 방법 자체가 없어서, `rf_transport` 설계 시 이벤트-데이터 전달 방식도 같이 정해야 함 (`docs/fsm-design.md` 결정 이력 2026-08-06 참고)
+  - **알려진 제약**: `rf_transport`/`fhss_core`가 없어 `FSM_EVENT_SYNC_ACQUIRED`를 아무도 안 올림 → 부팅 후 `FHSS_SYNC`에서 멈추고 `MENU_IDLE`(PTT/로터리/오디오 캡처가 실제로 쓰이는 상태)에 도달 못 함. 임시 bypass는 의도적으로 넣지 않음(이유는 `docs/fsm-design.md` 결정 이력 2026-08-05 참고) — 그래서 이 wiring은 컴파일/개별 컴포넌트 단위 검증까지만 가능하고, `rf_transport` 생기기 전까지 실기기 end-to-end 테스트는 불가
 - [x] `components/ota_client/` — OTA 세션/청크 검증/플래시 기록 컴포넌트 (팀2, 별도 브랜치에서 병합됨) — `rf_transport`(무선 송수신)가 아직 없어 실제 동작은 불가, 역할 분리만 잡혀있는 상태 (자세한 내용은 [components/ota_client/README.md](fhss-ota-radio/components/ota_client/README.md))
-- [ ] `audio_io`는 컴포넌트만 존재, FSM(TX_AUDIO/RX_AUDIO)에 아직 미연결 — `audio_io_capture_encode`/`decode_play` 호출하는 배선은 TODO
 - [ ] FHSS 호핑(`fhss_core`), CC1101 저수준 SPI(`rf_transport`)는 아직 미구현 — 이 둘이 없어서 위 wiring도, `ota_client`도 실기기에서는 검증 못 하는 상태
 
 ## 담당
