@@ -206,3 +206,57 @@ esp_err_t ota_client_finish_session(
 
     return ESP_OK;
 }
+
+static void ota_client_reset_session(void)
+{
+    memset(&s_ota_client.writer, 0, sizeof(s_ota_client.writer));
+
+    s_ota_client.session_id = 0;
+    s_ota_client.image_size = 0;
+    s_ota_client.received_bytes = 0;
+    s_ota_client.total_chunks = 0;
+    s_ota_client.expected_sequence = 0;
+    memset(
+        s_ota_client.expected_sha256,
+        0,
+        sizeof(s_ota_client.expected_sha256)
+    );
+    s_ota_client.last_packet_tick = 0;
+}
+
+esp_err_t ota_client_abort(void)
+{
+    if (s_ota_client.state != OTA_CLIENT_STATE_RECEIVING &&
+        s_ota_client.state != OTA_CLIENT_STATE_ERROR) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint32_t progress = 0;
+
+    if (s_ota_client.image_size != 0) {
+        progress = (uint32_t)(
+            ((uint64_t)s_ota_client.received_bytes * 100U) /
+            s_ota_client.image_size
+        );
+    }
+
+    esp_err_t err = ESP_OK;
+
+    if (s_ota_client.writer.active) {
+        err = ota_writer_abort(&s_ota_client.writer);
+    }
+
+    ota_client_reset_session();
+    s_ota_client.state = OTA_CLIENT_STATE_IDLE;
+
+    if (s_ota_client.config.event_callback != NULL) {
+        s_ota_client.config.event_callback(
+            OTA_CLIENT_EVENT_ABORTED,
+            progress,
+            err,
+            s_ota_client.config.callback_context
+        );
+    }
+
+    return err;
+}

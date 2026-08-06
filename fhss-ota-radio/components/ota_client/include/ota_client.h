@@ -50,7 +50,7 @@ typedef struct {
 } ota_client_config_t;
 
 esp_err_t ota_client_init(const ota_client_config_t *config);
-
+esp_err_t ota_client_abort(void);
 ota_client_state_t ota_client_get_state(void);
 
 #ifdef __cplusplus
