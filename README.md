@@ -38,7 +38,7 @@ firmware-esp32/
 └── docs/
 ```
 
-## 현재 구현 현황 (`feature/ptt-button`)
+## 현재 구현 현황 (`feature/audio_io`)
 - [x] `components/audio_codec/` — Speex 코덱 컴포넌트
   - `speex/` — xiph/speex 원본 (git submodule, pristine 유지)
   - `CMakeLists.txt` — ESP-IDF 빌드용 래퍼 (협대역 전용 소스만 선별)
@@ -55,9 +55,13 @@ firmware-esp32/
   - `ptt_button_config.h` — 핀(placeholder)/active level/디바운스 파라미터
   - `ptt_button.h` / `ptt_button.c` — 폴링 기반 디바운스(ISR 미사용), 콜백/폴링 API 제공
   - 공개 API: `ptt_button_init()`, `ptt_button_set_callback(cb, ctx)`, `ptt_button_is_pressed()`
-- [ ] audio_codec / display_ui / ptt_button 모두 아직 FSM/실제 앱 로직에 연결되지 않음 (컴포넌트만 빌드되는 상태, `main.c`는 손대지 않음) — ptt_button 콜백에서 `fsm_post_event(EV_PTT_PRESS/RELEASE)` 호출하는 배선은 TODO
+- [x] `components/audio_io/` — I2S 마이크(INMP441)/스피커(MAX98357A) 입출력 + audio_codec 연결
+  - `audio_io_config.h` — 마이크/스피커 I2S 포트·핀(placeholder) 설정
+  - 마이크(RX)=`I2S_NUM_0`, 스피커(TX)=`I2S_NUM_1` 별도 포트 고정 배정 (재설정 없이 동시 존재)
+  - 공개 API: `audio_io_init()`, `audio_io_capture_encode(out, cap)`, `audio_io_decode_play(data, len)` — 내부에서 `audio_codec_encode/decode` 호출
+- [ ] audio_codec / display_ui / ptt_button / audio_io 모두 아직 FSM/실제 앱 로직에 연결되지 않음 (컴포넌트만 빌드되는 상태, `main.c`는 손대지 않음) — ptt_button 콜백에서 `fsm_post_event(EV_PTT_PRESS/RELEASE)` 호출하는 배선, TX_AUDIO/RX_AUDIO에서 `audio_io_capture_encode`/`decode_play` 호출하는 배선은 TODO
 - [ ] 로터리 엔코더(`components/rotary_encoder`, 메뉴 선택용) 컴포넌트는 아직 생성 전 — `fsm.h`/`fsm.c`에 이벤트/전이만 먼저 반영된 상태
-- [ ] I2S 마이크/스피커, FHSS 호핑, CC1101 OTA 등 나머지 기능은 아직 미구현 — `components/{audio_io, ota_client, fhss_core, rf_transport}`는 목표 구조일 뿐 아직 생성 전
+- [ ] FHSS 호핑, CC1101 OTA 등 나머지 기능은 아직 미구현 — `components/{ota_client, fhss_core, rf_transport}`는 목표 구조일 뿐 아직 생성 전 (ota_client는 초기 구조만 별도 PR로 존재)
 
 ## 담당
 팀원1 (오디오/OLED), 팀원2 (OTA/부트로더), 팀원5 (FHSS)
