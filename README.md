@@ -38,7 +38,7 @@ firmware-esp32/
 └── docs/
 ```
 
-## 현재 구현 현황 (`feature/audio_io`)
+## 현재 구현 현황 (`feature/audio_io` → `develop` 병합 후)
 - [x] `components/audio_codec/` — Speex 코덱 컴포넌트
   - `speex/` — xiph/speex 원본 (git submodule, pristine 유지)
   - `CMakeLists.txt` — ESP-IDF 빌드용 래퍼 (협대역 전용 소스만 선별)
@@ -55,13 +55,22 @@ firmware-esp32/
   - `ptt_button_config.h` — 핀(placeholder)/active level/디바운스 파라미터
   - `ptt_button.h` / `ptt_button.c` — 폴링 기반 디바운스(ISR 미사용), 콜백/폴링 API 제공
   - 공개 API: `ptt_button_init()`, `ptt_button_set_callback(cb, ctx)`, `ptt_button_is_pressed()`
+- [x] `components/rotary_encoder/` — 메뉴 선택용 로터리 엔코더(A/B/SW) 컴포넌트
+  - `rotary_encoder_config.h` — 핀(A/B/SW, placeholder)/디바운스/detent 파라미터
+  - `rotary_encoder.h` / `rotary_encoder.c` — quadrature 폴링 디코딩 + SW 디바운스, 커서 이동은 순환(`MENU_IDLE ↔ MENU_OTA`)
+  - 공개 API: `rotary_encoder_init()`, `rotary_encoder_set_cursor_callback()`, `rotary_encoder_set_select_callback()`, `rotary_encoder_get_cursor()`
 - [x] `components/audio_io/` — I2S 마이크(INMP441)/스피커(MAX98357A) 입출력 + audio_codec 연결
   - `audio_io_config.h` — 마이크/스피커 I2S 포트·핀(placeholder) 설정
   - 마이크(RX)=`I2S_NUM_0`, 스피커(TX)=`I2S_NUM_1` 별도 포트 고정 배정 (재설정 없이 동시 존재)
   - 공개 API: `audio_io_init()`, `audio_io_capture_encode(out, cap)`, `audio_io_decode_play(data, len)` — 내부에서 `audio_codec_encode/decode` 호출
-- [ ] audio_codec / display_ui / ptt_button / audio_io 모두 아직 FSM/실제 앱 로직에 연결되지 않음 (컴포넌트만 빌드되는 상태, `main.c`는 손대지 않음) — ptt_button 콜백에서 `fsm_post_event(EV_PTT_PRESS/RELEASE)` 호출하는 배선, TX_AUDIO/RX_AUDIO에서 `audio_io_capture_encode`/`decode_play` 호출하는 배선은 TODO
-- [ ] 로터리 엔코더(`components/rotary_encoder`, 메뉴 선택용) 컴포넌트는 아직 생성 전 — `fsm.h`/`fsm.c`에 이벤트/전이만 먼저 반영된 상태
-- [ ] FHSS 호핑, CC1101 OTA 등 나머지 기능은 아직 미구현 — `components/{ota_client, fhss_core, rf_transport}`는 목표 구조일 뿐 아직 생성 전 (ota_client는 초기 구조만 별도 PR로 존재)
+- [x] **`display_ui`/`ptt_button`/`rotary_encoder` → FSM wiring 완료** (`main/fsm.c`의 `on_enter_boot_init()`)
+  - 부팅 시 세 컴포넌트 `init()` + 콜백 등록: `ptt_button` press/release → `FSM_EVENT_PTT_PRESS/RELEASE`, `rotary_encoder` 클릭 → `FSM_EVENT_MENU_SELECT_IDLE/OTA`, 로터리 회전 → `oled_update_text()`로 미리보기만 갱신(FSM 이벤트 아님)
+  - `on_enter_menu_idle`/`on_enter_menu_ota`에서 OLED에 현재 모드 표시
+  - **의도적으로 안 채운 것**: `audio_io`/`rf_transport`가 필요한 `on_enter_tx_audio`/`rx_audio`/`fhss_sync`/`ota_*`는 그대로 TODO — `audio_io`가 이제 존재하지만 아직 이 wiring에는 반영 안 됨 (다음 작업 대상)
+  - **알려진 제약**: `rf_transport`/`fhss_core`가 없어 `FSM_EVENT_SYNC_ACQUIRED`를 아무도 안 올림 → 부팅 후 `FHSS_SYNC`에서 멈추고 `MENU_IDLE`(PTT/로터리가 실제로 쓰이는 상태)에 도달 못 함. 임시 bypass는 의도적으로 넣지 않음(이유는 `docs/fsm-design.md` 결정 이력 2026-08-05 참고) — 그래서 이 wiring은 컴파일/개별 컴포넌트 단위 검증까지만 가능하고, `rf_transport` 생기기 전까지 실기기 end-to-end 테스트는 불가
+- [x] `components/ota_client/` — OTA 세션/청크 검증/플래시 기록 컴포넌트 (팀2, 별도 브랜치에서 병합됨) — `rf_transport`(무선 송수신)가 아직 없어 실제 동작은 불가, 역할 분리만 잡혀있는 상태 (자세한 내용은 [components/ota_client/README.md](fhss-ota-radio/components/ota_client/README.md))
+- [ ] `audio_io`는 컴포넌트만 존재, FSM(TX_AUDIO/RX_AUDIO)에 아직 미연결 — `audio_io_capture_encode`/`decode_play` 호출하는 배선은 TODO
+- [ ] FHSS 호핑(`fhss_core`), CC1101 저수준 SPI(`rf_transport`)는 아직 미구현 — 이 둘이 없어서 위 wiring도, `ota_client`도 실기기에서는 검증 못 하는 상태
 
 ## 담당
 팀원1 (오디오/OLED), 팀원2 (OTA/부트로더), 팀원5 (FHSS)
