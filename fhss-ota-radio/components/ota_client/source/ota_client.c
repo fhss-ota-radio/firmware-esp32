@@ -82,3 +82,70 @@ esp_err_t ota_client_start_session(
 
     return ESP_OK;
 }
+
+esp_err_t ota_client_write_chunk(
+    uint32_t session_id,
+    uint32_t sequence,
+    const uint8_t *data,
+    size_t data_size
+)
+{
+    if (data == NULL || data_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_ota_client.state != OTA_CLIENT_STATE_RECEIVING) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (session_id != s_ota_client.session_id) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (sequence != s_ota_client.expected_sequence ||
+        sequence >= s_ota_client.total_chunks) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = ota_writer_write(
+        &s_ota_client.writer,
+        data,
+        data_size
+    );
+
+    if (err != ESP_OK) {
+        ota_writer_abort(&s_ota_client.writer);
+        s_ota_client.state = OTA_CLIENT_STATE_ERROR;
+
+        if (s_ota_client.config.event_callback != NULL) {
+            s_ota_client.config.event_callback(
+                OTA_CLIENT_EVENT_FAILED,
+                0,
+                err,
+                s_ota_client.config.callback_context
+            );
+        }
+
+        return err;
+    }
+
+    s_ota_client.received_bytes += data_size;
+    s_ota_client.expected_sequence++;
+    s_ota_client.last_packet_tick = xTaskGetTickCount();
+
+    uint32_t progress = (uint32_t)(
+        ((uint64_t)s_ota_client.received_bytes * 100U) /
+        s_ota_client.image_size
+    );
+
+    if (s_ota_client.config.event_callback != NULL) {
+        s_ota_client.config.event_callback(
+            OTA_CLIENT_EVENT_PROGRESS,
+            progress,
+            ESP_OK,
+            s_ota_client.config.callback_context
+        );
+    }
+
+    return ESP_OK;
+}
