@@ -7,6 +7,8 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 
+#include "audio_codec.h"
+#include "audio_io.h"
 #include "display_ui.h"
 #include "ptt_button.h"
 #include "rotary_encoder.h"
@@ -100,9 +102,9 @@ static const fsm_transition_t s_transitions[] = {
 /*
  * UI 컴포넌트(display_ui/ptt_button/rotary_encoder) 콜백 — 각 컴포넌트는 FSM을
  * 모르므로, 이 콜백들이 fsm_post_event()로 매핑하는 접착부 역할을 한다.
- * audio_io/rf_transport 등 아직 없는 컴포넌트에 걸린 전이(TX_AUDIO 진입 시
- * 마이크 캡처 등)는 그대로 TODO로 남겨둔다 — 지금 여기서 채우면 실제 API가
- * 없는 상태라 추측성 코드가 되고, 나중에 다시 갈아엎어야 한다.
+ * rf_transport 등 아직 없는 컴포넌트에 걸린 전이(RX_AUDIO 재생 등)는 그대로
+ * TODO로 남겨둔다 — 지금 여기서 채우면 실제 API가 없는 상태라 추측성 코드가
+ * 되고, 나중에 다시 갈아엎어야 한다.
  */
 static void on_ptt_event(bool pressed, void *ctx)
 {
@@ -124,6 +126,27 @@ static void on_menu_cursor(rotary_encoder_menu_t cursor, void *ctx)
     oled_update_text(1, cursor == ROTARY_ENCODER_MENU_OTA ? "> OTA" : "> IDLE");
 }
 
+/*
+ * TX_AUDIO 동안만 도는 캡처 태스크. PTT를 누르고 있는 동안(TX_AUDIO 상태인
+ * 동안) 20ms마다 마이크를 읽어 Speex로 인코딩한다. rf_transport가 아직 없어
+ * 인코딩된 프레임을 실제로 보낼 곳이 없으므로 그 부분만 TODO — 캡처/인코딩
+ * 자체는 audio_io가 이미 있으니 추측 없이 그대로 동작한다.
+ * MENU_IDLE 진입(PTT_RELEASE) 시 on_enter_menu_idle()에서 태스크를 정리한다.
+ */
+static TaskHandle_t s_tx_audio_task;
+
+static void tx_audio_task(void *arg)
+{
+    uint8_t frame[AUDIO_CODEC_MAX_ENCODED_BYTES];
+
+    for (;;) {
+        int n = audio_io_capture_encode(frame, sizeof(frame));
+        if (n > 0) {
+            /* TODO(팀5): frame[0..n)을 rf_transport로 FHSS 채널 송신 */
+        }
+    }
+}
+
 /* 상태별 진입 동작. 실제 하드웨어 제어는 각 담당(TODO)이 채운다. */
 static void on_enter_boot_init(void)
 {
@@ -136,13 +159,26 @@ static void on_enter_boot_init(void)
     rotary_encoder_set_select_callback(on_menu_select, NULL);
     rotary_encoder_set_cursor_callback(on_menu_cursor, NULL);
 
-    /* TODO(팀1/2): I2S(audio_io), SPI(rf_transport/CC1101) 초기화 — 해당 컴포넌트 생기면 추가 */
+    audio_codec_init();
+    audio_io_init();
+
+    /* TODO(팀2): SPI(rf_transport/CC1101) 초기화 — 해당 컴포넌트 생기면 추가 */
 }
-static void on_enter_fhss_sync(void)     { /* TODO(팀5): 호핑 시퀀스 동기화 시작 */ }
-static void on_enter_menu_idle(void)     { oled_update_text(0, "MODE: IDLE"); }
-static void on_enter_menu_ota(void)      { oled_update_text(0, "MODE: OTA"); /* TODO(팀2): CC1101 OTA 채널 리스닝 준비 */ }
-static void on_enter_tx_audio(void)      { /* TODO(팀1/2): 마이크 캡처 + Opus 인코딩 시작 */ }
-static void on_enter_rx_audio(void)      { /* TODO(팀1/2): Opus 디코딩 + 스피커 재생 시작 */ }
+static void on_enter_fhss_sync(void) { /* TODO(팀5): 호핑 시퀀스 동기화 시작 */ }
+static void on_enter_menu_idle(void)
+{
+    if (s_tx_audio_task != NULL) {
+        vTaskDelete(s_tx_audio_task);
+        s_tx_audio_task = NULL;
+    }
+    oled_update_text(0, "MODE: IDLE");
+}
+static void on_enter_menu_ota(void) { oled_update_text(0, "MODE: OTA"); /* TODO(팀2): CC1101 OTA 채널 리스닝 준비 */ }
+static void on_enter_tx_audio(void)
+{
+    xTaskCreate(tx_audio_task, "tx_audio", 4096, NULL, tskIDLE_PRIORITY + 3, &s_tx_audio_task);
+}
+static void on_enter_rx_audio(void)      { /* TODO(팀5): rf_transport 수신 프레임을 audio_io_decode_play()로 재생 — RX_FRAME 이벤트에 프레임 데이터를 실어 나를 방법이 아직 없음(fsm_event_t는 페이로드 없는 enum) */ }
 static void on_enter_ota_receiving(void) { /* TODO(팀2): OTA 수신 버퍼 초기화, 음성 태스크 일시 중단 */ }
 static void on_enter_ota_applying(void)  { /* TODO(팀2): 이미지 검증 및 OTA 파티션 기록 */ }
 static void on_enter_error(void)         { /* TODO(팀1/PM): 오류 로깅, 안전 상태로 정지 */ }

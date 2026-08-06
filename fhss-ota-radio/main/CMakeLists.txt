@@ -1,3 +1,3 @@
 idf_component_register(SRCS "main.c" "fsm.c"
                     INCLUDE_DIRS "."
-                    REQUIRES display_ui ptt_button rotary_encoder)
+                    REQUIRES display_ui ptt_button rotary_encoder audio_io audio_codec)

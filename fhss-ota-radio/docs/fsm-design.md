@@ -25,6 +25,7 @@ ESP32-S3 무선기 단말(`firmware-esp32`)의 최상위 애플리케이션 상�
 | 2026-08-04 | nRF24L01 폐기, **CC1101 하나**로 음성 FHSS + OTA 수신 겸용 | 두 칩이 같은 보드 위에 있어 이원화 실익 없음. 반이중 트랜시버라 음성·OTA 동시 수신 불가 → [§1 하드웨어 공유](#하드웨어-공유) |
 | 2026-08-04 | 로터리 엔코더로 `MENU_IDLE`/`MENU_OTA` **수동 선택**, 활동 중 전환 잠금 | 의도치 않은 OTA 수신/플래싱 방지가 우선. 트레이드오프: "1:N 동시 업데이트"는 각 단말이 사전에 `MENU_OTA`로 전환돼 있어야 성립(운영 절차 전제) → [§1 메뉴 게이팅](#메뉴-게이팅) |
 | 2026-08-05 | `rf_transport`/`fhss_core` 없는 동안 `FHSS_SYNC` 자동 통과용 임시 bypass **넣지 않음** | `FSM_EVENT_SYNC_ACQUIRED`를 인위로 쏘면 마치 동기화가 동작하는 것처럼 보여 나중에 놓치기 쉬움. 대가로 `MENU_IDLE`/`MENU_OTA`(PTT·로터리 와이어링 포함) 실기기 end-to-end 테스트는 `rf_transport` 생기기 전까지 불가, 컴파일·개별 컴포넌트 검증까지만 가능 |
+| 2026-08-06 | `TX_AUDIO`는 캡처(`audio_io`) 태스크까지만 와이어링, `RX_AUDIO`는 완전히 TODO로 유지 | 송신은 마이크 입력만 있으면 되지만(rf_transport로 보내는 지점만 TODO), 수신 재생은 상대가 보낸 프레임 바이트가 `fsm_event_t`에 실려올 방법이 없어(페이로드 없는 enum) 지금 채우면 추측 코드가 됨. `rf_transport` 설계 시 이벤트에 데이터 전달 방법도 같이 정해야 함 |
 
 ## 1. 설계 전제
 
@@ -80,8 +81,8 @@ sequenceDiagram
 | `FHSS_SYNC` | 피어/네트워크와 주파수 호핑 동기 **획득/재획득**. 최초 부팅 시, 또는 연속 수신 실패로 동기를 완전히 잃었을 때만 진입한다. 동기 유지(타이밍 보정)는 이 상태가 아니라 [§1.1](#11-동시성-모델-fhss-홉-추종-vs-최상위-fsm)처럼 매 수신 패킷 검증 성공 시 이벤트 기반으로 이루어진다 | 팀5 |
 | `MENU_IDLE` | 동기 완료, **음성 모드**로 호핑 시퀀스를 따라가며 PTT 입력 또는 음성 수신 프레임 대기. 기본(default) 메뉴. 수신 패킷은 음성으로 해석됨 | 팀1, 팀5 |
 | `MENU_OTA` | 동기 완료, **OTA 대기 모드**. 수신 패킷은 펌웨어 청크로 해석되며 ACK/재전송 로직 수행 대상이 됨. 로터리 엔코더로 사용자가 명시적으로 진입해야 함(자동 진입 없음) | 팀1, 팀2 |
-| `TX_AUDIO` | PTT 눌림 (`MENU_IDLE`에서만 발생). 마이크 캡처 → Opus 인코딩 → FHSS 채널 송신 | 팀1, 팀2 |
-| `RX_AUDIO` | 상대 단말로부터 음성 프레임 수신 중 (`MENU_IDLE`에서만 발생) → Opus 디코딩 → 스피커 재생 | 팀1, 팀2 |
+| `TX_AUDIO` | PTT 눌림 (`MENU_IDLE`에서만 발생). 마이크 캡처 → Speex 인코딩 → FHSS 채널 송신 | 팀1, 팀2 |
+| `RX_AUDIO` | 상대 단말로부터 음성 프레임 수신 중 (`MENU_IDLE`에서만 발생) → Speex 디코딩 → 스피커 재생 | 팀1, 팀2 |
 | `OTA_RECEIVING` | (`MENU_OTA`에서만 발생) 게이트웨이가 CC1101로 브로드캐스트한 OTA 청크 수신·버퍼링 | 팀2 |
 | `OTA_APPLYING` | 수신 완료된 이미지 검증(체크섬) 및 OTA 파티션 기록, 재부팅 대기 | 팀2 |
 | `ERROR` | 복구 불가 수준의 하드웨어/통신 오류. 로깅 후 재시도 또는 재부팅 대기 | 팀1(PM) |
@@ -176,7 +177,10 @@ stateDiagram-v2
 
 - 코드: [`main/fsm.h`](../main/fsm.h), [`main/fsm.c`](../main/fsm.c) — 테이블 기반 상태기계, FreeRTOS 큐로 이벤트 수신. **이 파일은 애플리케이션 동작 모드만 다루며, FHSS 홉 타이밍 보정 자체는 구현하지 않는다.**
   - `MENU_IDLE`/`MENU_OTA` 분리, `FSM_EVENT_MENU_SELECT_IDLE`/`FSM_EVENT_MENU_SELECT_OTA`는 `fsm.h`/`fsm.c`/전이표에 반영 완료.
-  - `display_ui`/`ptt_button`/`rotary_encoder` wiring도 `fsm.c`의 `on_enter_boot_init()`(각 컴포넌트 init + 콜백 등록)에 반영 완료. `audio_io`/`rf_transport`가 필요한 `on_enter_tx_audio`/`rx_audio`/`fhss_sync`/`ota_*`는 해당 컴포넌트가 없어 아직 TODO — 지금 채우면 실제 API 없이 추측성 코드가 되므로 의도적으로 비워둠.
+  - `display_ui`/`ptt_button`/`rotary_encoder` wiring도 `fsm.c`의 `on_enter_boot_init()`(각 컴포넌트 init + 콜백 등록)에 반영 완료.
+  - `audio_io`/`audio_codec` wiring 완료: `on_enter_boot_init()`에서 `audio_codec_init()`/`audio_io_init()` 호출, `on_enter_tx_audio()`가 캡처(`audio_io_capture_encode()`) 태스크를 시작하고 `on_enter_menu_idle()`(PTT_RELEASE로 도달)에서 정리. 인코딩된 프레임을 실제로 보낼 `rf_transport`가 없어 그 지점만 TODO.
+  - `on_enter_rx_audio()`는 아직 TODO — `rf_transport`가 없을 뿐 아니라, 현재 `fsm_event_t`(`main/fsm.h`)가 페이로드 없는 enum이라 `FSM_EVENT_RX_FRAME`에 수신 프레임 바이트를 실어 나를 방법 자체가 없음. `rf_transport` 설계 시 이 부분(이벤트에 데이터 첨부 또는 별도 큐) 같이 고려 필요.
+  - `rf_transport`가 필요한 `on_enter_fhss_sync`/`ota_*`는 해당 컴포넌트가 없어 아직 TODO — 지금 채우면 실제 API 없이 추측성 코드가 되므로 의도적으로 비워둠.
 - 음성 FHSS 홉 타이밍 보정과 OTA 수신은 **같은 CC1101 SPI 드라이버/태스크**(팀2+팀5 공동) 안에서 모드 전환으로 구현한다. 홉 타이밍 보정은 별도의 프리러닝 타이머 태스크가 아니라 **수신 이벤트 처리 로직에 내장**되며, 연속 N회 수신 실패로 동기를 완전히 잃었을 때만 `FSM_EVENT_SYNC_LOST`를, 재획득에 성공하면 `FSM_EVENT_SYNC_ACQUIRED`를 `fsm_post_event()`로 올린다. 정상적인 매 수신 성공은 FSM에 이벤트로 올라오지 않는다(암묵적으로 동기가 유지되고 있다는 뜻). `OTA_RECEIVING` 진입/이탈 시 이 태스크는 음성 호핑 스케줄 추종을 명시적으로 멈추고/재개한다. **수신 패킷을 음성/OTA 중 무엇으로 해석할지는 이 태스크가 현재 메뉴 모드(`fsm_get_state()`가 `MENU_IDLE`인지 `MENU_OTA`인지)를 참조해 결정한다.**
 - 로터리 엔코더 태스크(`components/rotary_encoder`, 팀1)는 회전 시 로컬 커서만 갱신(FSM 이벤트 없음, `fsm.c`가 이를 받아 OLED 미리보기만 갱신), 클릭 시 그 시점 커서에 해당하는 `FSM_EVENT_MENU_SELECT_IDLE`/`FSM_EVENT_MENU_SELECT_OTA`를 `fsm_post_event()`로 올린다.
 - 각 모듈(PTT 버튼 태스크, 로터리 엔코더 태스크, CC1101 수신 태스크, OTA 적용 로직)은 하드웨어 이벤트 발생 시 `fsm_post_event()`만 호출하고, 실제 상태 전이/부수효과는 FSM 태스크 하나에서만 처리한다 (경쟁 상태 방지).
