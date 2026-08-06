@@ -49,3 +49,7 @@ audio_io_decode_play(rx_frame, rx_len);
 - `audio_io_capture_encode`/`decode_play`는 한 번에 한 프레임(20ms)만 처리 — 호출 주기 관리(태스크/타이머)는 상위(FSM TX_AUDIO/RX_AUDIO)에서 담당
 - `main.c`/FSM에 아직 연결 안 됨 — 컴포넌트 단독 빌드만 가능한 상태
 - 실기기 미보유로 캡처 품질(마이크 게인, 앰프 볼륨 등) 미검증
+
+test update.
+
+test update2.
