@@ -33,6 +33,8 @@ ota_client_state_t ota_client_get_state(void)
     return s_ota_client.state;
 }
 
+
+// packet type : OTA_PACKET_START
 esp_err_t ota_client_start_session(
     uint32_t session_id,
     uint32_t image_size,
@@ -83,6 +85,7 @@ esp_err_t ota_client_start_session(
     return ESP_OK;
 }
 
+// 수신한 packet type : OTA_PACKET_DATA 일 때
 esp_err_t ota_client_write_chunk(
     uint32_t session_id,
     uint32_t sequence,
@@ -142,6 +145,60 @@ esp_err_t ota_client_write_chunk(
         s_ota_client.config.event_callback(
             OTA_CLIENT_EVENT_PROGRESS,
             progress,
+            ESP_OK,
+            s_ota_client.config.callback_context
+        );
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t ota_client_finish_session(
+    uint32_t session_id
+)
+{
+    if (s_ota_client.state != OTA_CLIENT_STATE_RECEIVING) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (session_id != s_ota_client.session_id) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /*
+     * END가 너무 일찍 도착했다면 세션을 종료하지 않는다.
+     * 나중에 누락된 sequence를 NACK할 수 있도록 RECEIVING을 유지한다.
+     */
+    if (s_ota_client.received_bytes != s_ota_client.image_size ||
+        s_ota_client.expected_sequence != s_ota_client.total_chunks) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    s_ota_client.state = OTA_CLIENT_STATE_VERIFYING;
+
+    esp_err_t err = ota_writer_finish(&s_ota_client.writer);
+
+    if (err != ESP_OK) {
+        s_ota_client.state = OTA_CLIENT_STATE_ERROR;
+
+        if (s_ota_client.config.event_callback != NULL) {
+            s_ota_client.config.event_callback(
+                OTA_CLIENT_EVENT_FAILED,
+                100,
+                err,
+                s_ota_client.config.callback_context
+            );
+        }
+
+        return err;
+    }
+
+    s_ota_client.state = OTA_CLIENT_STATE_READY_TO_REBOOT;
+
+    if (s_ota_client.config.event_callback != NULL) {
+        s_ota_client.config.event_callback(
+            OTA_CLIENT_EVENT_COMPLETED,
+            100,
             ESP_OK,
             s_ota_client.config.callback_context
         );

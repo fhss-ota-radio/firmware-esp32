@@ -34,3 +34,7 @@ esp_err_t ota_client_write_chunk(
     const uint8_t *data,
     size_t data_size
 );
+
+esp_err_t ota_client_finish_session(
+    uint32_t session_id
+);
