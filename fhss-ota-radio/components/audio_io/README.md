@@ -51,3 +51,5 @@ audio_io_decode_play(rx_frame, rx_len);
 - 실기기 미보유로 캡처 품질(마이크 게인, 앰프 볼륨 등) 미검증
 
 test update.
+
+test update2.
