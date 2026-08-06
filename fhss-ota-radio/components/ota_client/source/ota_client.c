@@ -32,3 +32,53 @@ ota_client_state_t ota_client_get_state(void)
 {
     return s_ota_client.state;
 }
+
+esp_err_t ota_client_start_session(
+    uint32_t session_id,
+    uint32_t image_size,
+    uint32_t total_chunks
+) {
+    if (image_size == 0 || total_chunks == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_ota_client.state != OTA_CLIENT_STATE_IDLE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t err = ota_writer_begin(&s_ota_client.writer, image_size);
+
+    if (err != ESP_OK) {
+        s_ota_client.state = OTA_CLIENT_STATE_ERROR;
+
+        if (s_ota_client.config.event_callback != NULL) {
+            s_ota_client.config.event_callback(
+                OTA_CLIENT_EVENT_FAILED,
+                0,
+                err,
+                s_ota_client.config.callback_context
+            );
+        }
+
+        return err;
+    }     
+
+    s_ota_client.session_id = session_id;
+    s_ota_client.image_size = image_size;
+    s_ota_client.received_bytes = 0;
+    s_ota_client.total_chunks = total_chunks;
+    s_ota_client.expected_sequence = 0;
+    s_ota_client.last_packet_tick = xTaskGetTickCount();
+    s_ota_client.state = OTA_CLIENT_STATE_RECEIVING;
+
+    if (s_ota_client.config.event_callback != NULL) {
+        s_ota_client.config.event_callback(
+            OTA_CLIENT_EVENT_STARTED,
+            0,
+            ESP_OK,
+            s_ota_client.config.callback_context
+        );
+    }
+
+    return ESP_OK;
+}

@@ -20,6 +20,10 @@ typedef struct {
     uint32_t expected_sequence;
     uint8_t expected_sha256[32];
     TickType_t last_packet_tick;
-
-
 } ota_client_context_t;
+
+esp_err_t ota_client_start_session(
+    uint32_t session_id,
+    uint32_t image_size,
+    uint32_t total_chunks
+);
