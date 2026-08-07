@@ -28,6 +28,10 @@ static fsm_state_t s_state = FSM_STATE_BOOT_INIT;
 #define FSM_RX_AUDIO_FRAME_MAX_BYTES AUDIO_CODEC_MAX_ENCODED_BYTES
 #define FSM_RX_AUDIO_QUEUE_DEPTH     4
 
+/* 이 시간 동안 새 프레임이 안 오면 수신이 끝난 것으로 보고 FSM_EVENT_RX_DONE을
+ * 스스로 올린다 (무음/타임아웃 기반 종료 — 결정 근거는 docs/fsm-design.md 참고). */
+#define FSM_RX_AUDIO_IDLE_TIMEOUT_MS 1000
+
 typedef struct {
     uint8_t data[FSM_RX_AUDIO_FRAME_MAX_BYTES];
     size_t len;
@@ -166,17 +170,20 @@ static void tx_audio_task(void *arg)
 
 /*
  * RX_AUDIO 동안만 도는 재생 태스크. s_rx_audio_queue에서 프레임을 꺼내
- * audio_io_decode_play()로 재생한다 — 데이터 경로 자체는 이걸로 완성.
+ * audio_io_decode_play()로 재생한다. FSM_RX_AUDIO_IDLE_TIMEOUT_MS(1초) 동안
+ * 새 프레임이 안 들어오면 수신이 끝난 것으로 보고 FSM_EVENT_RX_DONE을 스스로
+ * 올린 뒤 태스크를 종료한다 — PTT_RELEASE 같은 명시적 종료 신호가 RX 쪽엔
+ * 없어서 무음/타임아웃 기반으로 정한 것(값은 1초로 확정, 추후 실측 후 조정 가능).
  *
- * 미정 사항(둘 다 rf_transport/fhss_core 쪽 설계가 필요):
- *   1) fsm_post_rx_audio_frame()을 실제로 호출해서 이 큐를 채워줄 곳이 아직
- *      없다 (rf_transport 없음) — 그 전까지는 큐가 항상 비어있어 이 태스크는
- *      portMAX_DELAY로 블록만 함.
- *   2) FSM_EVENT_RX_DONE(=RX_AUDIO 탈출)을 누가/언제 올릴지 미정. 지금은
- *      PTT_RELEASE 같은 명시적 종료 신호가 없어서, 상대가 그만 보내면 이
- *      태스크는 조용히 대기만 계속함 — 무음/타임아웃 판정으로 자동 종료할지,
- *      아니면 프레임 자체에 "마지막 프레임" 표시를 둘지는 rf_transport 설계
- *      시 같이 정할 것 (docs/fsm-design.md 결정 이력 참고).
+ * s_rx_audio_task를 NULL로 되돌리고 나서 vTaskDelete(NULL)로 자기 자신을
+ * 지운다 — on_enter_menu_idle()이 FSM_EVENT_RX_DONE 처리 시 다시 한번
+ * s_rx_audio_task를 정리하려 하는데, 이미 NULL이라 아무 일도 안 하고
+ * 넘어간다(이중 삭제 방지).
+ *
+ * 여전히 미정: fsm_post_rx_audio_frame()을 실제로 호출해줄 rf_transport가
+ * 아직 없어서, 지금은 이 타임아웃이 "부팅 후 곧바로 RX_AUDIO를 빠져나온다"는
+ * 뜻밖에 안 됨 — rf_transport가 생겨서 실제 프레임이 들어오기 시작해야 이
+ * 타임아웃이 의미를 가진다.
  */
 static TaskHandle_t s_rx_audio_task;
 
@@ -185,10 +192,16 @@ static void rx_audio_task(void *arg)
     fsm_rx_audio_frame_t frame;
 
     for (;;) {
-        if (xQueueReceive(s_rx_audio_queue, &frame, portMAX_DELAY) == pdTRUE) {
+        if (xQueueReceive(s_rx_audio_queue, &frame, pdMS_TO_TICKS(FSM_RX_AUDIO_IDLE_TIMEOUT_MS)) == pdTRUE) {
             audio_io_decode_play(frame.data, frame.len);
+        } else {
+            break;
         }
     }
+
+    s_rx_audio_task = NULL;
+    fsm_post_event(FSM_EVENT_RX_DONE);
+    vTaskDelete(NULL);
 }
 
 /* 상태별 진입 동작. 실제 하드웨어 제어는 각 담당(TODO)이 채운다. */
