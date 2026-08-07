@@ -38,7 +38,7 @@ firmware-esp32/
 └── docs/
 ```
 
-## 현재 구현 현황 (`feature/fsm-audio-wiring`)
+## 현재 구현 현황 (`feature/rx-audio-done-timeout`)
 - [x] `components/audio_codec/` — Speex 코덱 컴포넌트
   - `speex/` — xiph/speex 원본 (git submodule, pristine 유지)
   - `CMakeLists.txt` — ESP-IDF 빌드용 래퍼 (협대역 전용 소스만 선별)
@@ -68,7 +68,8 @@ firmware-esp32/
   - `on_enter_menu_idle`/`on_enter_menu_ota`에서 OLED에 현재 모드 표시
   - `on_enter_tx_audio()`: 20ms 주기로 `audio_io_capture_encode()` 호출하는 캡처 태스크 시작, PTT_RELEASE로 `MENU_IDLE` 재진입 시(`on_enter_menu_idle()`) 태스크 정리
   - `on_enter_rx_audio()`: 오디오 프레임 전용 큐(`fsm_post_rx_audio_frame(data, len)`, `main/fsm.h` 신규 API)에서 프레임을 꺼내 `audio_io_decode_play()`로 재생하는 태스크 시작, `on_enter_menu_idle()`에서 정리 — `fsm_event_t`(페이로드 없는 enum)와 별개 큐로 데이터 전달
-  - **미정으로 명시해둔 것**: (1) `fsm_post_rx_audio_frame()`을 실제 호출할 `rf_transport`가 아직 없어 큐가 항상 비어있음 (2) `FSM_EVENT_RX_DONE`(RX_AUDIO 탈출)을 언제 올릴지 미정 — 둘 다 `rf_transport` 설계 시 같이 정할 것 (`docs/fsm-design.md` 결정 이력 2026-08-06 참고)
+  - `FSM_EVENT_RX_DONE`은 `rx_audio_task`가 자체 판정: 1초(`FSM_RX_AUDIO_IDLE_TIMEOUT_MS`) 동안 새 프레임이 안 오면 스스로 이벤트를 올리고 태스크 종료 (무음 타임아웃 값은 `rf_transport` 실연동 후 재검토 필요 — 아직 실측 안 됨)
+  - **미정으로 명시해둔 것**: `fsm_post_rx_audio_frame()`을 실제 호출할 `rf_transport`가 아직 없어 큐가 항상 비어있음 → 지금은 위 타임아웃이 검증되지 않은 상태 (`docs/fsm-design.md` 결정 이력 2026-08-06 참고)
   - **의도적으로 안 채운 것**: `fhss_sync`/`ota_*`는 그대로 TODO — `rf_transport`가 없어 캡처한 프레임을 보낼 곳도, 실제 수신 트리거도 없음
   - **알려진 제약**: `rf_transport`/`fhss_core`가 없어 `FSM_EVENT_SYNC_ACQUIRED`를 아무도 안 올림 → 부팅 후 `FHSS_SYNC`에서 멈추고 `MENU_IDLE`(PTT/로터리/오디오 캡처가 실제로 쓰이는 상태)에 도달 못 함. 임시 bypass는 의도적으로 넣지 않음(이유는 `docs/fsm-design.md` 결정 이력 2026-08-05 참고) — 그래서 이 wiring은 컴파일/개별 컴포넌트 단위 검증까지만 가능하고, `rf_transport` 생기기 전까지 실기기 end-to-end 테스트는 불가
 - [x] `components/ota_client/` — OTA 세션/청크 검증/플래시 기록 컴포넌트 (팀2, 별도 브랜치에서 병합됨) — `rf_transport`(무선 송수신)가 아직 없어 실제 동작은 불가, 역할 분리만 잡혀있는 상태 (자세한 내용은 [components/ota_client/README.md](fhss-ota-radio/components/ota_client/README.md))
