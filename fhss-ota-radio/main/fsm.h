@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -66,6 +68,22 @@ void fsm_init(void);
 
 /* 다른 태스크/ISR에서 이벤트를 큐에 넣는다 (ISR에서는 안전하지 않음, 디퍼드 처리 필요). */
 void fsm_post_event(fsm_event_t event);
+
+/*
+ * 수신된 오디오 프레임 데이터를 FSM에 전달한다. fsm_post_event(FSM_EVENT_RX_FRAME)와
+ * 달리 데이터(len 바이트)를 같이 옮긴다 — 내부적으로 별도 큐에 복사해두고
+ * FSM_EVENT_RX_FRAME도 함께 올리므로, 이 함수를 호출했으면 fsm_post_event()를
+ * 따로 또 부를 필요는 없다.
+ *
+ * rf_transport/fhss_core가 수신 프레임을 검증한 뒤 여기로 넘기는 용도로 설계됨
+ * (아직 그 컴포넌트가 없어 실제 호출자는 없음 — 인터페이스만 먼저 정의).
+ * ISR에서는 안전하지 않음(fsm_post_event와 동일 — 디퍼드 처리 필요).
+ *
+ * len이 버퍼 한도를 넘거나 내부 큐가 가득 차 있으면 false를 반환하고 프레임을
+ * 버린다(호출자가 이를 드롭/재시도 여부 판단에 사용할 수 있음). 버퍼 한도는
+ * 현재 audio_codec 기준 AUDIO_CODEC_MAX_ENCODED_BYTES(64바이트)다.
+ */
+bool fsm_post_rx_audio_frame(const uint8_t *data, size_t len);
 
 /* 현재 상태 조회 (디버그/OLED 표시용). */
 fsm_state_t fsm_get_state(void);
