@@ -1,6 +1,7 @@
 #include "fsm.h"
 
 #include <stdbool.h>
+#include <string.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -17,6 +18,22 @@ static const char *TAG = "fsm";
 
 static QueueHandle_t s_event_queue;
 static fsm_state_t s_state = FSM_STATE_BOOT_INIT;
+
+/*
+ * 오디오 프레임 전용 큐. fsm_event_t(이벤트 큐)는 페이로드가 없는 enum이라
+ * 데이터를 못 실으므로, 수신 프레임 바이트는 이 큐로 따로 옮기고 이벤트
+ * 큐에는 "도착했다"는 신호(FSM_EVENT_RX_FRAME)만 올린다. 큐 깊이 4개 =
+ * 20ms/프레임 기준 약 80ms 지터 버퍼.
+ */
+#define FSM_RX_AUDIO_FRAME_MAX_BYTES AUDIO_CODEC_MAX_ENCODED_BYTES
+#define FSM_RX_AUDIO_QUEUE_DEPTH     4
+
+typedef struct {
+    uint8_t data[FSM_RX_AUDIO_FRAME_MAX_BYTES];
+    size_t len;
+} fsm_rx_audio_frame_t;
+
+static QueueHandle_t s_rx_audio_queue;
 
 /* 상태별 이름/이벤트별 이름: 로그 및 OLED 표시용 */
 static const char *s_state_names[FSM_STATE_COUNT] = {
@@ -102,9 +119,9 @@ static const fsm_transition_t s_transitions[] = {
 /*
  * UI 컴포넌트(display_ui/ptt_button/rotary_encoder) 콜백 — 각 컴포넌트는 FSM을
  * 모르므로, 이 콜백들이 fsm_post_event()로 매핑하는 접착부 역할을 한다.
- * rf_transport 등 아직 없는 컴포넌트에 걸린 전이(RX_AUDIO 재생 등)는 그대로
- * TODO로 남겨둔다 — 지금 여기서 채우면 실제 API가 없는 상태라 추측성 코드가
- * 되고, 나중에 다시 갈아엎어야 한다.
+ * rf_transport 등 아직 없는 컴포넌트가 직접 호출해야 할 지점(fsm_post_rx_audio_frame
+ * 등)은 그대로 TODO로 남겨둔다 — 지금 여기서 채우면 실제 API가 없는 상태라
+ * 추측성 코드가 되고, 나중에 다시 갈아엎어야 한다.
  */
 static void on_ptt_event(bool pressed, void *ctx)
 {
@@ -147,6 +164,33 @@ static void tx_audio_task(void *arg)
     }
 }
 
+/*
+ * RX_AUDIO 동안만 도는 재생 태스크. s_rx_audio_queue에서 프레임을 꺼내
+ * audio_io_decode_play()로 재생한다 — 데이터 경로 자체는 이걸로 완성.
+ *
+ * 미정 사항(둘 다 rf_transport/fhss_core 쪽 설계가 필요):
+ *   1) fsm_post_rx_audio_frame()을 실제로 호출해서 이 큐를 채워줄 곳이 아직
+ *      없다 (rf_transport 없음) — 그 전까지는 큐가 항상 비어있어 이 태스크는
+ *      portMAX_DELAY로 블록만 함.
+ *   2) FSM_EVENT_RX_DONE(=RX_AUDIO 탈출)을 누가/언제 올릴지 미정. 지금은
+ *      PTT_RELEASE 같은 명시적 종료 신호가 없어서, 상대가 그만 보내면 이
+ *      태스크는 조용히 대기만 계속함 — 무음/타임아웃 판정으로 자동 종료할지,
+ *      아니면 프레임 자체에 "마지막 프레임" 표시를 둘지는 rf_transport 설계
+ *      시 같이 정할 것 (docs/fsm-design.md 결정 이력 참고).
+ */
+static TaskHandle_t s_rx_audio_task;
+
+static void rx_audio_task(void *arg)
+{
+    fsm_rx_audio_frame_t frame;
+
+    for (;;) {
+        if (xQueueReceive(s_rx_audio_queue, &frame, portMAX_DELAY) == pdTRUE) {
+            audio_io_decode_play(frame.data, frame.len);
+        }
+    }
+}
+
 /* 상태별 진입 동작. 실제 하드웨어 제어는 각 담당(TODO)이 채운다. */
 static void on_enter_boot_init(void)
 {
@@ -171,6 +215,10 @@ static void on_enter_menu_idle(void)
         vTaskDelete(s_tx_audio_task);
         s_tx_audio_task = NULL;
     }
+    if (s_rx_audio_task != NULL) {
+        vTaskDelete(s_rx_audio_task);
+        s_rx_audio_task = NULL;
+    }
     oled_update_text(0, "MODE: IDLE");
 }
 static void on_enter_menu_ota(void) { oled_update_text(0, "MODE: OTA"); /* TODO(팀2): CC1101 OTA 채널 리스닝 준비 */ }
@@ -178,7 +226,10 @@ static void on_enter_tx_audio(void)
 {
     xTaskCreate(tx_audio_task, "tx_audio", 4096, NULL, tskIDLE_PRIORITY + 3, &s_tx_audio_task);
 }
-static void on_enter_rx_audio(void)      { /* TODO(팀5): rf_transport 수신 프레임을 audio_io_decode_play()로 재생 — RX_FRAME 이벤트에 프레임 데이터를 실어 나를 방법이 아직 없음(fsm_event_t는 페이로드 없는 enum) */ }
+static void on_enter_rx_audio(void)
+{
+    xTaskCreate(rx_audio_task, "rx_audio", 4096, NULL, tskIDLE_PRIORITY + 3, &s_rx_audio_task);
+}
 static void on_enter_ota_receiving(void) { /* TODO(팀2): OTA 수신 버퍼 초기화, 음성 태스크 일시 중단 */ }
 static void on_enter_ota_applying(void)  { /* TODO(팀2): 이미지 검증 및 OTA 파티션 기록 */ }
 static void on_enter_error(void)         { /* TODO(팀1/PM): 오류 로깅, 안전 상태로 정지 */ }
@@ -254,12 +305,32 @@ static void fsm_task(void *arg)
 void fsm_init(void)
 {
     s_event_queue = xQueueCreate(16, sizeof(fsm_event_t));
+    s_rx_audio_queue = xQueueCreate(FSM_RX_AUDIO_QUEUE_DEPTH, sizeof(fsm_rx_audio_frame_t));
     xTaskCreate(fsm_task, "fsm_task", 4096, NULL, tskIDLE_PRIORITY + 3, NULL);
 }
 
 void fsm_post_event(fsm_event_t event)
 {
     xQueueSend(s_event_queue, &event, 0);
+}
+
+bool fsm_post_rx_audio_frame(const uint8_t *data, size_t len)
+{
+    if (data == NULL || len == 0 || len > FSM_RX_AUDIO_FRAME_MAX_BYTES) {
+        return false;
+    }
+
+    fsm_rx_audio_frame_t frame;
+    frame.len = len;
+    memcpy(frame.data, data, len);
+
+    if (xQueueSend(s_rx_audio_queue, &frame, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "rx audio queue full, dropping frame");
+        return false;
+    }
+
+    fsm_post_event(FSM_EVENT_RX_FRAME);
+    return true;
 }
 
 fsm_state_t fsm_get_state(void)
