@@ -161,23 +161,25 @@ static void on_menu_cursor(rotary_encoder_menu_t cursor, void *ctx)
 }
 
 /*
- * TX_AUDIO 동안만 도는 캡처 태스크. 시작하자마자 "말하기 시작" 삐빅음을 짧게
- * 재생한다 — RX_AUDIO(수신 재생)가 아직 미구현이라 앰프 배선/동작을 확인할
- * 방법이 이것뿐이라 테스트용으로 넣음(2026-08-10). 삐빅음이 끝나면 스피커는
- * 바로 끄고(불필요하게 켜두지 않음), 이후 PTT를 누르고 있는 동안(TX_AUDIO
- * 상태인 동안) 20ms마다 마이크를 읽어 Speex로 인코딩한다. rf_transport가
- * 아직 없어 인코딩된 프레임을 실제로 보낼 곳이 없으므로 그 부분만 TODO —
- * 캡처/인코딩 자체는 audio_io가 이미 있으니 추측 없이 그대로 동작한다.
+ * TX_AUDIO 동안만 도는 캡처 태스크. PTT를 누르고 있는 동안(TX_AUDIO 상태인
+ * 동안) 20ms마다 마이크를 읽어 Speex로 인코딩한다. rf_transport가 아직 없어
+ * 인코딩된 프레임을 실제로 보낼 곳이 없으므로 그 부분만 TODO — 캡처/인코딩
+ * 자체는 audio_io가 이미 있으니 추측 없이 그대로 동작한다.
  * MENU_IDLE 진입(PTT_RELEASE) 시 on_enter_menu_idle()에서 태스크를 정리한다.
+ *
+ * "말하기 시작" 삐빅음은 여기(태스크 안)가 아니라 on_enter_tx_audio()에서,
+ * 즉 이 태스크를 만들기 *전에* fsm_task 안에서 재생한다 — PTT를 아주 빠르게
+ * 누르고 뗐을 때(삐빅음 재생 도중 PTT_RELEASE가 들어오는 경우)
+ * vTaskDelete()가 이 태스크를 스피커 disable 전에 강제 종료시켜서 SD 핀이
+ * HIGH로 계속 남아 삐빅음이 안 끝나고 계속 재생되는 버그가 있었다
+ * (troubleshoot/요약.md, 2026-08-10). fsm_task는 이벤트를 한 번에 하나씩
+ * 순서대로 처리하므로, 삐빅음 재생을 fsm_task 안에서 끝까지 블로킹으로 마친
+ * 뒤에야 다음 이벤트(PTT_RELEASE)를 처리하게 만들어서 이 경쟁 상태를 없앴다.
  */
 static TaskHandle_t s_tx_audio_task;
 
 static void tx_audio_task(void *arg)
 {
-    audio_io_speaker_enable();
-    audio_io_play_beep();
-    audio_io_speaker_disable();
-
     uint8_t frame[AUDIO_CODEC_MAX_ENCODED_BYTES];
 
     for (;;) {
@@ -258,6 +260,11 @@ static void on_enter_menu_idle(void)
 static void on_enter_menu_ota(void) { oled_update_text(0, "MODE: OTA"); /* TODO(팀2): CC1101 OTA 채널 리스닝 준비 */ }
 static void on_enter_tx_audio(void)
 {
+    /* fsm_task 안에서 블로킹으로 끝까지 재생 — 이유는 tx_audio_task 주석 참고. */
+    audio_io_speaker_enable();
+    audio_io_play_beep();
+    audio_io_speaker_disable();
+
     /* 스택 8192 — audio_io_capture_encode() -> audio_codec_encode() ->
      * speex_encode_int()(LPC 분석/코드북 탐색) 호출 체인이 4096으론 빠듯해서
      * 여유 있게 늘림. (실기기에서 겪은 재부팅 크래시의 실제 원인은 이게
