@@ -43,7 +43,6 @@ static QueueHandle_t s_rx_audio_queue;
 /* 상태별 이름/이벤트별 이름: 로그 및 OLED 표시용 */
 static const char *s_state_names[FSM_STATE_COUNT] = {
     [FSM_STATE_BOOT_INIT]     = "BOOT_INIT",
-    [FSM_STATE_FHSS_SYNC]     = "FHSS_SYNC",
     [FSM_STATE_MENU_IDLE]     = "MENU_IDLE",
     [FSM_STATE_MENU_OTA]      = "MENU_OTA",
     [FSM_STATE_TX_AUDIO]      = "TX_AUDIO",
@@ -55,7 +54,6 @@ static const char *s_state_names[FSM_STATE_COUNT] = {
 
 static const char *s_event_names[FSM_EVENT_COUNT] = {
     [FSM_EVENT_INIT_DONE]      = "INIT_DONE",
-    [FSM_EVENT_SYNC_ACQUIRED]  = "SYNC_ACQUIRED",
     [FSM_EVENT_SYNC_LOST]      = "SYNC_LOST",
     [FSM_EVENT_MENU_SELECT_IDLE] = "MENU_SELECT_IDLE",
     [FSM_EVENT_MENU_SELECT_OTA]  = "MENU_SELECT_OTA",
@@ -75,11 +73,16 @@ static const char *s_event_names[FSM_EVENT_COUNT] = {
 /*
  * 상태별 전이. 전역 전이(EV_ERROR, EV_SYNC_LOST)는 fsm_task()에서 별도 처리하므로 여기 넣지 않는다.
  *
- * 주의: 이 표에는 FHSS 홉 타이밍 보정이 없다 — 그것은 이 FSM의 상태가 아니라
- * CC1101 수신 드라이버(팀5)가 매 패킷 검증 성공 시 그 자리에서 홉 타이머를
- * 보정하는 이벤트 기반 로직이다. 정상 수신은 이벤트로 올라오지 않고, 연속
- * 수신 실패로 완전 동기 상실이 판정될 때만 EV_SYNC_LOST가 올라온다. 이 FSM은
- * 그 결과인 EV_SYNC_ACQUIRED / EV_SYNC_LOST 두 이벤트만 소비한다.
+ * 브로드캐스트 방식이라 "동기 획득 대기" 상태가 없다 — PTT 누른 쪽이 정해진
+ * 시작 채널로 먼저 송신하고 그 순간부터 시드 기반으로 제멋대로 호핑하며,
+ * 받는 쪽은 그 수신 시점을 기준으로 같은 시드로 호핑을 추종한다. 그래서
+ * BOOT_INIT 이후엔 곧바로 MENU_IDLE(정해진 채널에서 대기)로 들어간다.
+ *
+ * EV_SYNC_LOST는 그래도 전역 안전장치로 남겨둔다 — 무선 계층(rf_transport/
+ * fhss_core)이 홉 추종 중 연속 미수신 등으로 타이밍이 완전히 깨졌다고
+ * 판단하면 이 이벤트를 올리고, FSM은 지금 어느 상태에 있든 MENU_IDLE(정해진
+ * 채널)로 강제 복귀한다. 정상적인 한 세션 종료(TX_AUDIO의 PTT_RELEASE,
+ * RX_AUDIO의 RX_DONE)와는 별개의, 진짜 이상 상황용 탈출구다.
  *
  * 음성(FHSS)과 OTA는 같은 CC1101 라디오를 쓰는 단일 반이중 트랜시버이므로,
  * OTA_RECEIVING 진입 시 음성 호핑 이탈은 정책이 아니라 하드웨어 제약이다.
@@ -98,8 +101,7 @@ typedef struct {
 } fsm_transition_t;
 
 static const fsm_transition_t s_transitions[] = {
-    { FSM_STATE_BOOT_INIT,     FSM_EVENT_INIT_DONE,      FSM_STATE_FHSS_SYNC },
-    { FSM_STATE_FHSS_SYNC,     FSM_EVENT_SYNC_ACQUIRED,  FSM_STATE_MENU_IDLE },
+    { FSM_STATE_BOOT_INIT,     FSM_EVENT_INIT_DONE,      FSM_STATE_MENU_IDLE },
 
     { FSM_STATE_MENU_IDLE,     FSM_EVENT_PTT_PRESS,      FSM_STATE_TX_AUDIO },
     { FSM_STATE_MENU_IDLE,     FSM_EVENT_RX_FRAME,       FSM_STATE_RX_AUDIO },
@@ -130,9 +132,10 @@ static const fsm_transition_t s_transitions[] = {
  */
 static void on_ptt_event(bool pressed, void *ctx)
 {
-    /* status_led는 FSM 상태와 무관하게 PTT 원시 입력을 그대로 반영한다 —
-     * FHSS_SYNC에 멈춰있어 FSM_EVENT_PTT_PRESS가 처리 안 되는 지금도 하드웨어
-     * 배선/버튼 인식 자체는 눈으로 바로 확인할 수 있도록 하는 테스트용 표시. */
+    /* status_led는 FSM 처리 결과를 기다리지 않고 PTT 원시 입력을 그대로
+     * 반영한다 — GPIO 디바운스만 통과하면 바로 켜지는 테스트용 표시라,
+     * FSM 전이표가 어떻게 바뀌든(지금은 MENU_IDLE에서 TX_AUDIO로 실제 전이됨)
+     * 영향받지 않는다. */
     if (pressed) {
         status_led_set_white_dim();
     } else {
@@ -232,7 +235,6 @@ static void on_enter_boot_init(void)
 
     /* TODO(팀2): SPI(rf_transport/CC1101) 초기화 — 해당 컴포넌트 생기면 추가 */
 }
-static void on_enter_fhss_sync(void) { /* TODO(팀5): 호핑 시퀀스 동기화 시작 */ }
 static void on_enter_menu_idle(void)
 {
     if (s_tx_audio_task != NULL) {
@@ -260,7 +262,6 @@ static void on_enter_error(void)         { /* TODO(팀1/PM): 오류 로깅, 안�
 
 static void (*const s_enter_actions[FSM_STATE_COUNT])(void) = {
     [FSM_STATE_BOOT_INIT]     = on_enter_boot_init,
-    [FSM_STATE_FHSS_SYNC]     = on_enter_fhss_sync,
     [FSM_STATE_MENU_IDLE]     = on_enter_menu_idle,
     [FSM_STATE_MENU_OTA]      = on_enter_menu_ota,
     [FSM_STATE_TX_AUDIO]      = on_enter_tx_audio,
@@ -304,10 +305,9 @@ static void fsm_task(void *arg)
             continue;
         }
         if (event == FSM_EVENT_SYNC_LOST &&
-            s_state != FSM_STATE_FHSS_SYNC &&
             s_state != FSM_STATE_BOOT_INIT &&
             s_state != FSM_STATE_ERROR) {
-            fsm_transition_to(FSM_STATE_FHSS_SYNC);
+            fsm_transition_to(FSM_STATE_MENU_IDLE);
             continue;
         }
 

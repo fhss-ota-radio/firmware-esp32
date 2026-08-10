@@ -7,8 +7,7 @@ ESP32-S3 무선기 단말(`firmware-esp32`)의 최상위 애플리케이션 상�
 | 상태 | 한 줄 요약 |
 |---|---|
 | `BOOT_INIT` | 부팅, 주변장치 초기화 |
-| `FHSS_SYNC` | 호핑 동기 획득/재획득 중 |
-| `MENU_IDLE` | 음성 대기 (기본 메뉴) |
+| `MENU_IDLE` | 음성 대기 (기본 메뉴, 정해진 시작 채널에서 대기) |
 | `MENU_OTA` | OTA 대기 (사용자가 로터리로 진입) |
 | `TX_AUDIO` | 음성 송신 중 |
 | `RX_AUDIO` | 음성 수신 중 |
@@ -28,6 +27,7 @@ ESP32-S3 무선기 단말(`firmware-esp32`)의 최상위 애플리케이션 상�
 | 2026-08-06 | `TX_AUDIO`는 캡처(`audio_io`) 태스크까지만 와이어링, `RX_AUDIO`는 완전히 TODO로 유지 | 송신은 마이크 입력만 있으면 되지만(rf_transport로 보내는 지점만 TODO), 수신 재생은 상대가 보낸 프레임 바이트가 `fsm_event_t`에 실려올 방법이 없어(페이로드 없는 enum) 지금 채우면 추측 코드가 됨. `rf_transport` 설계 시 이벤트에 데이터 전달 방법도 같이 정해야 함 |
 | 2026-08-06 | `fsm_event_t`는 그대로 페이로드 없는 enum으로 유지, 오디오 프레임은 **별도 큐**(`fsm_post_rx_audio_frame()`)로 전달 | 모든 이벤트에 페이로드 필드를 넣으면 이벤트 큐 항목 크기가 전부 커짐(오디오만 필요한데). 큐 분리로 기존 이벤트 큐는 가볍게 유지하면서 RX_AUDIO 데이터 경로(디코딩+재생)는 실제로 연결. 다만 그 큐를 채워줄 호출자(`rf_transport`)와 `RX_DONE` 발생 시점은 여전히 미정 — 위 §6 참고 |
 | 2026-08-06 | `RX_AUDIO` 무음 타임아웃 **1초**로 확정, `rx_audio_task`가 자체 판정해 `FSM_EVENT_RX_DONE` 발생 | PTT_RELEASE 같은 명시적 종료 신호가 RX 쪽엔 없어서 무음/타임아웃 기반으로 결정. `rf_transport` 없이는 실제 프레임 유입이 없어 이 값이 실측 검증된 건 아님 — 실기기 연동 후 짧은 발화 사이 끊김/긴 침묵 오탐 여부 보고 조정 필요 |
+| 2026-08-10 | 브로드캐스트 방식으로 FHSS 설계 변경: `FSM_STATE_FHSS_SYNC`/`FSM_EVENT_SYNC_ACQUIRED` **제거**, `BOOT_INIT` → `MENU_IDLE` 직행 | "동기를 먼저 잡고 운용 시작"이 아니라 "정해진 시작 채널에서 대기하다가, PTT 누른 쪽이 먼저 송신하면서 시드 기반 호핑 시작 + 받는 쪽은 그 수신 시점 기준으로 추종"하는 구조로 확정. 별도 획득 대기 상태 자체가 불필요해짐. `FSM_EVENT_SYNC_LOST`는 전역 안전장치 이벤트로 유지(무선 계층이 호핑 추종 실패 판단 시 `MENU_IDLE`로 강제 복귀시키는 용도) — 팀5의 `fhss_sync_state`(SEARCHING/LOCKED, N회 연속 성공/실패 카운팅) 모듈이 이 이벤트의 소스가 될 후보. `ACQUIRED` 쪽은 더 이상 FSM에 필요 없어져 fhss_core 내부용으로만 남을 전망(팀5 확인 필요) |
 
 ## 1. 설계 전제
 
@@ -40,39 +40,42 @@ ESP32-S3 무선기 단말(`firmware-esp32`)의 최상위 애플리케이션 상�
 - 로터리 엔코더 클릭으로 메뉴를 확정하는 이벤트(`EV_MENU_SELECT_IDLE`/`EV_MENU_SELECT_OTA`)는 `MENU_IDLE`↔`MENU_OTA` 사이에서만 정의되어 있고, `TX_AUDIO`/`RX_AUDIO`/`OTA_RECEIVING`/`OTA_APPLYING` 상태에는 이 전이 자체가 없다. 즉 "메뉴 변경 불가"는 **전이표에 해당 이벤트를 정의하지 않는 것만으로 자연히 보장**된다 (해당 상태에서 이 이벤트가 들어오면 그냥 무시).
 - 로터리 회전(커서 이동)은 FSM 이벤트가 아니다. 화면에 `MENU_IDLE`/`MENU_OTA` 중 무엇이 하이라이트되는지는 `display_ui` 컴포넌트 내부의 로컬 상태일 뿐이며, 클릭(확정) 시점에만 그때 하이라이트돼 있던 항목에 해당하는 이벤트가 FSM에 올라온다.
 
-#### 동기화 상태 (`FHSS_SYNC`)와 에러
-- `FHSS_SYNC` 상태 ≠ 홉 타이밍 보정. `FHSS_SYNC`는 "아직 동기가 없는" 두 경우에만 존재한다: (1) 최초 부팅 후 최초 동기 획득, (2) 연속 수신 실패로 동기를 완전히 잃어 재획득(재탐색)이 필요한 경우. 일단 동기가 잡히면(`EV_SYNC_ACQUIRED`) 이후의 타이밍 유지는 **별도 태스크가 계속 도는 방식이 아니라, 매 수신 패킷 검증에 성공할 때마다 그 자리에서 보정하는 이벤트 기반(event-driven) 방식**이다. 자세한 내용은 [§1.1](#11-동시성-모델-fhss-홉-추종-vs-최상위-fsm) 참고.
-- `EV_SYNC_LOST`는 위 (2), 즉 "기대되는 수신 윈도우에서 연속 N회 유효 패킷을 받지 못함(검증 실패 포함)"으로 판정될 때만 발생하는 전역(global) 이벤트다. 이 경우에는 현재 어떤 최상위 상태에 있든(설령 `RX_AUDIO` 도중이라도) 통신 자체가 불가능해지므로 강제로 `FHSS_SYNC`로 전이한다.
-- 미수신 카운팅은 `OTA_RECEIVING`/`OTA_APPLYING` 동안 정지한다. CC1101이 이 두 상태에서는 애초에 의도적으로 음성 호핑 스케줄을 벗어나 OTA 채널을 듣고 있으므로, 그 사이 음성 슬롯을 못 받는 것은 "동기 상실"이 아니다. `OTA_APPLYING`에서 음성 상태(`MENU_IDLE` 등)로 복귀할 때 CC1101은 경과 시간을 계산해 호핑 스케줄상 현재 있어야 할 슬롯으로 바로 재합류하며, 이 재합류가 실패해야만(연속 미수신) 비로소 `EV_SYNC_LOST`가 발생한다.
+#### 브로드캐스트 호핑과 `EV_SYNC_LOST`(안전장치)
+- "동기를 먼저 잡고 나서 운용 시작"하는 별도 상태가 없다. 평소엔 모든 단말이 정해진 시작 채널에서 `MENU_IDLE`로 대기하고 있고, PTT 누른 쪽이 그 채널로 먼저 송신하면서 그 순간부터 결정론적 시드 기반으로 호핑을 시작한다. 받는 쪽은 그 수신 시점을 기준 삼아 같은 시드로 호핑을 추종한다(팀5, `fhss_core`). 부팅 직후엔 곧바로 `MENU_IDLE`로 들어간다 — 자세한 내용은 [§1.1](#11-동시성-모델-fhss-홉-추종-vs-최상위-fsm) 참고.
+- `EV_SYNC_LOST`는 여전히 전역(global) 이벤트로 남아있지만, 역할이 "재탐색 상태로 전이"가 아니라 **"MENU_IDLE(정해진 채널)로 강제 복귀"**로 바뀌었다. 무선 계층이 호핑 추종 중 연속 미수신 등으로 타이밍이 완전히 깨졌다고 판단하면 이 이벤트를 올리고, 현재 어떤 최상위 상태에 있든(설령 `TX_AUDIO`/`RX_AUDIO` 도중이라도) `MENU_IDLE`로 강제 전이한다. 정상적인 세션 종료(`TX_AUDIO`의 `PTT_RELEASE`, `RX_AUDIO`의 `RX_DONE`)와는 별개의, 이상 상황 전용 탈출구다.
+- 미수신 카운팅은 `OTA_RECEIVING`/`OTA_APPLYING` 동안 정지한다. CC1101이 이 두 상태에서는 애초에 의도적으로 음성 호핑 스케줄을 벗어나 OTA 채널을 듣고 있으므로, 그 사이 음성 슬롯을 못 받는 것은 "동기 상실"이 아니다.
 - 치명적 오류(`EV_ERROR`)도 전역 이벤트로, 어느 상태에서든 `ERROR` 상태로 강제 전이한다.
 
 ### 1.1 동시성 모델: FHSS 홉 추종 vs 최상위 FSM
 
 이 문서의 상태기계(§2~§4, `fsm.c`)는 **애플리케이션 동작 모드**만 표현한다. 홉 타이밍 유지는 별도의 상시 실행 태스크가 프리러닝 타이머로 도는 것이 **아니라**, CC1101 수신 경로(패킷 핸들러) 안에 내장된 로직이다:
 
-1. 매 홉 슬롯마다 패킷을 수신 시도한다.
-2. **패킷이 도착해 CRC/주소 검증에 성공하면**, 그 즉시 그 패킷의 실제 도착 시각을 기준으로 다음 홉 타이머(슬롯 시작 시각)를 재정렬한다 — 이게 곧 "동기 유지"다. 이 보정은 audio 프레임이든 keepalive/비콘성 패킷이든, 유효하게 검증되기만 하면 매번 일어난다.
-3. **패킷 검증에 실패하거나 아예 수신되지 않으면**, 내부 카운터만 증가시키고 이전 타이밍을 그대로 유지(추정)한다.
-4. 이 카운터가 임계값(연속 N회 미수신/검증 실패)을 넘기면 그때 비로소 "동기 완전 상실"로 판정하고 `EV_SYNC_LOST`를 올려 `FHSS_SYNC`(재탐색) 상태로 강제 전이한다.
+1. PTT 누른 쪽이 정해진 시작 채널로 먼저 송신 → 그 순간부터 시드 기반으로 호핑 시작.
+2. 받는 쪽은 시작 채널에서 그 첫 프레임을 수신하면, 그 도착 시각과 패킷에 실린 홉 인덱스/슬롯 번호(`fhss_sync_packet_t`)를 기준으로 같은 시드의 호핑 시퀀스를 계산해 따라간다.
+3. **이후 매 패킷이 도착해 CRC/주소 검증에 성공하면**, 그 즉시 그 패킷의 실제 도착 시각을 기준으로 다음 홉 타이머(슬롯 시작 시각)를 재정렬한다 — 이게 "타이밍 유지"다.
+4. **패킷 검증에 실패하거나 아예 수신되지 않으면**, 내부 카운터만 증가시키고 이전 타이밍을 그대로 유지(추정)한다. 이 카운터가 임계값(연속 N회 미수신/검증 실패)을 넘기면 그때 비로소 "완전히 놓쳤다"고 판정하고 `EV_SYNC_LOST`를 올려 `MENU_IDLE`(정해진 채널)로 강제 전이한다. (팀5의 `fhss_sync_state` 모듈이 이 판정 로직의 후보 — `SEARCHING`/`LOCKED` 상태와 연속 성공/실패 카운팅으로 `LOST` 이벤트를 냄)
 
-즉 보정 자체는 `MENU_IDLE`/`RX_AUDIO` 등 수신이 일어나는 모든 상태에서 수신 이벤트에 얹혀 자연히 일어나며, FSM은 이를 이벤트로 인지하지 않는다 — FSM이 신경 쓰는 것은 "동기가 있다(`EV_SYNC_ACQUIRED` 이후)"와 "완전히 끊겼다(`EV_SYNC_LOST`)" 두 가지뿐이다.
+즉 보정 자체는 `TX_AUDIO`/`RX_AUDIO` 등 실제 호핑이 일어나는 세션 동안 수신 이벤트에 얹혀 자연히 일어나며, FSM은 이를 이벤트로 인지하지 않는다 — FSM이 신경 쓰는 것은 세션의 정상 종료(`PTT_RELEASE`/`RX_DONE`)와 완전히 놓쳤을 때(`EV_SYNC_LOST`) 두 가지뿐이다.
 
 ```mermaid
 sequenceDiagram
     participant Radio as CC1101 수신 드라이버
     participant App as 상위 FSM (fsm.c)
 
-    Note over Radio: 매 홉 슬롯마다 수신 시도
-    Radio->>Radio: 패킷 CRC/주소 검증 성공
-    Radio->>Radio: 도착 시각 기준 홉 타이머 보정 (동기 유지)
-    Radio-->>App: (audio 프레임이면) EV_RX_FRAME
+    Note over Radio: PTT 누른 쪽이 시작 채널로 첫 프레임 송신
+    Radio->>Radio: 시작 채널에서 첫 프레임 수신 -> 시드+홉 인덱스로 호핑 시퀀스 계산
+    Radio-->>App: EV_RX_FRAME
+
+    Note over Radio: 이후 매 홉 슬롯마다 수신 시도
+    Radio->>Radio: 패킷 CRC/주소 검증 성공 -> 도착 시각 기준 홉 타이머 보정
+    Radio-->>App: EV_RX_FRAME
 
     Note over Radio: 다음 슬롯에서 검증 실패/무수신
     Radio->>Radio: 미수신 카운터 증가 (타이밍은 이전 값 유지)
 
     Note over Radio: 연속 N회 실패 누적
     Radio-->>App: EV_SYNC_LOST
-    App->>App: 어떤 상태에 있었든 FHSS_SYNC로 강제 전이
+    App->>App: 어떤 상태에 있었든 MENU_IDLE로 강제 복귀
 ```
 
 ## 2. 상태 (States)
@@ -80,9 +83,8 @@ sequenceDiagram
 | 상태 | 설명 | 담당(스펙 기준) |
 |---|---|---|
 | `BOOT_INIT` | 전원 인가 직후. I2S(마이크/스피커), OLED, 로터리 엔코더, SPI(CC1101), PTT 버튼 GPIO 초기화 | 팀1, 팀2 |
-| `FHSS_SYNC` | 피어/네트워크와 주파수 호핑 동기 **획득/재획득**. 최초 부팅 시, 또는 연속 수신 실패로 동기를 완전히 잃었을 때만 진입한다. 동기 유지(타이밍 보정)는 이 상태가 아니라 [§1.1](#11-동시성-모델-fhss-홉-추종-vs-최상위-fsm)처럼 매 수신 패킷 검증 성공 시 이벤트 기반으로 이루어진다 | 팀5 |
-| `MENU_IDLE` | 동기 완료, **음성 모드**로 호핑 시퀀스를 따라가며 PTT 입력 또는 음성 수신 프레임 대기. 기본(default) 메뉴. 수신 패킷은 음성으로 해석됨 | 팀1, 팀5 |
-| `MENU_OTA` | 동기 완료, **OTA 대기 모드**. 수신 패킷은 펌웨어 청크로 해석되며 ACK/재전송 로직 수행 대상이 됨. 로터리 엔코더로 사용자가 명시적으로 진입해야 함(자동 진입 없음) | 팀1, 팀2 |
+| `MENU_IDLE` | **음성 모드**, 정해진 시작 채널에서 PTT 입력 또는 음성 수신 프레임 대기. 부팅 직후 기본(default) 진입 상태. 수신 패킷은 음성으로 해석됨 | 팀1, 팀5 |
+| `MENU_OTA` | **OTA 대기 모드**. 수신 패킷은 펌웨어 청크로 해석되며 ACK/재전송 로직 수행 대상이 됨. 로터리 엔코더로 사용자가 명시적으로 진입해야 함(자동 진입 없음) | 팀1, 팀2 |
 | `TX_AUDIO` | PTT 눌림 (`MENU_IDLE`에서만 발생). 마이크 캡처 → Speex 인코딩 → FHSS 채널 송신 | 팀1, 팀2 |
 | `RX_AUDIO` | 상대 단말로부터 음성 프레임 수신 중 (`MENU_IDLE`에서만 발생) → Speex 디코딩 → 스피커 재생 | 팀1, 팀2 |
 | `OTA_RECEIVING` | (`MENU_OTA`에서만 발생) 게이트웨이가 CC1101로 브로드캐스트한 OTA 청크 수신·버퍼링 | 팀2 |
@@ -94,8 +96,7 @@ sequenceDiagram
 | 이벤트 | 발생 주체 | 설명 |
 |---|---|---|
 | `EV_INIT_DONE` | 부팅 시퀀스 | 주변장치 초기화 완료 |
-| `EV_SYNC_ACQUIRED` | CC1101 수신 태스크 (홉 로직, 팀5) | 호핑 동기 획득 |
-| `EV_SYNC_LOST` | CC1101 수신 태스크 (홉 로직, 팀5) | 호핑 동기 상실 (전역) |
+| `EV_SYNC_LOST` | CC1101 수신 태스크 (홉 로직, 팀5) | 호핑 추종 실패(연속 미수신 등)로 완전히 놓침 — `MENU_IDLE`로 강제 복귀 (전역, 안전장치) |
 | `EV_MENU_SELECT_IDLE` | 로터리 엔코더 클릭 핸들러 | `MENU_OTA`에서 클릭 시점에 `MENU_IDLE`이 하이라이트돼 있었으면 발생 |
 | `EV_MENU_SELECT_OTA` | 로터리 엔코더 클릭 핸들러 | `MENU_IDLE`에서 클릭 시점에 `MENU_OTA`가 하이라이트돼 있었으면 발생 |
 | `EV_PTT_PRESS` / `EV_PTT_RELEASE` | PTT 버튼 ISR/디바운스 태스크 | 송신 시작/종료 (`MENU_IDLE`에서만 유효) |
@@ -112,8 +113,7 @@ sequenceDiagram
 
 | 현재 상태 | 이벤트 | 다음 상태 | 비고 |
 |---|---|---|---|
-| `BOOT_INIT` | `EV_INIT_DONE` | `FHSS_SYNC` | |
-| `FHSS_SYNC` | `EV_SYNC_ACQUIRED` | `MENU_IDLE` | 기본 메뉴는 항상 `MENU_IDLE`로 진입 |
+| `BOOT_INIT` | `EV_INIT_DONE` | `MENU_IDLE` | 별도 동기 획득 대기 없이 곧바로 기본 메뉴로 진입 |
 | `MENU_IDLE` | `EV_PTT_PRESS` | `TX_AUDIO` | |
 | `MENU_IDLE` | `EV_RX_FRAME` | `RX_AUDIO` | |
 | `MENU_IDLE` | `EV_MENU_SELECT_OTA` | `MENU_OTA` | 로터리 클릭으로 메뉴 전환 |
@@ -125,7 +125,7 @@ sequenceDiagram
 | `OTA_RECEIVING` | `EV_OTA_COMPLETE` | `OTA_APPLYING` | |
 | `OTA_APPLYING` | `EV_OTA_VERIFY_OK` | `BOOT_INIT` | 이미지 스왑 후 재부팅 |
 | `OTA_APPLYING` | `EV_OTA_VERIFY_FAIL` | `MENU_OTA` | 이미지 폐기, 기존 펌웨어 유지, 재시도 위해 OTA 대기 모드 유지 (※ 확정 필요 — `MENU_IDLE`로 되돌릴지 재검토 가능) |
-| **모든 상태** | `EV_SYNC_LOST` | `FHSS_SYNC` | 전역 전이 |
+| **모든 상태** | `EV_SYNC_LOST` | `MENU_IDLE` | 전역 전이, 안전장치(이상 상황 전용) |
 | **모든 상태** | `EV_ERROR` | `ERROR` | 전역 전이 |
 | `ERROR` | `EV_RETRY` | `BOOT_INIT` | |
 
@@ -138,8 +138,7 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
     [*] --> BOOT_INIT
-    BOOT_INIT --> FHSS_SYNC : EV_INIT_DONE
-    FHSS_SYNC --> MENU_IDLE : EV_SYNC_ACQUIRED
+    BOOT_INIT --> MENU_IDLE : EV_INIT_DONE
 
     MENU_IDLE --> TX_AUDIO : EV_PTT_PRESS
     MENU_IDLE --> RX_AUDIO : EV_RX_FRAME
@@ -159,7 +158,6 @@ stateDiagram-v2
     ERROR --> BOOT_INIT : EV_RETRY
 
     BOOT_INIT --> ERROR : EV_ERROR
-    FHSS_SYNC --> ERROR : EV_ERROR
     MENU_IDLE --> ERROR : EV_ERROR
     MENU_OTA --> ERROR : EV_ERROR
     TX_AUDIO --> ERROR : EV_ERROR
@@ -167,12 +165,11 @@ stateDiagram-v2
     OTA_RECEIVING --> ERROR : EV_ERROR
     OTA_APPLYING --> ERROR : EV_ERROR
 
-    MENU_IDLE --> FHSS_SYNC : EV_SYNC_LOST
-    MENU_OTA --> FHSS_SYNC : EV_SYNC_LOST
-    TX_AUDIO --> FHSS_SYNC : EV_SYNC_LOST
-    RX_AUDIO --> FHSS_SYNC : EV_SYNC_LOST
-    OTA_RECEIVING --> FHSS_SYNC : EV_SYNC_LOST
-    OTA_APPLYING --> FHSS_SYNC : EV_SYNC_LOST
+    MENU_OTA --> MENU_IDLE : EV_SYNC_LOST
+    TX_AUDIO --> MENU_IDLE : EV_SYNC_LOST
+    RX_AUDIO --> MENU_IDLE : EV_SYNC_LOST
+    OTA_RECEIVING --> MENU_IDLE : EV_SYNC_LOST
+    OTA_APPLYING --> MENU_IDLE : EV_SYNC_LOST
 ```
 
 ## 6. 구현 매핑
@@ -184,8 +181,9 @@ stateDiagram-v2
   - **RX_AUDIO 데이터 경로 연결 완료(2026-08-06)**: `fsm_event_t`(페이로드 없는 enum)와 별개로 오디오 프레임 전용 큐(`s_rx_audio_queue`, 깊이 4)를 추가하고, `fsm_post_rx_audio_frame(data, len)` API를 새로 노출(`main/fsm.h`). 이 함수를 호출하면 프레임을 큐에 넣고 `FSM_EVENT_RX_FRAME`도 함께 올린다. `on_enter_rx_audio()`는 큐를 소비해 `audio_io_decode_play()`로 재생하는 태스크를 시작하고, `on_enter_menu_idle()`에서 정리한다(TX_AUDIO 캡처 태스크와 대칭 구조).
     - **미정 1**: `fsm_post_rx_audio_frame()`을 실제로 호출해줄 곳이 아직 없음 — `rf_transport`가 생겨서 수신 프레임을 검증한 뒤 이 함수를 호출해야 데이터가 흐름.
     - **`FSM_EVENT_RX_DONE` 종료 조건 확정(2026-08-06)**: `rx_audio_task`가 큐 대기를 `FSM_RX_AUDIO_IDLE_TIMEOUT_MS`(1초)로 제한 — 그 안에 새 프레임이 안 오면 수신 종료로 보고 스스로 `FSM_EVENT_RX_DONE`을 올리고 태스크 종료. `rf_transport`가 아직 없어 실제 프레임이 안 들어오므로, 지금은 이 타임아웃이 검증되지 않은 채 값만 정해둔 상태 — 실기기 연동 후 1초가 적절한지 재검토 필요.
-  - `rf_transport`가 필요한 `on_enter_fhss_sync`/`ota_*`는 해당 컴포넌트가 없어 아직 TODO — 지금 채우면 실제 API 없이 추측성 코드가 되므로 의도적으로 비워둠.
-- 음성 FHSS 홉 타이밍 보정과 OTA 수신은 **같은 CC1101 SPI 드라이버/태스크**(팀2+팀5 공동) 안에서 모드 전환으로 구현한다. 홉 타이밍 보정은 별도의 프리러닝 타이머 태스크가 아니라 **수신 이벤트 처리 로직에 내장**되며, 연속 N회 수신 실패로 동기를 완전히 잃었을 때만 `FSM_EVENT_SYNC_LOST`를, 재획득에 성공하면 `FSM_EVENT_SYNC_ACQUIRED`를 `fsm_post_event()`로 올린다. 정상적인 매 수신 성공은 FSM에 이벤트로 올라오지 않는다(암묵적으로 동기가 유지되고 있다는 뜻). `OTA_RECEIVING` 진입/이탈 시 이 태스크는 음성 호핑 스케줄 추종을 명시적으로 멈추고/재개한다. **수신 패킷을 음성/OTA 중 무엇으로 해석할지는 이 태스크가 현재 메뉴 모드(`fsm_get_state()`가 `MENU_IDLE`인지 `MENU_OTA`인지)를 참조해 결정한다.**
+  - `rf_transport`가 필요한 `ota_*`는 해당 컴포넌트가 없어 아직 TODO — 지금 채우면 실제 API 없이 추측성 코드가 되므로 의도적으로 비워둠.
+  - **`FHSS_SYNC` 상태/`SYNC_ACQUIRED` 이벤트 제거(2026-08-10)**: 브로드캐스트 설계로 바뀌면서 별도 동기 획득 대기 상태가 불필요해짐 — `FSM_STATE_FHSS_SYNC` 삭제, `BOOT_INIT`의 `EV_INIT_DONE`이 곧바로 `MENU_IDLE`로 전이. `on_enter_fhss_sync()` 함수도 제거. `FSM_EVENT_SYNC_ACQUIRED`도 더 이상 FSM이 소비하지 않아 `fsm.h`에서 제거. `FSM_EVENT_SYNC_LOST`는 전역 안전장치로 유지하되 목적지를 `MENU_IDLE`로 변경(기존엔 `FHSS_SYNC`로 보냈음).
+- 음성 FHSS 홉 타이밍 보정과 OTA 수신은 **같은 CC1101 SPI 드라이버/태스크**(팀2+팀5 공동) 안에서 모드 전환으로 구현한다. 홉 타이밍 보정은 별도의 프리러닝 타이머 태스크가 아니라 **수신 이벤트 처리 로직에 내장**되며, 연속 N회 수신 실패로 완전히 놓쳤다고 판정될 때만 `FSM_EVENT_SYNC_LOST`를 `fsm_post_event()`로 올린다(§1 참고 — 팀5의 `fhss_sync_state` 모듈이 이 판정의 후보). 정상적인 매 수신 성공은 FSM에 이벤트로 올라오지 않는다. `OTA_RECEIVING` 진입/이탈 시 이 태스크는 음성 호핑 스케줄 추종을 명시적으로 멈추고/재개한다. **수신 패킷을 음성/OTA 중 무엇으로 해석할지는 이 태스크가 현재 메뉴 모드(`fsm_get_state()`가 `MENU_IDLE`인지 `MENU_OTA`인지)를 참조해 결정한다.**
 - 로터리 엔코더 태스크(`components/rotary_encoder`, 팀1)는 회전 시 로컬 커서만 갱신(FSM 이벤트 없음, `fsm.c`가 이를 받아 OLED 미리보기만 갱신), 클릭 시 그 시점 커서에 해당하는 `FSM_EVENT_MENU_SELECT_IDLE`/`FSM_EVENT_MENU_SELECT_OTA`를 `fsm_post_event()`로 올린다.
 - 각 모듈(PTT 버튼 태스크, 로터리 엔코더 태스크, CC1101 수신 태스크, OTA 적용 로직)은 하드웨어 이벤트 발생 시 `fsm_post_event()`만 호출하고, 실제 상태 전이/부수효과는 FSM 태스크 하나에서만 처리한다 (경쟁 상태 방지).
 - 상태 진입/이탈 시 수행할 하드웨어 동작(마이크 시작/정지, OLED 상태 표시 등)은 `fsm.c`의 `on_enter_*` 스텁에 각 담당 팀이 채워 넣는다.

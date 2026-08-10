@@ -39,7 +39,7 @@ firmware-esp32/
 └── docs/
 ```
 
-## 현재 구현 현황 (`feature/status-led-ptt-indicator`)
+## 현재 구현 현황 (`refactor/fsm-drop-fhss-sync-state`)
 - [x] `components/audio_codec/` — Speex 코덱 컴포넌트
   - `speex/` — xiph/speex 원본 (git submodule, pristine 유지)
   - `CMakeLists.txt` — ESP-IDF 빌드용 래퍼 (협대역 전용 소스만 선별)
@@ -71,15 +71,16 @@ firmware-esp32/
   - `on_enter_rx_audio()`: 오디오 프레임 전용 큐(`fsm_post_rx_audio_frame(data, len)`, `main/fsm.h` 신규 API)에서 프레임을 꺼내 `audio_io_decode_play()`로 재생하는 태스크 시작, `on_enter_menu_idle()`에서 정리 — `fsm_event_t`(페이로드 없는 enum)와 별개 큐로 데이터 전달
   - `FSM_EVENT_RX_DONE`은 무음 타임아웃 1초(`FSM_RX_AUDIO_IDLE_TIMEOUT_MS`)로 확정 — `rx_audio_task`가 1초간 새 프레임 없으면 스스로 이벤트를 올리고 종료 (`rf_transport` 없어 아직 실측 검증은 안 됨)
   - **미정으로 명시해둔 것**: `fsm_post_rx_audio_frame()`을 실제 호출할 `rf_transport`가 아직 없어 큐가 항상 비어있음 (`docs/fsm-design.md` 결정 이력 2026-08-06 참고)
-  - **의도적으로 안 채운 것**: `fhss_sync`/`ota_*`는 그대로 TODO — `rf_transport`가 없어 캡처한 프레임을 보낼 곳도, 실제 수신 트리거도 없음
-  - **알려진 제약**: `rf_transport`/`fhss_core`가 없어 `FSM_EVENT_SYNC_ACQUIRED`를 아무도 안 올림 → 부팅 후 `FHSS_SYNC`에서 멈추고 `MENU_IDLE`(PTT/로터리/오디오 캡처가 실제로 쓰이는 상태)에 도달 못 함. 임시 bypass는 의도적으로 넣지 않음(이유는 `docs/fsm-design.md` 결정 이력 2026-08-05 참고) — 그래서 이 wiring은 컴파일/개별 컴포넌트 단위 검증까지만 가능하고, `rf_transport` 생기기 전까지 실기기 end-to-end 테스트는 불가
+  - **의도적으로 안 채운 것**: `ota_*`는 그대로 TODO — `rf_transport`가 없어 실제 수신 트리거가 없음
+  - **`FHSS_SYNC` 상태/`SYNC_ACQUIRED` 이벤트 제거(2026-08-10)**: 브로드캐스트 설계로 확정(PTT 누른 쪽이 정해진 시작 채널로 먼저 송신 후 시드 기반 호핑, 받는 쪽은 그 수신 시점 기준으로 추종) — 별도 "동기 획득 대기" 상태가 불필요해져 `FSM_STATE_FHSS_SYNC`/`FSM_EVENT_SYNC_ACQUIRED`를 `fsm.h`/`fsm.c`에서 삭제하고 `BOOT_INIT`이 곧바로 `MENU_IDLE`로 전이하도록 변경. **이제 PTT를 누르면 FSM이 실제로 `TX_AUDIO`로 전이한다** (예전엔 `FHSS_SYNC`에 멈춰 unhandled로 무시됐음)
+  - `FSM_EVENT_SYNC_LOST`는 전역 안전장치 이벤트로 유지 — 목적지만 `FHSS_SYNC`에서 `MENU_IDLE`로 변경. 무선 계층(`rf_transport`/`fhss_core`)이 홉 추종 실패를 판단하면 이 이벤트로 강제 복귀시키는 용도(팀5의 `fhss_sync_state` 모듈이 판정 로직 후보, 아직 미완성)
+  - **알려진 제약**: `rf_transport`가 없어 `TX_AUDIO`에서 캡처한 프레임을 실제로 보낼 곳도, `RX_AUDIO`가 받을 실제 프레임도 없음 — 그래서 이 wiring은 컴파일/개별 컴포넌트 단위 검증까지만 가능하고, `rf_transport` 생기기 전까지 실기기 end-to-end 테스트는 불가
 - [x] `components/ota_client/` — OTA 세션/청크 검증/플래시 기록 컴포넌트 (팀2, 별도 브랜치에서 병합됨) — `rf_transport`(무선 송수신)가 아직 없어 실제 동작은 불가, 역할 분리만 잡혀있는 상태 (자세한 내용은 [components/ota_client/README.md](fhss-ota-radio/components/ota_client/README.md))
 - [x] `components/status_led/` — 온보드 WS2812 RGB LED(GPIO38, `led_strip` managed component) 상태 표시 (디버그용)
-  - `main/fsm.c`의 `on_ptt_event()`에 직접 연결 — FSM 상태와 무관하게 PTT 누르면 흰색 약하게 켜지고 떼면 꺼짐. `FHSS_SYNC`에 멈춰있어도 PTT 하드웨어 인식 자체는 눈으로 바로 확인 가능
+  - `main/fsm.c`의 `on_ptt_event()`에 직접 연결 — FSM 처리 결과를 기다리지 않고 GPIO 디바운스만 통과하면 바로 켜짐/꺼짐 (FSM 전이표 변경과 무관하게 동작)
 - [x] `components/fhss_core/` — `fhss_sync_packet.c/h`(동기 패킷 encode/decode, big-endian 13바이트 와이어 포맷) 구현됨 (팀5, 별도 브랜치에서 병합됨)
   - `fhss_hop_sequence.c/h`는 아직 빈 스텁 — 호핑 시퀀스 계산 로직 미구현
-- [ ] CC1101 저수준 SPI(`rf_transport`), `fhss_hop_sequence` 실구현은 아직 미완성 — 이게 없어서 FSM wiring도, `ota_client`도 실기기에서는 검증 못 하는 상태
-- [ ] **설계 재검토 중**: `FHSS_SYNC` 상태를 아예 없애고 `BOOT_INIT` → `MENU_IDLE` 직행으로 바꾸는 방향 논의 완료(브로드캐스트 방식 — PTT 누른 쪽이 고정 채널로 먼저 송신 후 시드 기반 호핑 시작, 받는 쪽은 그 수신 시점을 기준으로 호핑 추종) — 아직 `fsm.h`/`fsm.c`/`docs/fsm-design.md`에는 미반영, 코드 변경 전 단계
+- [ ] CC1101 저수준 SPI(`rf_transport`), `fhss_hop_sequence` 실구현, `fhss_sync_state`(SEARCHING/LOCKED 판정, 헤더 비어있어 빌드 안 됨)는 아직 미완성 — 이게 없어서 FSM wiring도, `ota_client`도 실기기에서는 검증 못 하는 상태
 
 ## 담당
 팀원1 (오디오/OLED), 팀원2 (OTA/부트로더), 팀원5 (FHSS)
