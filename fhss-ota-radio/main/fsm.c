@@ -161,16 +161,23 @@ static void on_menu_cursor(rotary_encoder_menu_t cursor, void *ctx)
 }
 
 /*
- * TX_AUDIO 동안만 도는 캡처 태스크. PTT를 누르고 있는 동안(TX_AUDIO 상태인
- * 동안) 20ms마다 마이크를 읽어 Speex로 인코딩한다. rf_transport가 아직 없어
- * 인코딩된 프레임을 실제로 보낼 곳이 없으므로 그 부분만 TODO — 캡처/인코딩
- * 자체는 audio_io가 이미 있으니 추측 없이 그대로 동작한다.
+ * TX_AUDIO 동안만 도는 캡처 태스크. 시작하자마자 "말하기 시작" 삐빅음을 짧게
+ * 재생한다 — RX_AUDIO(수신 재생)가 아직 미구현이라 앰프 배선/동작을 확인할
+ * 방법이 이것뿐이라 테스트용으로 넣음(2026-08-10). 삐빅음이 끝나면 스피커는
+ * 바로 끄고(불필요하게 켜두지 않음), 이후 PTT를 누르고 있는 동안(TX_AUDIO
+ * 상태인 동안) 20ms마다 마이크를 읽어 Speex로 인코딩한다. rf_transport가
+ * 아직 없어 인코딩된 프레임을 실제로 보낼 곳이 없으므로 그 부분만 TODO —
+ * 캡처/인코딩 자체는 audio_io가 이미 있으니 추측 없이 그대로 동작한다.
  * MENU_IDLE 진입(PTT_RELEASE) 시 on_enter_menu_idle()에서 태스크를 정리한다.
  */
 static TaskHandle_t s_tx_audio_task;
 
 static void tx_audio_task(void *arg)
 {
+    audio_io_speaker_enable();
+    audio_io_play_beep();
+    audio_io_speaker_disable();
+
     uint8_t frame[AUDIO_CODEC_MAX_ENCODED_BYTES];
 
     for (;;) {
