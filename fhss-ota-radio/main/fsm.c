@@ -13,6 +13,7 @@
 #include "display_ui.h"
 #include "ptt_button.h"
 #include "rotary_encoder.h"
+#include "status_led.h"
 
 static const char *TAG = "fsm";
 
@@ -125,6 +126,15 @@ static const fsm_transition_t s_transitions[] = {
  */
 static void on_ptt_event(bool pressed, void *ctx)
 {
+    /* status_led는 FSM 상태와 무관하게 PTT 원시 입력을 그대로 반영한다 —
+     * FHSS_SYNC에 멈춰있어 FSM_EVENT_PTT_PRESS가 처리 안 되는 지금도 하드웨어
+     * 배선/버튼 인식 자체는 눈으로 바로 확인할 수 있도록 하는 테스트용 표시. */
+    if (pressed) {
+        status_led_set_white_dim();
+    } else {
+        status_led_off();
+    }
+
     fsm_post_event(pressed ? FSM_EVENT_PTT_PRESS : FSM_EVENT_PTT_RELEASE);
 }
 
@@ -195,6 +205,7 @@ static void rx_audio_task(void *arg)
 static void on_enter_boot_init(void)
 {
     display_ui_init();
+    status_led_init();
 
     ptt_button_init();
     ptt_button_set_callback(on_ptt_event, NULL);
