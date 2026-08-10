@@ -62,7 +62,11 @@ static void spk_channel_init(void)
     std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
 
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_spk_tx, &std_cfg));
-    ESP_ERROR_CHECK(i2s_channel_enable(s_spk_tx));
+    /* 마이크 채널과 달리 여기서 enable하지 않는다 — 스피커 TX DMA를 켜두고
+     * 한 번도 i2s_channel_write()를 안 부르는 채로 계속 방치하면(부팅부터
+     * RX_AUDIO 진입 전까지) GDMA TX ISR이 NULL 컨텍스트로 불려서
+     * LoadProhibited로 재부팅되는 문제가 실기기에서 확인됨(2026-08-10).
+     * audio_io_speaker_enable()/disable()로 실제 재생 시점에만 켠다. */
 }
 
 void audio_io_init(void)
@@ -93,6 +97,16 @@ int audio_io_capture_encode(uint8_t *out, size_t out_capacity)
     }
 
     return audio_codec_encode(pcm, out, out_capacity);
+}
+
+void audio_io_speaker_enable(void)
+{
+    ESP_ERROR_CHECK(i2s_channel_enable(s_spk_tx));
+}
+
+void audio_io_speaker_disable(void)
+{
+    i2s_channel_disable(s_spk_tx);
 }
 
 int audio_io_decode_play(const uint8_t *data, size_t len)

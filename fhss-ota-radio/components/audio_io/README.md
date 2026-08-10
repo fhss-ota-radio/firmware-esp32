@@ -14,7 +14,7 @@ I2S 마이크(INMP441)/스피커(MAX98357A) 입출력 + audio_codec(Speex) 연�
 
 - 마이크(RX 전용)와 스피커(TX 전용)를 **서로 다른 I2S 포트**(`I2S_NUM_0`/`I2S_NUM_1`)에 고정 배정
   - 반이중 라디오와 무관하게 마이크/스피커는 물리적으로 별도 핀이라 동시 사용 가능
-  - TX_AUDIO/RX_AUDIO 전환 때마다 I2S 재설정할 필요 없이 부팅 시 한 번만 초기화
+- 마이크는 `audio_io_init()` 시점에 바로 enable, **스피커는 채널만 만들고 enable 안 함** — `audio_io_speaker_enable()`/`disable()`로 실제 재생 시점(RX_AUDIO 진입/이탈)에만 켠다. TX DMA를 켜둔 채 한 번도 안 쓰면 GDMA TX 인터럽트가 NULL 컨텍스트로 불려 재부팅되는 문제가 실기기에서 확인됨(2026-08-10) — 마이크는 계속 캡처해도 문제없어서 그대로 둠
 - INMP441은 24bit 샘플을 32bit 슬롯에 실어 보내므로 RX는 `I2S_DATA_BIT_WIDTH_32BIT`로 열고, 상위 16bit만 취해 16bit PCM으로 변환
 - MAX98357A는 ESP가 클럭 마스터라 슬롯 폭 제약이 없어 TX는 `I2S_DATA_BIT_WIDTH_16BIT`로 열어 audio_codec의 PCM을 그대로 사용
 - 샘플레이트/프레임 크기는 audio_codec 기준(`AUDIO_CODEC_SAMPLE_RATE`=8kHz, `AUDIO_CODEC_FRAME_SAMPLES`=160)에 맞춤 — 리샘플링 없음
@@ -33,8 +33,10 @@ uint8_t frame[AUDIO_CODEC_MAX_ENCODED_BYTES];
 int n = audio_io_capture_encode(frame, sizeof(frame));
 if (n > 0) { /* frame[0..n) 을 rf_transport로 송신 */ }
 
-// RX_AUDIO: 수신한 프레임 디코딩+재생
+// RX_AUDIO 진입 시 스피커 켜기, 이탈 시 끄기 (main/fsm.c의 on_enter_rx_audio/on_enter_menu_idle 참고)
+audio_io_speaker_enable();
 audio_io_decode_play(rx_frame, rx_len);
+audio_io_speaker_disable();
 ```
 
 ## 하드웨어 배선 확정 시 수정할 것 (`audio_io_config.h`)
@@ -47,9 +49,5 @@ audio_io_decode_play(rx_frame, rx_len);
 ## 제약 / TODO
 
 - `audio_io_capture_encode`/`decode_play`는 한 번에 한 프레임(20ms)만 처리 — 호출 주기 관리(태스크/타이머)는 상위(FSM TX_AUDIO/RX_AUDIO)에서 담당
-- `main.c`/FSM에 아직 연결 안 됨 — 컴포넌트 단독 빌드만 가능한 상태
-- 실기기 미보유로 캡처 품질(마이크 게인, 앰프 볼륨 등) 미검증
-
-test update.
-
-test update2.
+- `audio_io_decode_play()` 호출 전 반드시 `audio_io_speaker_enable()`을 먼저 불러야 함 — 안 그러면 채널이 READY 상태라 `i2s_channel_write()`가 실패함
+- 캡처 품질(마이크 게인, 앰프 볼륨 등)은 실기기 브링업 중이라 미검증

@@ -28,7 +28,7 @@ display_ui_clear();                          // 전체 지우기
 
 ## 하드웨어 배선 확정 시 수정할 것 (`display_ui_config.h`)
 
-- `DISPLAY_UI_I2C_SDA_GPIO` / `DISPLAY_UI_I2C_SCL_GPIO` — 현재 GPIO8/9는 **placeholder**, 실배선에 맞게 변경 필수
+- `DISPLAY_UI_I2C_SDA_GPIO` / `DISPLAY_UI_I2C_SCL_GPIO` — 현재 SDA=GPIO21, SCL=GPIO47(실기기 테스트 배선). 최종 배선 확정 전까지는 바뀔 수 있음, 다른 보드/배선이면 이 값만 수정
 - `DISPLAY_UI_I2C_ADDR` — 기본 `0x3C`. 모듈에 따라 `0x3D`인 경우도 있음, 안 켜지면 제일 먼저 의심
 - `DISPLAY_UI_I2C_PORT` — 다른 I2C 장치와 버스 공유 시 포트 번호 조정
 - `DISPLAY_UI_WIDTH` / `HEIGHT` — 128x64 아닌 다른 크기 모듈로 바뀌면 수정 (128x32 등)
