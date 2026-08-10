@@ -39,9 +39,9 @@ firmware-esp32/
 └── docs/
 ```
 
-## 현재 구현 현황 (`test/oled-i2c-wiring`)
+## 현재 구현 현황 (`test/speaker-amp-wiring`)
 
-**2026-08-10: 실기기 첫 검증 성공** — OLED/PTT/LED/마이크 캡처가 실제 ESP32-S3 보드에서 정상 동작 확인됨 (PTT 누르면 FSM이 `TX_AUDIO`로 실제 전이, LED 점등, 크래시 없음). 아래 각 항목에 반영.
+**2026-08-10: 실기기 첫 검증 성공** — OLED/PTT/LED/마이크 캡처가 실제 ESP32-S3 보드에서 정상 동작 확인됨 (PTT 누르면 FSM이 `TX_AUDIO`로 실제 전이, LED 점등, 크래시 없음). 앰프(MAX98357A) GAIN/SD GPIO 제어 + PTT 삐빅음 테스트 진행 중. 아래 각 항목에 반영.
 - [x] `components/audio_codec/` — Speex 코덱 컴포넌트
   - `speex/` — xiph/speex 원본 (git submodule, pristine 유지)
   - `CMakeLists.txt` — ESP-IDF 빌드용 래퍼 (협대역 전용 소스만 선별)
@@ -62,15 +62,17 @@ firmware-esp32/
   - `rotary_encoder_config.h` — 핀 A/B/SW=GPIO8/9/10(placeholder). **주의**: GPIO5/6/7은 audio_io 마이크와 겹쳐서 사용 금지(겹치면 I2S BCLK 토글이 회전으로 오인되는 버그 있었음, 2026-08-10)
   - `rotary_encoder.h` / `rotary_encoder.c` — quadrature 폴링 디코딩 + SW 디바운스, 커서 이동은 순환(`MENU_IDLE ↔ MENU_OTA`)
   - 공개 API: `rotary_encoder_init()`, `rotary_encoder_set_cursor_callback()`, `rotary_encoder_set_select_callback()`, `rotary_encoder_get_cursor()`
-- [x] `components/audio_io/` — I2S 마이크(INMP441)/스피커(MAX98357A) 입출력 + audio_codec 연결, **마이크 캡처 실기기 테스트 완료**
-  - `audio_io_config.h` — 마이크/스피커 I2S 포트·핀(placeholder) 설정
+- [x] `components/audio_io/` — I2S 마이크(INMP441)/스피커(MAX98357A) 입출력 + audio_codec 연결, **마이크 캡처 실기기 테스트 완료, 앰프 배선/테스트 진행 중**
+  - `audio_io_config.h` — 마이크(GPIO5/6/7)/스피커(BCLK=15,LRC=16,DIN=17,GAIN=18,SD=11, ESP32-S3-DevKitC-1 J1 헤더 기준 배치) 핀 설정
   - 마이크(RX)=`I2S_NUM_0`, 스피커(TX)=`I2S_NUM_1` 별도 포트 고정 배정 (재설정 없이 동시 존재)
-  - 공개 API: `audio_io_init()`, `audio_io_capture_encode(out, cap)`, `audio_io_decode_play(data, len)`, `audio_io_speaker_enable()`/`audio_io_speaker_disable()` — 내부에서 `audio_codec_encode/decode` 호출
-  - **스피커 채널은 지연 활성화**: 마이크와 달리 `audio_io_init()`에서 채널만 만들고 enable 안 함 — `RX_AUDIO` 진입 시에만 `audio_io_speaker_enable()`로 켬. 켜둔 채 한 번도 안 쓰면 GDMA TX 인터럽트가 NULL 컨텍스트로 불려 재부팅되는 문제가 실기기에서 확인돼 수정함(2026-08-10)
+  - 공개 API: `audio_io_init()`, `audio_io_capture_encode(out, cap)`, `audio_io_decode_play(data, len)`, `audio_io_speaker_enable()`/`audio_io_speaker_disable()`, `audio_io_play_beep()` — 내부에서 `audio_codec_encode/decode` 호출
+  - **스피커 채널은 지연 활성화**: 마이크와 달리 `audio_io_init()`에서 채널만 만들고 enable 안 함 — 실제 재생 시점(`RX_AUDIO` 진입, 또는 삐빅음 재생 직전)에만 `audio_io_speaker_enable()`로 켬. 켜둔 채 한 번도 안 쓰면 GDMA TX 인터럽트가 NULL 컨텍스트로 불려 재부팅되는 문제가 실기기에서 확인돼 수정함(2026-08-10)
+  - **GAIN/SD GPIO 제어 추가**: GAIN은 항상 HIGH(VDD)=6dB 고정(GPIO로 저항 없이 가능한 값 중 최소), SD는 `audio_io_speaker_enable/disable()`에서 HIGH(왼쪽 채널 출력)/LOW(완전 꺼짐)로 제어
+  - **PTT 테스트용 삐빅음**: `RX_AUDIO`(수신 재생) 미구현 상태에서 앰프 동작 확인용으로 `audio_io_play_beep()` 추가 — A5(880Hz)→D6(1175Hz) 2음. 볼륨은 GAIN 6dB + 소프트웨어 진폭(`AUDIO_IO_BEEP_AMPLITUDE`=500/32767, 약 1.5%)로 이중으로 최소화
 - [x] **`display_ui`/`ptt_button`/`rotary_encoder`/`audio_io` → FSM wiring 완료** (`main/fsm.c`)
   - 부팅 시(`on_enter_boot_init()`) 네 컴포넌트 `init()` + 콜백 등록: `ptt_button` press/release → `FSM_EVENT_PTT_PRESS/RELEASE`, `rotary_encoder` 클릭 → `FSM_EVENT_MENU_SELECT_IDLE/OTA`, 로터리 회전 → `oled_update_text()`로 미리보기만 갱신(FSM 이벤트 아님), `audio_codec_init()`/`audio_io_init()`
   - `on_enter_menu_idle`/`on_enter_menu_ota`에서 OLED에 현재 모드 표시
-  - `on_enter_tx_audio()`: 20ms 주기로 `audio_io_capture_encode()` 호출하는 캡처 태스크(스택 8192) 시작, PTT_RELEASE로 `MENU_IDLE` 재진입 시(`on_enter_menu_idle()`) 태스크 정리. **실기기 검증 완료** — PTT 눌러서 `MENU_IDLE → TX_AUDIO` 실제 전이 확인
+  - `on_enter_tx_audio()`: **`fsm_task` 안에서 블로킹으로** 스피커 켜고 `audio_io_play_beep()` 삐빅음 재생 후 다시 끔(앰프 테스트용) → 그 다음에야 `tx_audio_task`(마이크 20ms 캡처 루프, 스택 8192) 생성. 삐빅음을 태스크 안이 아니라 `fsm_task`에서 블로킹으로 끝까지 재생하는 이유: PTT를 삐빅음 재생 중(~210ms 이내)에 떼면 `vTaskDelete()`가 스피커 disable 전에 태스크를 강제 종료시켜 삐빅음이 안 끝나고 계속 재생되는 버그가 있었음 — `fsm_task`는 이벤트를 하나씩 순서대로 처리하니 삐빅음이 끝나야 `PTT_RELEASE`를 처리해서 이 경쟁 상태를 없앰(진단 과정은 로컬 `troubleshoot/요약.md` 참고, git 비관리). PTT_RELEASE로 `MENU_IDLE` 재진입 시(`on_enter_menu_idle()`) `tx_audio_task` 정리. **실기기 검증 완료** — PTT 눌러서 `MENU_IDLE → TX_AUDIO` 실제 전이 확인
   - `on_enter_rx_audio()`: `audio_io_speaker_enable()`로 스피커 켠 뒤, 오디오 프레임 전용 큐(`fsm_post_rx_audio_frame(data, len)`, `main/fsm.h` 신규 API)에서 프레임을 꺼내 `audio_io_decode_play()`로 재생하는 태스크(스택 8192) 시작, `on_enter_menu_idle()`에서 태스크 정리 + `audio_io_speaker_disable()` — `fsm_event_t`(페이로드 없는 enum)와 별개 큐로 데이터 전달
   - `FSM_EVENT_RX_DONE`은 무음 타임아웃 1초(`FSM_RX_AUDIO_IDLE_TIMEOUT_MS`)로 확정 — `rx_audio_task`가 1초간 새 프레임 없으면 스스로 이벤트를 올리고 종료 (`rf_transport` 없어 아직 실측 검증은 안 됨)
   - **미정으로 명시해둔 것**: `fsm_post_rx_audio_frame()`을 실제 호출할 `rf_transport`가 아직 없어 큐가 항상 비어있음 (`docs/fsm-design.md` 결정 이력 2026-08-06 참고)
