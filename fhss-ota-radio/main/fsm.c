@@ -250,11 +250,15 @@ static void on_enter_menu_idle(void)
 static void on_enter_menu_ota(void) { oled_update_text(0, "MODE: OTA"); /* TODO(팀2): CC1101 OTA 채널 리스닝 준비 */ }
 static void on_enter_tx_audio(void)
 {
-    xTaskCreate(tx_audio_task, "tx_audio", 4096, NULL, tskIDLE_PRIORITY + 3, &s_tx_audio_task);
+    /* 스택 8192 — audio_io_capture_encode() -> audio_codec_encode() ->
+     * speex_encode_int()(LPC 분석/코드북 탐색) 호출 체인이 4096으론 부족해서
+     * 실기기에서 스택 오버플로우로 재부팅되는 문제가 있었음(2026-08-10). */
+    xTaskCreate(tx_audio_task, "tx_audio", 8192, NULL, tskIDLE_PRIORITY + 3, &s_tx_audio_task);
 }
 static void on_enter_rx_audio(void)
 {
-    xTaskCreate(rx_audio_task, "rx_audio", 4096, NULL, tskIDLE_PRIORITY + 3, &s_rx_audio_task);
+    /* audio_codec_decode()도 같은 호출 체인 무게라 tx와 동일하게 8192로. */
+    xTaskCreate(rx_audio_task, "rx_audio", 8192, NULL, tskIDLE_PRIORITY + 3, &s_rx_audio_task);
 }
 static void on_enter_ota_receiving(void) { /* TODO(팀2): OTA 수신 버퍼 초기화, 음성 태스크 일시 중단 */ }
 static void on_enter_ota_applying(void)  { /* TODO(팀2): 이미지 검증 및 OTA 파티션 기록 */ }

@@ -2,10 +2,12 @@
 
 #include "driver/gpio.h"
 
-/* 실배선 확정 전 placeholder — 배선 정해지면 이 값만 수정 */
-#define ROTARY_ENCODER_GPIO_A  GPIO_NUM_5
-#define ROTARY_ENCODER_GPIO_B  GPIO_NUM_6
-#define ROTARY_ENCODER_GPIO_SW GPIO_NUM_7
+/* 실배선 확정 전 placeholder — 배선 정해지면 이 값만 수정.
+ * GPIO5/6/7은 audio_io 마이크(BCLK/WS/SD)가 이미 쓰고 있어서 겹치면 안 됨 —
+ * 겹쳤을 때 I2S 클럭 토글이 엔코더 회전으로 오인되는 버그가 있었음(2026-08-10). */
+#define ROTARY_ENCODER_GPIO_A  GPIO_NUM_8
+#define ROTARY_ENCODER_GPIO_B  GPIO_NUM_9
+#define ROTARY_ENCODER_GPIO_SW GPIO_NUM_10
 
 /* A/B, SW 공통 폴링 주기(ms). ISR 없이 폴링으로만 처리 (ptt_button과 동일 방식) */
 #define ROTARY_ENCODER_POLL_MS 2
