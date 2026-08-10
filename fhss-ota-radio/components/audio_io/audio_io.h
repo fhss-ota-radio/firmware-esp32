@@ -9,9 +9,22 @@
 extern "C" {
 #endif
 
-/* 마이크(I2S_NUM_0)/스피커(I2S_NUM_1) 채널 초기화. app_main 등에서 한 번 호출.
- * audio_codec_init()도 별도로 호출해야 한다 — 이 컴포넌트는 I2S 입출력만 담당. */
+/*
+ * 마이크(I2S_NUM_0)/스피커(I2S_NUM_1) 채널 초기화. app_main 등에서 한 번 호출.
+ * audio_codec_init()도 별도로 호출해야 한다 — 이 컴포넌트는 I2S 입출력만 담당.
+ *
+ * 마이크는 여기서 바로 enable되지만, 스피커는 채널만 만들어두고 enable하지
+ * 않는다 — 실제로 재생할 때만 audio_io_speaker_enable()로 켤 것. TX DMA를
+ * 켜두고 한 번도 안 쓰는 채로 방치하면 GDMA TX 인터럽트가 죽는 문제가
+ * 실기기에서 확인됐다(2026-08-10).
+ */
 void audio_io_init(void);
+
+/* 스피커 채널을 켠다/끈다. RX_AUDIO 진입/이탈 시에만 호출할 것 — 부팅 시
+ * 자동으로 켜두지 않는 이유는 audio_io_init() 주석 참고. disable은 이미
+ * 꺼진 상태에서 불러도 안전(에러 무시). */
+void audio_io_speaker_enable(void);
+void audio_io_speaker_disable(void);
 
 /*
  * 마이크에서 한 프레임(AUDIO_CODEC_FRAME_SAMPLES=160 샘플, 20ms)을 읽어
