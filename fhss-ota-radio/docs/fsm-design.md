@@ -27,6 +27,7 @@ ESP32-S3 무선기 단말(`firmware-esp32`)의 최상위 애플리케이션 상�
 | 2026-08-05 | `rf_transport`/`fhss_core` 없는 동안 `FHSS_SYNC` 자동 통과용 임시 bypass **넣지 않음** | `FSM_EVENT_SYNC_ACQUIRED`를 인위로 쏘면 마치 동기화가 동작하는 것처럼 보여 나중에 놓치기 쉬움. 대가로 `MENU_IDLE`/`MENU_OTA`(PTT·로터리 와이어링 포함) 실기기 end-to-end 테스트는 `rf_transport` 생기기 전까지 불가, 컴파일·개별 컴포넌트 검증까지만 가능 |
 | 2026-08-06 | `TX_AUDIO`는 캡처(`audio_io`) 태스크까지만 와이어링, `RX_AUDIO`는 완전히 TODO로 유지 | 송신은 마이크 입력만 있으면 되지만(rf_transport로 보내는 지점만 TODO), 수신 재생은 상대가 보낸 프레임 바이트가 `fsm_event_t`에 실려올 방법이 없어(페이로드 없는 enum) 지금 채우면 추측 코드가 됨. `rf_transport` 설계 시 이벤트에 데이터 전달 방법도 같이 정해야 함 |
 | 2026-08-06 | `fsm_event_t`는 그대로 페이로드 없는 enum으로 유지, 오디오 프레임은 **별도 큐**(`fsm_post_rx_audio_frame()`)로 전달 | 모든 이벤트에 페이로드 필드를 넣으면 이벤트 큐 항목 크기가 전부 커짐(오디오만 필요한데). 큐 분리로 기존 이벤트 큐는 가볍게 유지하면서 RX_AUDIO 데이터 경로(디코딩+재생)는 실제로 연결. 다만 그 큐를 채워줄 호출자(`rf_transport`)와 `RX_DONE` 발생 시점은 여전히 미정 — 위 §6 참고 |
+| 2026-08-06 | `RX_AUDIO` 무음 타임아웃 **1초**로 확정, `rx_audio_task`가 자체 판정해 `FSM_EVENT_RX_DONE` 발생 | PTT_RELEASE 같은 명시적 종료 신호가 RX 쪽엔 없어서 무음/타임아웃 기반으로 결정. `rf_transport` 없이는 실제 프레임 유입이 없어 이 값이 실측 검증된 건 아님 — 실기기 연동 후 짧은 발화 사이 끊김/긴 침묵 오탐 여부 보고 조정 필요 |
 
 ## 1. 설계 전제
 
@@ -99,7 +100,7 @@ sequenceDiagram
 | `EV_MENU_SELECT_OTA` | 로터리 엔코더 클릭 핸들러 | `MENU_IDLE`에서 클릭 시점에 `MENU_OTA`가 하이라이트돼 있었으면 발생 |
 | `EV_PTT_PRESS` / `EV_PTT_RELEASE` | PTT 버튼 ISR/디바운스 태스크 | 송신 시작/종료 (`MENU_IDLE`에서만 유효) |
 | `EV_RX_FRAME` | CC1101 수신 태스크 | 음성 프레임 도착 (`MENU_IDLE` 상태에서 수신 시) |
-| `EV_RX_DONE` | 오디오 태스크 | 수신 무음 타임아웃 등으로 수신 종료 |
+| `EV_RX_DONE` | `rx_audio_task`(`main/fsm.c`) | 수신 무음 타임아웃(1초, `FSM_RX_AUDIO_IDLE_TIMEOUT_MS`)으로 수신 종료 |
 | `EV_OTA_START` | CC1101 수신 태스크 | 게이트웨이 OTA 헤더 패킷 감지 (`MENU_OTA` 상태에서 수신 시) |
 | `EV_OTA_CHUNK` | CC1101 수신 태스크 | OTA 이미지 청크 수신 |
 | `EV_OTA_COMPLETE` | CC1101 수신 태스크 | 마지막 청크 수신, 전체 이미지 확보 |
@@ -182,7 +183,7 @@ stateDiagram-v2
   - `audio_io`/`audio_codec` wiring 완료: `on_enter_boot_init()`에서 `audio_codec_init()`/`audio_io_init()` 호출, `on_enter_tx_audio()`가 캡처(`audio_io_capture_encode()`) 태스크를 시작하고 `on_enter_menu_idle()`(PTT_RELEASE로 도달)에서 정리. 인코딩된 프레임을 실제로 보낼 `rf_transport`가 없어 그 지점만 TODO.
   - **RX_AUDIO 데이터 경로 연결 완료(2026-08-06)**: `fsm_event_t`(페이로드 없는 enum)와 별개로 오디오 프레임 전용 큐(`s_rx_audio_queue`, 깊이 4)를 추가하고, `fsm_post_rx_audio_frame(data, len)` API를 새로 노출(`main/fsm.h`). 이 함수를 호출하면 프레임을 큐에 넣고 `FSM_EVENT_RX_FRAME`도 함께 올린다. `on_enter_rx_audio()`는 큐를 소비해 `audio_io_decode_play()`로 재생하는 태스크를 시작하고, `on_enter_menu_idle()`에서 정리한다(TX_AUDIO 캡처 태스크와 대칭 구조).
     - **미정 1**: `fsm_post_rx_audio_frame()`을 실제로 호출해줄 곳이 아직 없음 — `rf_transport`가 생겨서 수신 프레임을 검증한 뒤 이 함수를 호출해야 데이터가 흐름.
-    - **미정 2**: `FSM_EVENT_RX_DONE`(RX_AUDIO 탈출)을 누가/언제 올릴지 미정. PTT_RELEASE 같은 명시적 종료 신호가 RX 쪽엔 없음 — 무음/타임아웃 판정으로 자동 종료할지, 프레임에 "마지막 프레임" 표시를 둘지는 `rf_transport` 설계 시 함께 정할 것.
+    - **`FSM_EVENT_RX_DONE` 종료 조건 확정(2026-08-06)**: `rx_audio_task`가 큐 대기를 `FSM_RX_AUDIO_IDLE_TIMEOUT_MS`(1초)로 제한 — 그 안에 새 프레임이 안 오면 수신 종료로 보고 스스로 `FSM_EVENT_RX_DONE`을 올리고 태스크 종료. `rf_transport`가 아직 없어 실제 프레임이 안 들어오므로, 지금은 이 타임아웃이 검증되지 않은 채 값만 정해둔 상태 — 실기기 연동 후 1초가 적절한지 재검토 필요.
   - `rf_transport`가 필요한 `on_enter_fhss_sync`/`ota_*`는 해당 컴포넌트가 없어 아직 TODO — 지금 채우면 실제 API 없이 추측성 코드가 되므로 의도적으로 비워둠.
 - 음성 FHSS 홉 타이밍 보정과 OTA 수신은 **같은 CC1101 SPI 드라이버/태스크**(팀2+팀5 공동) 안에서 모드 전환으로 구현한다. 홉 타이밍 보정은 별도의 프리러닝 타이머 태스크가 아니라 **수신 이벤트 처리 로직에 내장**되며, 연속 N회 수신 실패로 동기를 완전히 잃었을 때만 `FSM_EVENT_SYNC_LOST`를, 재획득에 성공하면 `FSM_EVENT_SYNC_ACQUIRED`를 `fsm_post_event()`로 올린다. 정상적인 매 수신 성공은 FSM에 이벤트로 올라오지 않는다(암묵적으로 동기가 유지되고 있다는 뜻). `OTA_RECEIVING` 진입/이탈 시 이 태스크는 음성 호핑 스케줄 추종을 명시적으로 멈추고/재개한다. **수신 패킷을 음성/OTA 중 무엇으로 해석할지는 이 태스크가 현재 메뉴 모드(`fsm_get_state()`가 `MENU_IDLE`인지 `MENU_OTA`인지)를 참조해 결정한다.**
 - 로터리 엔코더 태스크(`components/rotary_encoder`, 팀1)는 회전 시 로컬 커서만 갱신(FSM 이벤트 없음, `fsm.c`가 이를 받아 OLED 미리보기만 갱신), 클릭 시 그 시점 커서에 해당하는 `FSM_EVENT_MENU_SELECT_IDLE`/`FSM_EVENT_MENU_SELECT_OTA`를 `fsm_post_event()`로 올린다.
