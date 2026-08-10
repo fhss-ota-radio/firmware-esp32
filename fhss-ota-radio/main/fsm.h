@@ -11,12 +11,16 @@ extern "C" {
 /* 상태/이벤트 정의 및 전이표는 docs/fsm-design.md 참고 */
 
 /*
- * FSM_STATE_FHSS_SYNC는 홉 동기 "획득/재획득" 전용 상태다 (최초 부팅 또는
- * 연속 수신 실패로 동기를 완전히 잃었을 때만 진입). 동기가 잡힌 뒤의 타이밍
- * 유지는 별도 태스크가 계속 도는 방식이 아니라, CC1101 수신 드라이버가
- * 매 패킷 검증 성공 시 그 자리에서 홉 타이머를 보정하는 이벤트 기반 방식이다
- * (팀5 담당). 정상 수신은 FSM에 이벤트로 올라오지 않으며, 연속 N회 검증
- * 실패로 완전 동기 상실이 판정될 때만 FSM_EVENT_SYNC_LOST가 올라온다.
+ * 브로드캐스트 방식이라 "동기 획득 대기" 상태(FSM_STATE_FHSS_SYNC)가 없다.
+ * PTT 누른 쪽이 정해진 시작 채널로 먼저 송신하고 그 순간부터 시드 기반으로
+ * 호핑하며, 받는 쪽은 그 수신 시점을 기준으로 같은 시드를 따라 호핑을
+ * 추종한다(팀5 담당) — 그래서 BOOT_INIT 다음엔 곧바로 MENU_IDLE로 들어간다.
+ *
+ * FSM_EVENT_SYNC_LOST는 그래도 전역 안전장치 이벤트로 남아있다. 무선 계층이
+ * 호핑 추종 중 연속 미수신 등으로 타이밍이 완전히 깨졌다고 판단하면 이
+ * 이벤트를 올리고, FSM은 지금 상태와 무관하게 MENU_IDLE(정해진 채널)로 강제
+ * 복귀한다. TX_AUDIO/RX_AUDIO의 정상 세션 종료(PTT_RELEASE/RX_DONE)와는
+ * 별개의, 이상 상황 전용 탈출구다.
  *
  * 음성(FHSS)과 OTA는 같은 CC1101 라디오를 공유한다(단일 반이중 트랜시버).
  * OTA_RECEIVING 동안은 CC1101이 의도적으로 음성 호핑을 이탈하므로, 그 사이의
@@ -32,7 +36,6 @@ extern "C" {
  */
 typedef enum {
     FSM_STATE_BOOT_INIT = 0,
-    FSM_STATE_FHSS_SYNC,
     FSM_STATE_MENU_IDLE,
     FSM_STATE_MENU_OTA,
     FSM_STATE_TX_AUDIO,
@@ -45,7 +48,6 @@ typedef enum {
 
 typedef enum {
     FSM_EVENT_INIT_DONE = 0,
-    FSM_EVENT_SYNC_ACQUIRED,
     FSM_EVENT_SYNC_LOST,
     FSM_EVENT_MENU_SELECT_IDLE,
     FSM_EVENT_MENU_SELECT_OTA,
