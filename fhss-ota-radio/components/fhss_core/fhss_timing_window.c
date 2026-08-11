@@ -15,7 +15,7 @@ fhss_timing_status_t fhss_timing_window_evaluate(
     const int64_t timing_error_us = actual_rx_time_us - expected_rx_time_us;
    
     /* 허용 가능한 앞쪽, 뒤쪽 경계값 계산*/
-    const int64_t early_limit_us = -(int64_t)config -> late_margin_us;
+    const int64_t early_limit_us = -(int64_t)config -> early_margin_us;
     const int64_t late_limit_us = (int64_t)config -> late_margin_us;
     /*계산 결과를 담을 임시 구조체 생성*/
     fhss_timing_window_evaluation_t evaluation = {
