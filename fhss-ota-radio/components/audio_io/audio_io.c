@@ -1,9 +1,14 @@
 #include "audio_io.h"
 
+#include <math.h>
+
 #include "audio_codec.h"
 
+#include "driver/gpio.h"
 #include "driver/i2s_std.h"
 #include "esp_log.h"
+
+#define AUDIO_IO_TWO_PI 6.28318530718f
 
 static const char *TAG = "audio_io";
 
@@ -67,6 +72,19 @@ static void spk_channel_init(void)
      * RX_AUDIO 진입 전까지) GDMA TX ISR이 NULL 컨텍스트로 불려서
      * LoadProhibited로 재부팅되는 문제가 실기기에서 확인됨(2026-08-10).
      * audio_io_speaker_enable()/disable()로 실제 재생 시점에만 켠다. */
+
+    /* GAIN: 항상 HIGH(VDD) 고정 = 6dB, GPIO로 저항 없이 가능한 것 중 최소 볼륨
+     * (audio_io_config.h 주석 참고). SD는 처음엔 LOW(꺼짐) — enable/disable에서 제어. */
+    gpio_config_t amp_ctrl_cfg = {
+        .pin_bit_mask = (1ULL << AUDIO_IO_SPK_GAIN_GPIO) | (1ULL << AUDIO_IO_SPK_SD_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&amp_ctrl_cfg));
+    gpio_set_level(AUDIO_IO_SPK_GAIN_GPIO, 1);
+    gpio_set_level(AUDIO_IO_SPK_SD_GPIO, 0);
 }
 
 void audio_io_init(void)
@@ -102,11 +120,50 @@ int audio_io_capture_encode(uint8_t *out, size_t out_capacity)
 void audio_io_speaker_enable(void)
 {
     ESP_ERROR_CHECK(i2s_channel_enable(s_spk_tx));
+    /* SD HIGH(>1.4V) = 왼쪽 채널 출력 활성 — I2S_STD_SLOT_LEFT와 일치.
+     * I2S 클럭이 먼저 안정되도록 SD는 채널 enable 다음에 켠다. */
+    gpio_set_level(AUDIO_IO_SPK_SD_GPIO, 1);
 }
 
 void audio_io_speaker_disable(void)
 {
+    gpio_set_level(AUDIO_IO_SPK_SD_GPIO, 0);
     i2s_channel_disable(s_spk_tx);
+}
+
+/* freq_hz=0이면 무음(진폭 무시) — 두 톤 사이 간격용. */
+static void play_tone(uint16_t freq_hz, uint16_t duration_ms, int16_t amplitude)
+{
+    int total_samples = (AUDIO_CODEC_SAMPLE_RATE * duration_ms) / 1000;
+
+    for (int done = 0; done < total_samples; ) {
+        int16_t chunk[AUDIO_CODEC_FRAME_SAMPLES];
+        int chunk_len = total_samples - done;
+        if (chunk_len > AUDIO_CODEC_FRAME_SAMPLES) {
+            chunk_len = AUDIO_CODEC_FRAME_SAMPLES;
+        }
+
+        for (int i = 0; i < chunk_len; i++) {
+            float t = (float)(done + i) / AUDIO_CODEC_SAMPLE_RATE;
+            chunk[i] = (freq_hz == 0)
+                           ? 0
+                           : (int16_t)(amplitude * sinf(AUDIO_IO_TWO_PI * freq_hz * t));
+        }
+
+        size_t bytes_written = 0;
+        i2s_channel_write(s_spk_tx, chunk, chunk_len * sizeof(chunk[0]), &bytes_written, AUDIO_IO_I2S_TIMEOUT_MS);
+        done += chunk_len;
+    }
+}
+
+void audio_io_play_beep(void)
+{
+    /* "말하기 시작" 알림용 짧은 2음 상승 삐빅음. 볼륨은 GAIN(6dB, 하드웨어)에
+     * 더해 AUDIO_IO_BEEP_AMPLITUDE(소프트웨어)로 이중으로 낮춤 — 앰프 실기기
+     * 테스트 초기 단계라 과음량 방지가 우선(2026-08-10). */
+    play_tone(880, 80, AUDIO_IO_BEEP_AMPLITUDE);   /* A5 */
+    play_tone(0, 30, 0);                            /* 짧은 무음 간격 */
+    play_tone(1175, 100, AUDIO_IO_BEEP_AMPLITUDE); /* D6 */
 }
 
 int audio_io_decode_play(const uint8_t *data, size_t len)

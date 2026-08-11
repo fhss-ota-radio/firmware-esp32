@@ -9,11 +9,13 @@ extern "C" {
 #endif
 
 /*
- * 메뉴 커서 값. docs/fsm-design.md 기준 순회 순서: IDLE -> OTA -> IDLE (시계방향 = 아래로).
+ * 메뉴 커서 값. docs/fsm-design.md 기준 순회 순서: COMM -> IDLE -> OTA -> COMM
+ * (시계방향 = 아래로, 화면에 위에서부터 COMM/IDLE/OTA 순서로 배치됨과 일치).
  * 이 컴포넌트는 FSM을 모른다 — select 콜백에서 상위 코드가 fsm_post_event()로 매핑한다.
  */
 typedef enum {
-    ROTARY_ENCODER_MENU_IDLE = 0,
+    ROTARY_ENCODER_MENU_COMM = 0,
+    ROTARY_ENCODER_MENU_IDLE,
     ROTARY_ENCODER_MENU_OTA,
     ROTARY_ENCODER_MENU_COUNT,
 } rotary_encoder_menu_t;

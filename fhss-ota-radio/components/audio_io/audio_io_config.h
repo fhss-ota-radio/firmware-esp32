@@ -12,13 +12,24 @@
 #define AUDIO_IO_MIC_SD_GPIO   GPIO_NUM_7  /* 마이크 SD(데이터 출력) -> ESP 입력 */
 
 /* === 스피커 (MAX98357A, I2S TX 전용) — I2S_NUM_1 ===
- * SD(SHUTDOWN) 핀은 VDD 직결(상시 활성) 배선 가정.
- * GPIO로 켜고 끄고 싶으면 AUDIO_IO_SPK_SD_GPIO를 정의하고 audio_io.c에서 사용할 것. */
+ * SD/GAIN은 GPIO로 직접 제어(더 이상 VDD/GND 직결 가정 아님).
+ * SD: audio_io_speaker_enable()/disable()에서 HIGH/LOW로 켜고 끔.
+ *     >1.4V(HIGH)="왼쪽 채널만 출력"이라 I2S_STD_SLOT_LEFT 설정과 맞음. <0.16V(LOW)=완전 꺼짐.
+ * GAIN: 항상 HIGH(VDD) 고정 = 6dB — GPIO로 가능한 3가지(GND=12dB, 미연결=9dB, VDD=6dB) 중
+ *       가장 낮은 볼륨. 저항 없이 GND/VDD/미연결로만 3, 6, 9, 12, 15dB 중 조합 가능(데이터시트 참고). */
+/* 브레드보드 재구성(2026-08-11) 배선: LRC/BCLK/DIN/GAIN/SD = GPIO14/13/12/11/10 */
 #define AUDIO_IO_SPK_I2S_PORT  I2S_NUM_1
-#define AUDIO_IO_SPK_BCLK_GPIO GPIO_NUM_15 /* SCK */
-#define AUDIO_IO_SPK_WS_GPIO   GPIO_NUM_16 /* WS / LRCLK */
-#define AUDIO_IO_SPK_DOUT_GPIO GPIO_NUM_17 /* ESP 출력 -> MAX98357A DIN */
-// #define AUDIO_IO_SPK_SD_GPIO GPIO_NUM_18
+#define AUDIO_IO_SPK_BCLK_GPIO GPIO_NUM_13 /* SCK */
+#define AUDIO_IO_SPK_WS_GPIO   GPIO_NUM_14 /* WS / LRC */
+#define AUDIO_IO_SPK_DOUT_GPIO GPIO_NUM_12 /* ESP 출력 -> MAX98357A DIN */
+#define AUDIO_IO_SPK_GAIN_GPIO GPIO_NUM_11
+#define AUDIO_IO_SPK_SD_GPIO   GPIO_NUM_10
+
+/* PTT 눌렀을 때 "말하기 시작" 알림 삐빅 소리. 볼륨은 GAIN(6dB, 위 참고)에
+ * 더해 여기 진폭도 작게(풀스케일 32767의 약 1.5%) 잡아서 이중으로 낮춤 —
+ * 스피커/앰프 실기기 테스트 초기 단계라 과음량 방지가 우선. 그래도 크면 이
+ * 값을 더 낮추면 됨(0에 가까울수록 조용함). */
+#define AUDIO_IO_BEEP_AMPLITUDE 500
 
 /* DMA 버퍼 설정: 프레임 수 = audio_codec의 20ms 프레임(160 샘플)에 맞춤 */
 #define AUDIO_IO_I2S_DMA_DESC_NUM  4
