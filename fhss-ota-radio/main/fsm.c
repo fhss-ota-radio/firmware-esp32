@@ -122,6 +122,15 @@ static const fsm_transition_t s_transitions[] = {
 
     { FSM_STATE_TX_AUDIO,      FSM_EVENT_PTT_RELEASE,    FSM_STATE_MENU_COMM },
 
+    /*
+     * FHSS audio packet 하나에는 20 ms Speex frame이 최대 2개 들어간다.
+     * 수신 어댑터가 두 frame을 fsm_post_rx_audio_frame()으로 연속 전달하면
+     * 첫 RX_FRAME은 MENU_COMM -> RX_AUDIO 전이를 만들고, 두 번째 RX_FRAME은
+     * 이미 실행 중인 수신 세션의 큐에 다음 frame이 추가됐다는 뜻이다.
+     * 이 self-transition은 해당 이벤트를 정상 처리하되 상태와 rx_audio_task를
+     * 그대로 유지한다(fsm_transition_to()는 동일 상태 요청이면 즉시 반환).
+     */
+    { FSM_STATE_RX_AUDIO,      FSM_EVENT_RX_FRAME,       FSM_STATE_RX_AUDIO },
     { FSM_STATE_RX_AUDIO,      FSM_EVENT_RX_DONE,        FSM_STATE_MENU_COMM },
 
     { FSM_STATE_OTA_RECEIVING, FSM_EVENT_OTA_CHUNK,      FSM_STATE_OTA_RECEIVING },
