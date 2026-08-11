@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "fhss_fsm.h"
+#include "fhss_diagnostics.h"
 #include "fhss_sync_controller.h"
 #include "rf_transport.h"
 
@@ -36,6 +37,7 @@ typedef struct {
     uint32_t receive_timeout_ms;
     uint32_t acquire_count;
     uint32_t loss_count;
+    uint32_t diagnostics_interval_ms;
     fhss_service_event_callback_t event_callback;
     void *event_context;
 } fhss_service_config_t;
@@ -45,7 +47,10 @@ typedef struct {
     rf_transport_t radio;
     fhss_sync_controller_t controller;
     fhss_fsm_t fsm;
+    fhss_diagnostics_t diagnostics;
+    void *diagnostics_mutex;
     void *task_handle;
+    uint8_t current_channel;
     bool initialized;
 } fhss_service_t;
 
@@ -56,3 +61,7 @@ bool fhss_service_init(
 
 bool fhss_service_start(fhss_service_t *service);
 fhss_fsm_state_t fhss_service_get_state(const fhss_service_t *service);
+bool fhss_service_get_diagnostics(
+    fhss_service_t *service,
+    fhss_diagnostics_snapshot_t *out_snapshot
+);
