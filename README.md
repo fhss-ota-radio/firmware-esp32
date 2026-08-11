@@ -67,7 +67,7 @@ firmware-esp32/
   - `rotary_encoder.h` / `rotary_encoder.c` — quadrature 폴링 디코딩 + SW 디바운스, 커서 이동은 3-way 순환(`COMM -> IDLE -> OTA -> COMM`)
   - 공개 API: `rotary_encoder_init()`, `rotary_encoder_set_cursor_callback()`, `rotary_encoder_set_select_callback()`, `rotary_encoder_get_cursor()`
 - [x] `components/audio_io/` — I2S 마이크(INMP441)/스피커(MAX98357A) 입출력 + audio_codec 연결, **마이크 캡처 실기기 테스트 완료, 앰프 배선/테스트 진행 중**
-  - `audio_io_config.h` — 마이크(GPIO5/6/7)/스피커(LRC=14,BCLK=13,DIN=12,GAIN=11,SD=10, 2026-08-11 브레드보드 재구성 배선) 핀 설정
+  - `audio_io_config.h` — 마이크(GPIO5/6/7)/스피커(LRC=46,BCLK=3,DIN=8,GAIN=18,SD=17, 2026-08-11 재배정 — GPIO9~14를 CC1101 SPI+GDO0+GDO2용으로 통째로 비움) 핀 설정
   - 마이크(RX)=`I2S_NUM_0`, 스피커(TX)=`I2S_NUM_1` 별도 포트 고정 배정 (재설정 없이 동시 존재)
   - 공개 API: `audio_io_init()`, `audio_io_capture_encode(out, cap)`, `audio_io_decode_play(data, len)`, `audio_io_speaker_enable()`/`audio_io_speaker_disable()`, `audio_io_play_beep()` — 내부에서 `audio_codec_encode/decode` 호출
   - **스피커 채널은 지연 활성화**: 마이크와 달리 `audio_io_init()`에서 채널만 만들고 enable 안 함 — 실제 재생 시점(`RX_AUDIO` 진입, 또는 삐빅음 재생 직전)에만 `audio_io_speaker_enable()`로 켬. 켜둔 채 한 번도 안 쓰면 GDMA TX 인터럽트가 NULL 컨텍스트로 불려 재부팅되는 문제가 실기기에서 확인돼 수정함(2026-08-10)

@@ -48,7 +48,7 @@ audio_io_speaker_disable();
 ## 하드웨어 배선 확정 시 수정할 것 (`audio_io_config.h`)
 
 - `AUDIO_IO_MIC_*_GPIO` (BCLK/WS/SD) — INMP441, 현재 GPIO5/6/7 (마이크 실기기 테스트 완료 배선)
-- `AUDIO_IO_SPK_*_GPIO` (BCLK/WS(LRC)/DOUT(DIN)/GAIN/SD) — MAX98357A, 현재 GPIO13/14/12/11/10 (2026-08-11 브레드보드 재구성 배선). SD=GPIO10이 로터리 엔코더 SW와 겹쳐서 로터리 SW를 GPIO15로 옮김 — 핀 또 바꿀 땐 `rotary_encoder_config.h`도 같이 확인할 것
+- `AUDIO_IO_SPK_*_GPIO` (BCLK/WS(LRC)/DOUT(DIN)/GAIN/SD) — MAX98357A, 현재 GPIO3/46/8/18/17 (2026-08-11 재배정, GPIO9~14를 CC1101 SPI+GDO0+GDO2용으로 통째로 비워두기 위함). GPIO18은 CC1101 GDO0(인터럽트)이랑 겹칠 수 있어 CC1101 쪽 핀 확정되면 재확인 필요
 - INMP441의 L/R 핀은 GND 고정(좌채널) 배선 가정 — 다르게 배선하면 `audio_io.c`의 `I2S_STD_SLOT_LEFT`를 `I2S_STD_SLOT_RIGHT`로 변경
 - MAX98357A의 SD/GAIN 핀은 이제 GPIO 직결 — VDD/GND 직결 배선이면 안 됨(GPIO가 직접 제어함). GAIN을 다른 값으로 바꾸려면 `spk_channel_init()`의 `gpio_set_level(AUDIO_IO_SPK_GAIN_GPIO, ...)` 수정
 
