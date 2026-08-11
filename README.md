@@ -59,7 +59,7 @@ firmware-esp32/
   - `ptt_button.h` / `ptt_button.c` — 폴링 기반 디바운스(ISR 미사용), 콜백/폴링 API 제공
   - 공개 API: `ptt_button_init()`, `ptt_button_set_callback(cb, ctx)`, `ptt_button_is_pressed()`
 - [x] `components/rotary_encoder/` — 메뉴 선택용 로터리 엔코더(A/B/SW) 컴포넌트
-  - `rotary_encoder_config.h` — 핀 A/B/SW=GPIO8/9/15(placeholder). **주의**: GPIO5/6/7은 audio_io 마이크와 겹쳐서 사용 금지(겹치면 I2S BCLK 토글이 회전으로 오인되는 버그 있었음, 2026-08-10). SW는 2026-08-11 audio_io 스피커 SD가 GPIO10을 쓰게 되면서 GPIO10→GPIO15로 이동
+  - `rotary_encoder_config.h` — 핀 A/B/SW(모듈 라벨 S1/S2/KEY)=GPIO2/42/41(placeholder, 2026-08-11 재배정). GPIO1은 ptt_button과 겹쳐서 사용 금지
   - `rotary_encoder.h` / `rotary_encoder.c` — quadrature 폴링 디코딩 + SW 디바운스, 커서 이동은 순환(`MENU_IDLE ↔ MENU_OTA`)
   - 공개 API: `rotary_encoder_init()`, `rotary_encoder_set_cursor_callback()`, `rotary_encoder_set_select_callback()`, `rotary_encoder_get_cursor()`
 - [x] `components/audio_io/` — I2S 마이크(INMP441)/스피커(MAX98357A) 입출력 + audio_codec 연결, **마이크 캡처 실기기 테스트 완료, 앰프 배선/테스트 진행 중**
