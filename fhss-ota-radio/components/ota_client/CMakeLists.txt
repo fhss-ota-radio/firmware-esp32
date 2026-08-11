@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "source/ota_client.c"
+        "source/ota_batch_cache.c"
         "source/ota_writer.c"
     INCLUDE_DIRS
         "include"
