@@ -6,6 +6,7 @@
 #include "esp_err.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 
 #define CC1101_PARTNUM_ADDR       0x30U
@@ -39,6 +40,23 @@ typedef struct {
     uint8_t address;
     uint8_t value;
 } cc1101_register_setting_t;
+
+static void cc1101_gdo0_isr(void *arg)
+{
+    rf_transport_t *transport = (rf_transport_t *)arg;
+    if (transport == NULL || transport->rx_timestamp_queue == NULL) {
+        return;
+    }
+
+    const int64_t timestamp_us = esp_timer_get_time();
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    xQueueOverwriteFromISR(
+        (QueueHandle_t)transport->rx_timestamp_queue,
+        &timestamp_us,
+        &higher_priority_task_woken
+    );
+    portYIELD_FROM_ISR(higher_priority_task_woken);
+}
 
 /* SmartRF-style 38.4 kBaud sensitivity settings, frequency changed to 433.92 MHz. */
 static const cc1101_register_setting_t s_433mhz_settings[] = {
@@ -213,6 +231,17 @@ rf_transport_status_t rf_transport_init(
         config->spi_clock_hz <= 0) {
         return RF_TRANSPORT_STATUS_INVALID_ARG;
     }
+    if (config->enable_gdo0_interrupt && config->gdo0_gpio < 0) {
+        return RF_TRANSPORT_STATUS_INVALID_ARG;
+    }
+
+    QueueHandle_t rx_timestamp_queue = NULL;
+    if (config->enable_gdo0_interrupt) {
+        rx_timestamp_queue = xQueueCreate(1U, sizeof(int64_t));
+        if (rx_timestamp_queue == NULL) {
+            return RF_TRANSPORT_STATUS_SPI_ERROR;
+        }
+    }
 
     const spi_bus_config_t bus_config = {
         .mosi_io_num = config->mosi_gpio,
@@ -229,6 +258,9 @@ rf_transport_status_t rf_transport_init(
         SPI_DMA_CH_AUTO
     );
     if (status != ESP_OK) {
+        if (rx_timestamp_queue != NULL) {
+            vQueueDelete(rx_timestamp_queue);
+        }
         return RF_TRANSPORT_STATUS_SPI_ERROR;
     }
 
@@ -242,6 +274,9 @@ rf_transport_status_t rf_transport_init(
     status = gpio_config(&cs_config);
     if (status != ESP_OK) {
         spi_bus_free(config->spi_host);
+        if (rx_timestamp_queue != NULL) {
+            vQueueDelete(rx_timestamp_queue);
+        }
         return RF_TRANSPORT_STATUS_SPI_ERROR;
     }
     gpio_set_level(config->cs_gpio, 1);
@@ -261,7 +296,27 @@ rf_transport_status_t rf_transport_init(
     );
     if (status != ESP_OK) {
         spi_bus_free(config->spi_host);
+        if (rx_timestamp_queue != NULL) {
+            vQueueDelete(rx_timestamp_queue);
+        }
         return RF_TRANSPORT_STATUS_SPI_ERROR;
+    }
+
+    if (config->enable_gdo0_interrupt) {
+        const gpio_config_t gdo0_config = {
+            .pin_bit_mask = 1ULL << config->gdo0_gpio,
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_ENABLE,
+            .intr_type = GPIO_INTR_POSEDGE,
+        };
+        status = gpio_config(&gdo0_config);
+        if (status != ESP_OK) {
+            spi_bus_remove_device(spi_device);
+            spi_bus_free(config->spi_host);
+            vQueueDelete(rx_timestamp_queue);
+            return RF_TRANSPORT_STATUS_SPI_ERROR;
+        }
     }
 
     const rf_transport_t initialized_transport = {
@@ -269,9 +324,37 @@ rf_transport_status_t rf_transport_init(
         .spi_host = config->spi_host,
         .cs_gpio = config->cs_gpio,
         .miso_gpio = config->miso_gpio,
+        .gdo0_gpio = config->gdo0_gpio,
+        .rx_timestamp_queue = rx_timestamp_queue,
         .initialized = true,
+        .gdo0_interrupt_enabled = false,
     };
     *transport = initialized_transport;
+
+    if (config->enable_gdo0_interrupt) {
+        status = gpio_install_isr_service(0);
+        if (status != ESP_OK && status != ESP_ERR_INVALID_STATE) {
+            spi_bus_remove_device(spi_device);
+            spi_bus_free(config->spi_host);
+            vQueueDelete(rx_timestamp_queue);
+            memset(transport, 0, sizeof(*transport));
+            return RF_TRANSPORT_STATUS_SPI_ERROR;
+        }
+
+        status = gpio_isr_handler_add(
+            config->gdo0_gpio,
+            cc1101_gdo0_isr,
+            transport
+        );
+        if (status != ESP_OK) {
+            spi_bus_remove_device(spi_device);
+            spi_bus_free(config->spi_host);
+            vQueueDelete(rx_timestamp_queue);
+            memset(transport, 0, sizeof(*transport));
+            return RF_TRANSPORT_STATUS_SPI_ERROR;
+        }
+        transport->gdo0_interrupt_enabled = true;
+    }
 
     return RF_TRANSPORT_STATUS_OK;
 }
@@ -376,6 +459,19 @@ rf_transport_status_t rf_transport_set_channel(
         status = command_strobe(transport, CC1101_SFTX);
     }
     return status;
+}
+
+rf_transport_status_t rf_transport_start_receive(
+    const rf_transport_t *transport
+)
+{
+    if (transport == NULL) {
+        return RF_TRANSPORT_STATUS_INVALID_ARG;
+    }
+    if (!transport->initialized) {
+        return RF_TRANSPORT_STATUS_NOT_INITIALIZED;
+    }
+    return command_strobe(transport, CC1101_SRX);
 }
 
 rf_transport_status_t rf_transport_send_packet(
@@ -525,4 +621,32 @@ rf_transport_status_t rf_transport_receive_packet(
     command_strobe(transport, CC1101_SIDLE);
     command_strobe(transport, CC1101_SFRX);
     return RF_TRANSPORT_STATUS_TIMEOUT;
+}
+
+rf_transport_status_t rf_transport_wait_rx_timestamp(
+    const rf_transport_t *transport,
+    uint32_t timeout_ms,
+    int64_t *out_timestamp_us
+)
+{
+    if (transport == NULL || out_timestamp_us == NULL) {
+        return RF_TRANSPORT_STATUS_INVALID_ARG;
+    }
+    if (!transport->initialized || !transport->gdo0_interrupt_enabled ||
+        transport->rx_timestamp_queue == NULL) {
+        return RF_TRANSPORT_STATUS_NOT_INITIALIZED;
+    }
+
+    int64_t timestamp_us = 0;
+    const BaseType_t received = xQueueReceive(
+        (QueueHandle_t)transport->rx_timestamp_queue,
+        &timestamp_us,
+        pdMS_TO_TICKS(timeout_ms)
+    );
+    if (received != pdTRUE) {
+        return RF_TRANSPORT_STATUS_TIMEOUT;
+    }
+
+    *out_timestamp_us = timestamp_us;
+    return RF_TRANSPORT_STATUS_OK;
 }

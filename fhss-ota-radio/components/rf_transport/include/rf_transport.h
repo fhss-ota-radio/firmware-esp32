@@ -33,8 +33,10 @@ typedef struct {
     gpio_num_t mosi_gpio;
     gpio_num_t miso_gpio;
     gpio_num_t cs_gpio;
+    gpio_num_t gdo0_gpio;
 
     int spi_clock_hz;
+    bool enable_gdo0_interrupt;
 } rf_transport_config_t;
 
 
@@ -66,8 +68,12 @@ typedef struct {
     spi_host_device_t spi_host;
     gpio_num_t cs_gpio;
     gpio_num_t miso_gpio;
+    gpio_num_t gdo0_gpio;
+
+    void *rx_timestamp_queue;
 
     bool initialized;
+    bool gdo0_interrupt_enabled;
 } rf_transport_t;
 
 
@@ -101,6 +107,11 @@ rf_transport_status_t rf_transport_set_channel(
     uint8_t channel
 );
 
+/* Enters RX state so GDO0 can signal sync-word detection. */
+rf_transport_status_t rf_transport_start_receive(
+    const rf_transport_t *transport
+);
+
 rf_transport_status_t rf_transport_send_packet(
     const rf_transport_t *transport,
     const uint8_t *payload,
@@ -111,6 +122,13 @@ rf_transport_status_t rf_transport_receive_packet(
     const rf_transport_t *transport,
     uint32_t timeout_ms,
     rf_transport_rx_packet_t *out_packet
+);
+
+/* Waits for a GDO0 rising edge and returns its esp_timer timestamp. */
+rf_transport_status_t rf_transport_wait_rx_timestamp(
+    const rf_transport_t *transport,
+    uint32_t timeout_ms,
+    int64_t *out_timestamp_us
 );
 
 

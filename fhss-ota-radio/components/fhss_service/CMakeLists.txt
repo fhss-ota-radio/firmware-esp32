@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS
+        "fhss_service.c"
+        "fhss_fsm.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        fhss_core
+        rf_transport
+        esp_timer
+        freertos
+        log
+)
