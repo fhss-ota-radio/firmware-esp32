@@ -1,6 +1,7 @@
 #include "display_ui.h"
 
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -63,6 +64,99 @@ static esp_err_t ssd1306_flush_page(uint8_t page)
     return ssd1306_write(0x40, s_framebuf[page], DISPLAY_UI_WIDTH);
 }
 
+static void flush_all_pages(const char *what)
+{
+    for (uint8_t page = 0; page < DISPLAY_UI_PAGES; page++) {
+        if (ssd1306_flush_page(page) != ESP_OK) {
+            ESP_LOGE(TAG, "%s: flush page %d failed", what, page);
+        }
+    }
+}
+
+/*
+ * === 회전(좌측 90도) 그리기 프리미티브 =============================
+ *
+ * 배선은 그대로(물리 좌표 px∈[0,DISPLAY_UI_WIDTH), py∈[0,DISPLAY_UI_HEIGHT)),
+ * 논리(회전된, 세로) 좌표 lx∈[0,DISPLAY_UI_HEIGHT), ly∈[0,DISPLAY_UI_WIDTH)로
+ * 그린다. 매핑(좌측 90도 회전 = 반시계):
+ *   px = (DISPLAY_UI_WIDTH  - 1) - ly
+ *   py = lx
+ * 이 아래 함수들은 전부 논리 좌표를 받는다.
+ */
+static inline void set_pixel(int lx, int ly, bool on)
+{
+    if (lx < 0 || lx >= DISPLAY_UI_HEIGHT || ly < 0 || ly >= DISPLAY_UI_WIDTH) {
+        return;
+    }
+    int px = (DISPLAY_UI_WIDTH - 1) - ly;
+    int py = lx;
+    int page = py / 8;
+    int bit = py % 8;
+    if (on) {
+        s_framebuf[page][px] |= (uint8_t)(1U << bit);
+    } else {
+        s_framebuf[page][px] &= (uint8_t)~(1U << bit);
+    }
+}
+
+static void fill_rect(int x, int y, int w, int h, bool on)
+{
+    for (int j = 0; j < h; j++) {
+        for (int i = 0; i < w; i++) {
+            set_pixel(x + i, y + j, on);
+        }
+    }
+}
+
+static void draw_rect_outline(int x, int y, int w, int h, bool on)
+{
+    for (int i = 0; i < w; i++) {
+        set_pixel(x + i, y, on);
+        set_pixel(x + i, y + h - 1, on);
+    }
+    for (int j = 0; j < h; j++) {
+        set_pixel(x, y + j, on);
+        set_pixel(x + w - 1, y + j, on);
+    }
+}
+
+/* font8x8_basic 글리프 하나를 scale배 확대해서 (lx,ly)를 좌상단으로 그린다.
+ * invert=true면 배경이 이미 채워진 박스 위에 글자를 "깎아내듯"(off) 그린다 —
+ * 즉 glyph 비트가 0이든 1이든 pixel_on = !glyph_bit. */
+static void draw_glyph_scaled(int lx, int ly, unsigned char c, int scale, bool invert)
+{
+    const uint8_t *glyph = (c < 128) ? font8x8_basic[c] : font8x8_basic[(unsigned char)' '];
+
+    for (int by = 0; by < 8; by++) {
+        for (int bx = 0; bx < 8; bx++) {
+            bool glyph_bit = (glyph[by] & (1 << bx)) != 0;
+            bool pixel_on = invert ? !glyph_bit : glyph_bit;
+            for (int sy = 0; sy < scale; sy++) {
+                for (int sx = 0; sx < scale; sx++) {
+                    set_pixel(lx + bx * scale + sx, ly + by * scale + sy, pixel_on);
+                }
+            }
+        }
+    }
+}
+
+/* 왼쪽 정렬로 text를 그린다(scale배 확대). */
+static void draw_text(int lx, int ly, const char *text, int scale, bool invert)
+{
+    for (int i = 0; text[i] != '\0'; i++) {
+        draw_glyph_scaled(lx + i * 8 * scale, ly, (unsigned char)text[i], scale, invert);
+    }
+}
+
+/* box(x,y,w,h) 안에 text를 가로/세로 가운데 정렬로 그린다. */
+static void draw_text_centered(int x, int y, int w, int h, const char *text, int scale, bool invert)
+{
+    int len = (int)strlen(text);
+    int text_w = scale * 8 * len;
+    int text_h = scale * 8;
+    draw_text(x + (w - text_w) / 2, y + (h - text_h) / 2, text, scale, invert);
+}
+
 void display_ui_init(void)
 {
     i2c_master_bus_config_t bus_config = {
@@ -101,11 +195,7 @@ void display_ui_init(void)
 void display_ui_clear(void)
 {
     memset(s_framebuf, 0, sizeof(s_framebuf));
-    for (uint8_t page = 0; page < DISPLAY_UI_PAGES; page++) {
-        if (ssd1306_flush_page(page) != ESP_OK) {
-            ESP_LOGE(TAG, "clear: flush page %d failed", page);
-        }
-    }
+    flush_all_pages("clear");
 }
 
 void oled_update_text(uint8_t row, const char *text)
@@ -151,4 +241,43 @@ void oled_update_text_fmt(uint8_t row, const char *fmt, ...)
     va_end(args);
 
     oled_update_text(row, buf);
+}
+
+/* 메뉴 화면 레이아웃 상수. 논리 캔버스는 64(=DISPLAY_UI_HEIGHT) x
+ * 128(=DISPLAY_UI_WIDTH). 항목 3개(28px) + 간격 2개(8px) = 100px, 헤더
+ * 아래(20px)부터 시작해서 끝나면 128 중 8px 남음(여유). */
+#define MENU_HEADER_X    4
+#define MENU_HEADER_Y    4
+#define MENU_ITEM_X      0
+#define MENU_ITEM_W      DISPLAY_UI_HEIGHT
+#define MENU_ITEM_START_Y 20
+#define MENU_ITEM_H      28
+#define MENU_ITEM_GAP    8
+#define MENU_TEXT_SCALE  2
+
+static const char *const s_menu_labels[DISPLAY_UI_MENU_COUNT] = { "COMM", "IDLE", "OTA" };
+
+void display_ui_draw_menu(display_ui_menu_item_t selected, display_ui_menu_item_t hovered)
+{
+    memset(s_framebuf, 0, sizeof(s_framebuf));
+
+    draw_text(MENU_HEADER_X, MENU_HEADER_Y, "mode", 1, false);
+
+    for (int i = 0; i < DISPLAY_UI_MENU_COUNT; i++) {
+        int item_y = MENU_ITEM_START_Y + i * (MENU_ITEM_H + MENU_ITEM_GAP);
+        bool is_selected = (i == selected);
+        bool is_hovered = (i == hovered);
+
+        fill_rect(MENU_ITEM_X, item_y, MENU_ITEM_W, MENU_ITEM_H, is_selected);
+        draw_text_centered(MENU_ITEM_X, item_y, MENU_ITEM_W, MENU_ITEM_H,
+                            s_menu_labels[i], MENU_TEXT_SCALE, is_selected);
+
+        if (is_hovered) {
+            /* selected(흰 배경)와 겹치면 테두리는 검은색으로, 아니면(검은
+             * 배경) 흰색으로 — 배경과 항상 대비되게. */
+            draw_rect_outline(MENU_ITEM_X, item_y, MENU_ITEM_W, MENU_ITEM_H, !is_selected);
+        }
+    }
+
+    flush_all_pages("draw_menu");
 }

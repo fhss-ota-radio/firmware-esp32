@@ -17,7 +17,7 @@ static void *s_cursor_ctx;
 static rotary_encoder_select_cb_t s_select_cb;
 static void *s_select_ctx;
 
-static volatile rotary_encoder_menu_t s_cursor = ROTARY_ENCODER_MENU_IDLE;
+static volatile rotary_encoder_menu_t s_cursor = ROTARY_ENCODER_MENU_COMM;
 
 /*
  * raw AB(2bit, bit0=A, bit1=B) -> gray code 순번(0~3).
@@ -89,7 +89,7 @@ static void rotary_encoder_task(void *arg)
          * 정지 위치로 돌아올 때까지 accum을 들고 대기한다. */
         if (curr_ab == REST_AB && accum != 0) {
             if (accum >= ROTARY_ENCODER_STEPS_PER_DETENT) {
-                move_cursor(+1); /* 시계방향 = 메뉴 아래로 (IDLE -> OTA -> IDLE) */
+                move_cursor(+1); /* 시계방향 = 메뉴 아래로 (COMM -> IDLE -> OTA -> COMM) */
             } else if (accum <= -ROTARY_ENCODER_STEPS_PER_DETENT) {
                 move_cursor(-1);
             }
