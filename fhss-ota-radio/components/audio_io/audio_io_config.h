@@ -4,12 +4,11 @@
 #include "driver/i2s_std.h"
 
 /* === 마이크 (INMP441, I2S RX 전용) — I2S_NUM_0 ===
- * L/R 핀은 GND 고정 배선(좌채널 고정) 가정 -> 코드에서 SLOT_LEFT로 수신.
- * 실배선 확정 전 placeholder — 배선 정해지면 아래 GPIO 값만 수정. */
+ * L/R 핀은 3V3 고정 배선(우채널 고정, 2026-08-11 확정) -> 코드에서 SLOT_RIGHT로 수신. */
 #define AUDIO_IO_MIC_I2S_PORT  I2S_NUM_0
+#define AUDIO_IO_MIC_WS_GPIO   GPIO_NUM_4  /* WS / LRCLK */
 #define AUDIO_IO_MIC_BCLK_GPIO GPIO_NUM_5  /* SCK */
-#define AUDIO_IO_MIC_WS_GPIO   GPIO_NUM_6  /* WS / LRCLK */
-#define AUDIO_IO_MIC_SD_GPIO   GPIO_NUM_7  /* 마이크 SD(데이터 출력) -> ESP 입력 */
+#define AUDIO_IO_MIC_SD_GPIO   GPIO_NUM_6  /* 마이크 SD(데이터 출력) -> ESP 입력 */
 
 /* === 스피커 (MAX98357A, I2S TX 전용) — I2S_NUM_1 ===
  * SD/GAIN은 GPIO로 직접 제어(더 이상 VDD/GND 직결 가정 아님).

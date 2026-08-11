@@ -37,7 +37,7 @@ static void mic_channel_init(void)
             .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
         },
     };
-    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_RIGHT;
 
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_mic_rx, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_enable(s_mic_rx));
