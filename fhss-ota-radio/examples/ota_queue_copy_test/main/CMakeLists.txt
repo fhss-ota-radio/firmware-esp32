@@ -1,12 +1,12 @@
 idf_component_register(
     SRCS
-        "source/ota_client.c"
-        "source/ota_writer.c"
+        "main.c"
     INCLUDE_DIRS
-        "include"
+        "."
     PRIV_INCLUDE_DIRS
-        "source"
-    PRIV_REQUIRES
+        "../../../components/ota_client/source"
+    REQUIRES
+        ota_client
         app_update
         esp_partition
         freertos

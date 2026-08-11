@@ -2,6 +2,7 @@
 
 #include "ota_client.h"
 #include "ota_client_internal.h"
+#include "freertos/queue.h"
 
 static ota_client_context_t s_ota_client;
 
@@ -21,6 +22,14 @@ esp_err_t ota_client_init(const ota_client_config_t *config)
     }
 
     memset(&s_ota_client, 0, sizeof(s_ota_client));
+
+    s_ota_client.rx_queue = xQueueCreate(
+        OTA_CLIENT_RX_QUEUE_DEPTH,
+        sizeof(ota_client_rx_packet_t)
+    );
+    if (s_ota_client.rx_queue == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
 
     s_ota_client.config = *config;
     s_ota_client.state = OTA_CLIENT_STATE_IDLE;
@@ -246,6 +255,10 @@ esp_err_t ota_client_abort(void)
         err = ota_writer_abort(&s_ota_client.writer);
     }
 
+    if (s_ota_client.rx_queue != NULL) {
+        xQueueReset(s_ota_client.rx_queue);
+    }
+
     ota_client_reset_session();
     s_ota_client.state = OTA_CLIENT_STATE_IDLE;
 
@@ -259,4 +272,48 @@ esp_err_t ota_client_abort(void)
     }
 
     return err;
+}
+
+esp_err_t ota_client_submit_packet(
+    const uint8_t *packet,
+    size_t packet_length
+)
+{
+    if (packet == NULL || packet_length == 0U ||
+        packet_length > OTA_CLIENT_MAX_PACKET_LENGTH) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_ota_client.state == OTA_CLIENT_STATE_UNINITIALIZED ||
+        s_ota_client.rx_queue == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ota_client_rx_packet_t queued_packet = {
+        .length = (uint8_t)packet_length,
+    };
+    memcpy(queued_packet.data, packet, packet_length);
+
+    if (xQueueSend(s_ota_client.rx_queue, &queued_packet, 0U) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t ota_client_receive_packet(
+    ota_client_rx_packet_t *out_packet,
+    TickType_t wait_ticks
+)
+{
+    if (out_packet == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_ota_client.state == OTA_CLIENT_STATE_UNINITIALIZED ||
+        s_ota_client.rx_queue == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    return xQueueReceive(s_ota_client.rx_queue, out_packet, wait_ticks) == pdTRUE
+        ? ESP_OK
+        : ESP_ERR_TIMEOUT;
 }
