@@ -50,6 +50,14 @@ int audio_io_capture_encode(uint8_t *out, size_t out_capacity);
  */
 int audio_io_decode_play(const uint8_t *data, size_t len);
 
+/*
+ * TEMP(마이크 실배선 테스트용, 검증 끝나면 제거): audio_io_decode_play()와
+ * 동일하지만, 디코딩한 PCM에 (amplitude_cap/32767) 배율을 곱해 소프트웨어로
+ * 감쇠한 뒤 재생한다. amplitude_cap=AUDIO_IO_BEEP_AMPLITUDE(500)를 넘겨주면
+ * 삐빅음과 같은 배율로 작게 재생된다.
+ */
+int audio_io_decode_play_scaled(const uint8_t *data, size_t len, int16_t amplitude_cap);
+
 #ifdef __cplusplus
 }
 #endif

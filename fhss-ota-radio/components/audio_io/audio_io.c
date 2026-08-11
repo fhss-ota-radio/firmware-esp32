@@ -183,3 +183,25 @@ int audio_io_decode_play(const uint8_t *data, size_t len)
 
     return 0;
 }
+
+int audio_io_decode_play_scaled(const uint8_t *data, size_t len, int16_t amplitude_cap)
+{
+    int16_t pcm[AUDIO_CODEC_FRAME_SAMPLES];
+
+    if (audio_codec_decode(data, len, pcm) != 0) {
+        return -1;
+    }
+
+    for (int i = 0; i < AUDIO_CODEC_FRAME_SAMPLES; i++) {
+        pcm[i] = (int16_t)(((int32_t)pcm[i] * amplitude_cap) / 32767);
+    }
+
+    size_t bytes_written = 0;
+    esp_err_t err = i2s_channel_write(s_spk_tx, pcm, sizeof(pcm), &bytes_written, AUDIO_IO_I2S_TIMEOUT_MS);
+    if (err != ESP_OK || bytes_written != sizeof(pcm)) {
+        ESP_LOGW(TAG, "spk write failed (err=%d, bytes=%u)", err, (unsigned)bytes_written);
+        return -1;
+    }
+
+    return 0;
+}
