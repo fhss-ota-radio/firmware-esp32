@@ -63,6 +63,7 @@ void app_main(void)
         .receive_timeout_ms = 80U,
         .acquire_count = 3U,
         .loss_count = 5U,
+        .diagnostics_interval_ms = 5000U,
         .event_callback = on_fhss_event,
         .event_context = NULL,
     };

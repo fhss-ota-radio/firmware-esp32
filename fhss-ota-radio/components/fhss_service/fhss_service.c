@@ -5,9 +5,83 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 static const char *TAG = "fhss_service";
+
+typedef enum {
+    RECEIVE_RESULT_OK = 0,
+    RECEIVE_RESULT_TIMEOUT,
+    RECEIVE_RESULT_CRC_FAIL,
+    RECEIVE_RESULT_RADIO_ERROR,
+    RECEIVE_RESULT_SYNC_ERROR,
+} receive_result_t;
+
+static void diagnostics_lock(fhss_service_t *service)
+{
+    xSemaphoreTake((SemaphoreHandle_t)service->diagnostics_mutex, portMAX_DELAY);
+}
+
+static void diagnostics_unlock(fhss_service_t *service)
+{
+    xSemaphoreGive((SemaphoreHandle_t)service->diagnostics_mutex);
+}
+
+static void log_diagnostics(fhss_service_t *service, int64_t now_us)
+{
+    fhss_diagnostics_snapshot_t snapshot = {0};
+    if (!fhss_service_get_diagnostics(service, &snapshot)) {
+        return;
+    }
+
+    const int64_t average_us = snapshot.timing_sample_count > 0U
+        ? snapshot.timing_error_sum_us / snapshot.timing_sample_count
+        : 0;
+    const int64_t last_valid_age_ms = snapshot.last_valid_timestamp_us > 0
+        ? (now_us - snapshot.last_valid_timestamp_us) / 1000
+        : -1;
+    ESP_LOGI(TAG,
+             "DIAG state=%s valid=%lu crc_fail=%lu timeout=%lu "
+             "acquired=%lu lost=%lu timing_us[min/avg/max]=%lld/%lld/%lld "
+             "last_valid_age_ms=%lld",
+             fhss_fsm_state_name(service->fsm.state),
+             (unsigned long)snapshot.rx_valid_count,
+             (unsigned long)snapshot.crc_fail_count,
+             (unsigned long)snapshot.timeout_count,
+             (unsigned long)snapshot.sync_acquired_count,
+             (unsigned long)snapshot.sync_lost_count,
+             (long long)snapshot.timing_error_min_us,
+             (long long)average_us,
+             (long long)snapshot.timing_error_max_us,
+             (long long)last_valid_age_ms);
+
+    for (size_t i = 0U; i < snapshot.channel_count; ++i) {
+        const fhss_diagnostics_channel_t *channel = &snapshot.channels[i];
+        ESP_LOGI(TAG, "DIAG channel=%u valid=%lu crc_fail=%lu timeout=%lu",
+                 channel->channel,
+                 (unsigned long)channel->rx_valid_count,
+                 (unsigned long)channel->crc_fail_count,
+                 (unsigned long)channel->timeout_count);
+    }
+}
+
+static void maybe_log_diagnostics(
+    fhss_service_t *service,
+    int64_t *last_log_time_us
+)
+{
+    if (service->config.diagnostics_interval_ms == 0U) {
+        return;
+    }
+    const int64_t now_us = esp_timer_get_time();
+    const int64_t interval_us =
+        (int64_t)service->config.diagnostics_interval_ms * 1000;
+    if (now_us - *last_log_time_us >= interval_us) {
+        log_diagnostics(service, now_us);
+        *last_log_time_us = now_us;
+    }
+}
 
 static void report_event(fhss_service_t *service, fhss_service_event_t event)
 {
@@ -47,6 +121,7 @@ static bool select_channel(fhss_service_t *service, uint32_t slot)
         RF_TRANSPORT_STATUS_OK) {
         return false;
     }
+    service->current_channel = channel;
     ESP_LOGI(TAG, "channel selected: slot=%lu channel=%u",
              (unsigned long)slot, channel);
     return true;
@@ -124,30 +199,34 @@ static void tx_task(fhss_service_t *service)
     }
 }
 
-static bool receive_one(
+static receive_result_t receive_one(
     fhss_service_t *service,
     uint32_t timestamp_timeout_ms,
-    fhss_core_rx_result_t *out_result
+    fhss_core_rx_result_t *out_result,
+    int64_t *out_rx_timestamp_us
 )
 {
     if (rf_transport_start_receive(&service->radio) !=
         RF_TRANSPORT_STATUS_OK) {
-        return false;
+        return RECEIVE_RESULT_RADIO_ERROR;
     }
 
     int64_t rx_timestamp_us = 0;
     if (rf_transport_wait_rx_timestamp(
             &service->radio, timestamp_timeout_ms, &rx_timestamp_us) !=
         RF_TRANSPORT_STATUS_OK) {
-        return false;
+        return RECEIVE_RESULT_TIMEOUT;
     }
 
     rf_transport_rx_packet_t packet = {0};
     if (rf_transport_receive_packet(
             &service->radio,
             service->config.receive_timeout_ms,
-            &packet) != RF_TRANSPORT_STATUS_OK || !packet.crc_ok) {
-        return false;
+            &packet) != RF_TRANSPORT_STATUS_OK) {
+        return RECEIVE_RESULT_RADIO_ERROR;
+    }
+    if (!packet.crc_ok) {
+        return RECEIVE_RESULT_CRC_FAIL;
     }
 
     if (fhss_sync_controller_process_rx(
@@ -156,7 +235,7 @@ static bool receive_one(
             packet.length,
             rx_timestamp_us,
             out_result) != FHSS_CONTROLLER_STATUS_OK) {
-        return false;
+        return RECEIVE_RESULT_SYNC_ERROR;
     }
 
     ESP_LOGI(TAG,
@@ -166,7 +245,32 @@ static bool receive_one(
              out_result->channel,
              (long long)out_result->timing.timing_error_us,
              (long long)rx_timestamp_us);
-    return true;
+    *out_rx_timestamp_us = rx_timestamp_us;
+    return RECEIVE_RESULT_OK;
+}
+
+static void record_receive_result(
+    fhss_service_t *service,
+    receive_result_t receive_result,
+    const fhss_core_rx_result_t *result,
+    int64_t rx_timestamp_us
+)
+{
+    diagnostics_lock(service);
+    if (receive_result == RECEIVE_RESULT_OK) {
+        fhss_diagnostics_record_valid(
+            &service->diagnostics,
+            result->channel,
+            result->timing.timing_error_us,
+            rx_timestamp_us);
+    } else if (receive_result == RECEIVE_RESULT_CRC_FAIL) {
+        fhss_diagnostics_record_crc_fail(
+            &service->diagnostics, service->current_channel);
+    } else if (receive_result == RECEIVE_RESULT_TIMEOUT) {
+        fhss_diagnostics_record_timeout(
+            &service->diagnostics, service->current_channel);
+    }
+    diagnostics_unlock(service);
 }
 
 static void handle_sync_result(
@@ -179,10 +283,16 @@ static void handle_sync_result(
         fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_FIRST_SYNC);
     }
     if (result->sync_event == FHSS_SYNC_EVENT_ACQUIRED) {
+        diagnostics_lock(service);
+        fhss_diagnostics_record_sync_acquired(&service->diagnostics);
+        diagnostics_unlock(service);
         fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_SYNC_ACQUIRED);
         report_event(service, FHSS_SERVICE_EVENT_SYNC_ACQUIRED);
     }
     if (result->sync_event == FHSS_SYNC_EVENT_LOST) {
+        diagnostics_lock(service);
+        fhss_diagnostics_record_sync_lost(&service->diagnostics);
+        diagnostics_unlock(service);
         fhss_slot_scheduler_clear_reference(&service->controller.scheduler);
         fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_SYNC_LOST);
         report_event(service, FHSS_SERVICE_EVENT_SYNC_LOST);
@@ -202,6 +312,9 @@ static void handle_miss(fhss_service_t *service)
         return;
     }
     if (event == FHSS_SYNC_EVENT_LOST) {
+        diagnostics_lock(service);
+        fhss_diagnostics_record_sync_lost(&service->diagnostics);
+        diagnostics_unlock(service);
         fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_SYNC_LOST);
         report_event(service, FHSS_SERVICE_EVENT_SYNC_LOST);
     } else if (was_synchronizing) {
@@ -213,7 +326,9 @@ static void handle_miss(fhss_service_t *service)
 static void rx_task(fhss_service_t *service)
 {
     uint32_t scan_slot = 0U;
+    int64_t last_diagnostics_log_us = esp_timer_get_time();
     for (;;) {
+        maybe_log_diagnostics(service, &last_diagnostics_log_us);
         if (service->fsm.state == FHSS_FSM_STATE_SEARCHING) {
             if (!select_channel(service, scan_slot)) {
                 report_event(service, FHSS_SERVICE_EVENT_ERROR);
@@ -221,8 +336,20 @@ static void rx_task(fhss_service_t *service)
                 continue;
             }
             fhss_core_rx_result_t result = {0};
-            if (receive_one(service, service->config.search_dwell_ms, &result)) {
+            int64_t rx_timestamp_us = 0;
+            const receive_result_t receive_result = receive_one(
+                service,
+                service->config.search_dwell_ms,
+                &result,
+                &rx_timestamp_us);
+            record_receive_result(
+                service, receive_result, &result, rx_timestamp_us);
+            if (receive_result == RECEIVE_RESULT_OK) {
                 handle_sync_result(service, &result);
+            } else if (receive_result == RECEIVE_RESULT_RADIO_ERROR ||
+                       receive_result == RECEIVE_RESULT_SYNC_ERROR) {
+                ESP_LOGW(TAG, "RX processing error: result=%d channel=%u",
+                         receive_result, service->current_channel);
             }
             scan_slot++;
             continue;
@@ -248,10 +375,23 @@ static void rx_task(fhss_service_t *service)
         }
 
         fhss_core_rx_result_t result = {0};
-        if (receive_one(service, service->config.receive_timeout_ms, &result)) {
+        int64_t rx_timestamp_us = 0;
+        const receive_result_t receive_result = receive_one(
+            service,
+            service->config.receive_timeout_ms,
+            &result,
+            &rx_timestamp_us);
+        record_receive_result(
+            service, receive_result, &result, rx_timestamp_us);
+        if (receive_result == RECEIVE_RESULT_OK) {
             handle_sync_result(service, &result);
-        } else {
+        } else if (receive_result == RECEIVE_RESULT_TIMEOUT ||
+                   receive_result == RECEIVE_RESULT_CRC_FAIL) {
             handle_miss(service);
+        } else {
+            ESP_LOGW(TAG, "RX processing error: result=%d channel=%u",
+                     receive_result, service->current_channel);
+            report_event(service, FHSS_SERVICE_EVENT_ERROR);
         }
     }
 }
@@ -281,6 +421,11 @@ bool fhss_service_init(
     memset(service, 0, sizeof(*service));
     service->config = *config;
     fhss_fsm_init(&service->fsm);
+
+    if (!fhss_diagnostics_init(
+            &service->diagnostics, config->channels, config->channel_count)) {
+        return false;
+    }
 
     if (rf_transport_init(&service->radio, &config->radio) !=
         RF_TRANSPORT_STATUS_OK) {
@@ -313,6 +458,11 @@ bool fhss_service_init(
     if (fhss_sync_controller_init(
             &service->controller,
             &controller_config) != FHSS_CONTROLLER_STATUS_OK) {
+        return false;
+    }
+
+    service->diagnostics_mutex = xSemaphoreCreateMutex();
+    if (service->diagnostics_mutex == NULL) {
         return false;
     }
 
@@ -351,4 +501,19 @@ bool fhss_service_start(fhss_service_t *service)
 fhss_fsm_state_t fhss_service_get_state(const fhss_service_t *service)
 {
     return service != NULL ? service->fsm.state : FHSS_FSM_STATE_STOPPED;
+}
+
+bool fhss_service_get_diagnostics(
+    fhss_service_t *service,
+    fhss_diagnostics_snapshot_t *out_snapshot
+)
+{
+    if (service == NULL || out_snapshot == NULL ||
+        service->diagnostics_mutex == NULL) {
+        return false;
+    }
+    diagnostics_lock(service);
+    *out_snapshot = service->diagnostics;
+    diagnostics_unlock(service);
+    return true;
 }
