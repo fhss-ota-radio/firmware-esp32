@@ -47,10 +47,20 @@ audio_io_speaker_disable();
 
 ## 하드웨어 배선 확정 시 수정할 것 (`audio_io_config.h`)
 
-- `AUDIO_IO_MIC_*_GPIO` (BCLK/WS/SD) — INMP441, 현재 GPIO5/6/7 (마이크 실기기 테스트 완료 배선)
-- `AUDIO_IO_SPK_*_GPIO` (BCLK/WS(LRC)/DOUT(DIN)/GAIN/SD) — MAX98357A, 현재 GPIO13/14/12/11/10 (2026-08-11 브레드보드 재구성 배선). SD=GPIO10이 로터리 엔코더 SW와 겹쳐서 로터리 SW를 GPIO15로 옮김 — 핀 또 바꿀 땐 `rotary_encoder_config.h`도 같이 확인할 것
-- INMP441의 L/R 핀은 GND 고정(좌채널) 배선 가정 — 다르게 배선하면 `audio_io.c`의 `I2S_STD_SLOT_LEFT`를 `I2S_STD_SLOT_RIGHT`로 변경
+- `AUDIO_IO_MIC_*_GPIO` (WS/BCLK/SD) — INMP441, 현재 GPIO4/5/6 (2026-08-11 재배정)
+- `AUDIO_IO_SPK_*_GPIO` (BCLK/WS(LRC)/DOUT(DIN)/GAIN/SD) — MAX98357A, 현재 GPIO3/46/8/18/17 (2026-08-11 재배정, GPIO9~14를 CC1101 SPI+GDO0+GDO2용으로 통째로 비워두기 위함). GDO0은 GPIO10으로 팀 합의되어 GPIO18(GAIN) 충돌 없음
+- INMP441의 L/R 핀은 3V3 고정(우채널) 배선 — `audio_io.c`에서 `I2S_STD_SLOT_RIGHT`로 수신. 다르게 배선하면 `I2S_STD_SLOT_LEFT`로 변경
 - MAX98357A의 SD/GAIN 핀은 이제 GPIO 직결 — VDD/GND 직결 배선이면 안 됨(GPIO가 직접 제어함). GAIN을 다른 값으로 바꾸려면 `spk_channel_init()`의 `gpio_set_level(AUDIO_IO_SPK_GAIN_GPIO, ...)` 수정
+
+## LOOPBACK_ENABLE (임시 마이크 테스트, 검증 끝나면 제거)
+
+`audio_io_config.h`의 `LOOPBACK_ENABLE` 매크로(기본 꺼짐, 주석 처리)를 켜면
+`audio_io_decode_play_scaled(data, len, gain)`/`audio_io_decode_peek_peak(data, len)`
+두 함수가 컴파일에 포함된다. `main/fsm.c`의 `mic_test_task`(MENU_IDLE에서
+PTT로 mic->Speex->스피커 loopback)가 이 함수들을 사용 — INMP441 실배선
+확인용 임시 코드. 자세한 배경/실측값은 로컬
+`~/Documents/projects/kcci-final/troubleshoot/mic_loopback_test-inmp441_low_amplitude.md`
+참고(git 비관리).
 
 ## 제약 / TODO
 

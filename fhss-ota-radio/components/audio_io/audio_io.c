@@ -37,7 +37,7 @@ static void mic_channel_init(void)
             .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
         },
     };
-    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_RIGHT;
 
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_mic_rx, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_enable(s_mic_rx));
@@ -183,3 +183,48 @@ int audio_io_decode_play(const uint8_t *data, size_t len)
 
     return 0;
 }
+
+#ifdef LOOPBACK_ENABLE
+int16_t audio_io_decode_peek_peak(const uint8_t *data, size_t len)
+{
+    int16_t pcm[AUDIO_CODEC_FRAME_SAMPLES];
+
+    if (audio_codec_decode(data, len, pcm) != 0) {
+        return -1;
+    }
+
+    int16_t peak = 0;
+    for (int i = 0; i < AUDIO_CODEC_FRAME_SAMPLES; i++) {
+        int16_t v = (pcm[i] < 0) ? (int16_t)(-pcm[i]) : pcm[i];
+        if (v > peak) {
+            peak = v;
+        }
+    }
+    return peak;
+}
+
+int audio_io_decode_play_scaled(const uint8_t *data, size_t len, float gain)
+{
+    int16_t pcm[AUDIO_CODEC_FRAME_SAMPLES];
+
+    if (audio_codec_decode(data, len, pcm) != 0) {
+        return -1;
+    }
+
+    for (int i = 0; i < AUDIO_CODEC_FRAME_SAMPLES; i++) {
+        int32_t v = (int32_t)((float)pcm[i] * gain);
+        if (v > INT16_MAX) v = INT16_MAX;
+        if (v < INT16_MIN) v = INT16_MIN;
+        pcm[i] = (int16_t)v;
+    }
+
+    size_t bytes_written = 0;
+    esp_err_t err = i2s_channel_write(s_spk_tx, pcm, sizeof(pcm), &bytes_written, AUDIO_IO_I2S_TIMEOUT_MS);
+    if (err != ESP_OK || bytes_written != sizeof(pcm)) {
+        ESP_LOGW(TAG, "spk write failed (err=%d, bytes=%u)", err, (unsigned)bytes_written);
+        return -1;
+    }
+
+    return 0;
+}
+#endif /* LOOPBACK_ENABLE */

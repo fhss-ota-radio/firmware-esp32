@@ -1,6 +1,7 @@
 #include "fsm.h"
 
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -140,6 +141,69 @@ static const fsm_transition_t s_transitions[] = {
  * 등)은 그대로 TODO로 남겨둔다 — 지금 여기서 채우면 실제 API가 없는 상태라
  * 추측성 코드가 되고, 나중에 다시 갈아엎어야 한다.
  */
+/*
+ * TEMP(INMP441 실배선 테스트용, LOOPBACK_ENABLE로 켜고 끔 —
+ * audio_io_config.h의 매크로 정의 참고): MENU_IDLE(뮤트)에서 PTT를 누르면
+ * 정식 전이표를 타지 않고(MENU_IDLE은 설계상 PTT 전이가 없음) 이 loopback
+ * 테스트로만 빠진다 — 삐빅음 없이 마이크로 캡처한 프레임을 Speex로
+ * 인코딩/디코딩 왕복시켜 버퍼에 모아뒀다가 PTT를 떼면 1초 뒤 재생한다.
+ * INMP441 실측 캡처 신호가 원래 작아서(peak 846/32767 수준, 2026-08-11
+ * 실기기 확인) 그냥 재생하면 안 들려서 소프트웨어 gain으로 증폭 후
+ * 재생한다(MIC_TEST_PLAYBACK_GAIN). 정식 FSM 상태/전이는 전혀 건드리지
+ * 않아 LOOPBACK_ENABLE을 끄면(기본값) 원래 동작으로 돌아간다.
+ */
+#ifdef LOOPBACK_ENABLE
+#define MIC_TEST_MAX_FRAMES 250 /* 250 * 20ms = 5초 상한 */
+#define MIC_TEST_PLAYBACK_GAIN 16.0f /* peak 846 기준 약 13536(풀스케일 41%)까지 증폭 */
+
+typedef struct {
+    uint8_t data[AUDIO_CODEC_MAX_ENCODED_BYTES];
+    size_t len;
+} mic_test_frame_t;
+
+static TaskHandle_t s_mic_test_task;
+static volatile bool s_mic_test_recording;
+
+static void mic_test_task(void *arg)
+{
+    mic_test_frame_t *frames = malloc(sizeof(mic_test_frame_t) * MIC_TEST_MAX_FRAMES);
+    size_t frame_count = 0;
+
+    while (s_mic_test_recording && frame_count < MIC_TEST_MAX_FRAMES) {
+        uint8_t enc[AUDIO_CODEC_MAX_ENCODED_BYTES];
+        int n = audio_io_capture_encode(enc, sizeof(enc));
+        if (n > 0) {
+            memcpy(frames[frame_count].data, enc, (size_t)n);
+            frames[frame_count].len = (size_t)n;
+            frame_count++;
+        }
+    }
+
+    /* TEMP(진단용): 캡처된 신호가 실제로 있는지(0에 가까우면 배선/슬롯 문제)
+     * 재생 전에 피크로 먼저 확인 */
+    int16_t peak = 0;
+    for (size_t i = 0; i < frame_count; i++) {
+        int16_t p = audio_io_decode_peek_peak(frames[i].data, frames[i].len);
+        if (p > peak) {
+            peak = p;
+        }
+    }
+    ESP_LOGI(TAG, "mic test: %u frames captured, peak=%d/32767, playback in 1s",
+             (unsigned)frame_count, peak);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    audio_io_speaker_enable();
+    for (size_t i = 0; i < frame_count; i++) {
+        audio_io_decode_play_scaled(frames[i].data, frames[i].len, MIC_TEST_PLAYBACK_GAIN);
+    }
+    audio_io_speaker_disable();
+
+    free(frames);
+    s_mic_test_task = NULL;
+    vTaskDelete(NULL);
+}
+#endif /* LOOPBACK_ENABLE */
+
 static void on_ptt_event(bool pressed, void *ctx)
 {
     /* status_led는 FSM 처리 결과를 기다리지 않고 PTT 원시 입력을 그대로
@@ -151,6 +215,21 @@ static void on_ptt_event(bool pressed, void *ctx)
     } else {
         status_led_off();
     }
+
+#ifdef LOOPBACK_ENABLE
+    /* TEMP: MENU_IDLE에서는 정식 FSM 이벤트 대신 마이크 loopback 테스트로 라우팅 */
+    if (fsm_get_state() == FSM_STATE_MENU_IDLE) {
+        if (pressed) {
+            if (s_mic_test_task == NULL) {
+                s_mic_test_recording = true;
+                xTaskCreate(mic_test_task, "mic_test", 8192, NULL, tskIDLE_PRIORITY + 3, &s_mic_test_task);
+            }
+        } else {
+            s_mic_test_recording = false;
+        }
+        return;
+    }
+#endif /* LOOPBACK_ENABLE */
 
     fsm_post_event(pressed ? FSM_EVENT_PTT_PRESS : FSM_EVENT_PTT_RELEASE);
 }

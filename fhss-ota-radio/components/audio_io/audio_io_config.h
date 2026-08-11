@@ -3,13 +3,19 @@
 #include "driver/gpio.h"
 #include "driver/i2s_std.h"
 
+/* TEMP(마이크 loopback 테스트, 검증 끝나면 이 매크로와 관련 코드 전부 제거):
+ * 이 매크로가 정의되어 있으면 MENU_IDLE에서 PTT로 mic->Speex->스피커
+ * loopback 테스트(main/fsm.c의 mic_test_task 등)가 활성화된다.
+ * audio_io.c/audio_io.h/main/fsm.c에서 공통으로 이 매크로를 본다 —
+ * 켜려면 아래 줄의 주석만 해제. */
+// #define LOOPBACK_ENABLE
+
 /* === 마이크 (INMP441, I2S RX 전용) — I2S_NUM_0 ===
- * L/R 핀은 GND 고정 배선(좌채널 고정) 가정 -> 코드에서 SLOT_LEFT로 수신.
- * 실배선 확정 전 placeholder — 배선 정해지면 아래 GPIO 값만 수정. */
+ * L/R 핀은 3V3 고정 배선(우채널 고정, 2026-08-11 확정) -> 코드에서 SLOT_RIGHT로 수신. */
 #define AUDIO_IO_MIC_I2S_PORT  I2S_NUM_0
+#define AUDIO_IO_MIC_WS_GPIO   GPIO_NUM_4  /* WS / LRCLK */
 #define AUDIO_IO_MIC_BCLK_GPIO GPIO_NUM_5  /* SCK */
-#define AUDIO_IO_MIC_WS_GPIO   GPIO_NUM_6  /* WS / LRCLK */
-#define AUDIO_IO_MIC_SD_GPIO   GPIO_NUM_7  /* 마이크 SD(데이터 출력) -> ESP 입력 */
+#define AUDIO_IO_MIC_SD_GPIO   GPIO_NUM_6  /* 마이크 SD(데이터 출력) -> ESP 입력 */
 
 /* === 스피커 (MAX98357A, I2S TX 전용) — I2S_NUM_1 ===
  * SD/GAIN은 GPIO로 직접 제어(더 이상 VDD/GND 직결 가정 아님).
@@ -17,13 +23,17 @@
  *     >1.4V(HIGH)="왼쪽 채널만 출력"이라 I2S_STD_SLOT_LEFT 설정과 맞음. <0.16V(LOW)=완전 꺼짐.
  * GAIN: 항상 HIGH(VDD) 고정 = 6dB — GPIO로 가능한 3가지(GND=12dB, 미연결=9dB, VDD=6dB) 중
  *       가장 낮은 볼륨. 저항 없이 GND/VDD/미연결로만 3, 6, 9, 12, 15dB 중 조합 가능(데이터시트 참고). */
-/* 브레드보드 재구성(2026-08-11) 배선: LRC/BCLK/DIN/GAIN/SD = GPIO14/13/12/11/10 */
+/* 재배정(2026-08-11): GPIO9~14를 CC1101(SPI 4핀 + GDO0 + GDO2)용으로 통째로
+ * 비우기 위해 앰프를 이동. LRC/BCLK/DIN/GAIN/SD = GPIO46/3/8/18/17.
+ * GPIO46/3은 스트래핑 핀이지만 부팅 후엔 일반 GPIO로 동작(46은 출력도 가능,
+ * 3은 JTAG 미사용 시 무관) — 외부에서 부팅 중 강제로 레벨을 당기지 않는
+ * 수동 소자(앰프)라 문제없음. */
 #define AUDIO_IO_SPK_I2S_PORT  I2S_NUM_1
-#define AUDIO_IO_SPK_BCLK_GPIO GPIO_NUM_13 /* SCK */
-#define AUDIO_IO_SPK_WS_GPIO   GPIO_NUM_14 /* WS / LRC */
-#define AUDIO_IO_SPK_DOUT_GPIO GPIO_NUM_12 /* ESP 출력 -> MAX98357A DIN */
-#define AUDIO_IO_SPK_GAIN_GPIO GPIO_NUM_11
-#define AUDIO_IO_SPK_SD_GPIO   GPIO_NUM_10
+#define AUDIO_IO_SPK_BCLK_GPIO GPIO_NUM_3  /* SCK */
+#define AUDIO_IO_SPK_WS_GPIO   GPIO_NUM_46 /* WS / LRC */
+#define AUDIO_IO_SPK_DOUT_GPIO GPIO_NUM_8  /* ESP 출력 -> MAX98357A DIN */
+#define AUDIO_IO_SPK_GAIN_GPIO GPIO_NUM_18
+#define AUDIO_IO_SPK_SD_GPIO   GPIO_NUM_17
 
 /* PTT 눌렀을 때 "말하기 시작" 알림 삐빅 소리. 볼륨은 GAIN(6dB, 위 참고)에
  * 더해 여기 진폭도 작게(풀스케일 32767의 약 1.5%) 잡아서 이중으로 낮춤 —
