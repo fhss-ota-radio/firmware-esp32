@@ -17,12 +17,13 @@
  *     >1.4V(HIGH)="왼쪽 채널만 출력"이라 I2S_STD_SLOT_LEFT 설정과 맞음. <0.16V(LOW)=완전 꺼짐.
  * GAIN: 항상 HIGH(VDD) 고정 = 6dB — GPIO로 가능한 3가지(GND=12dB, 미연결=9dB, VDD=6dB) 중
  *       가장 낮은 볼륨. 저항 없이 GND/VDD/미연결로만 3, 6, 9, 12, 15dB 중 조합 가능(데이터시트 참고). */
+/* 브레드보드 재구성(2026-08-11) 배선: LRC/BCLK/DIN/GAIN/SD = GPIO14/13/12/11/10 */
 #define AUDIO_IO_SPK_I2S_PORT  I2S_NUM_1
-#define AUDIO_IO_SPK_BCLK_GPIO GPIO_NUM_15 /* SCK */
-#define AUDIO_IO_SPK_WS_GPIO   GPIO_NUM_16 /* WS / LRCLK */
-#define AUDIO_IO_SPK_DOUT_GPIO GPIO_NUM_17 /* ESP 출력 -> MAX98357A DIN */
-#define AUDIO_IO_SPK_GAIN_GPIO GPIO_NUM_18
-#define AUDIO_IO_SPK_SD_GPIO   GPIO_NUM_11
+#define AUDIO_IO_SPK_BCLK_GPIO GPIO_NUM_13 /* SCK */
+#define AUDIO_IO_SPK_WS_GPIO   GPIO_NUM_14 /* WS / LRC */
+#define AUDIO_IO_SPK_DOUT_GPIO GPIO_NUM_12 /* ESP 출력 -> MAX98357A DIN */
+#define AUDIO_IO_SPK_GAIN_GPIO GPIO_NUM_11
+#define AUDIO_IO_SPK_SD_GPIO   GPIO_NUM_10
 
 /* PTT 눌렀을 때 "말하기 시작" 알림 삐빅 소리. 볼륨은 GAIN(6dB, 위 참고)에
  * 더해 여기 진폭도 작게(풀스케일 32767의 약 1.5%) 잡아서 이중으로 낮춤 —

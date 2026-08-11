@@ -50,20 +50,20 @@ firmware-esp32/
   - **메뉴 기반 수신 모드 게이팅 추가**: 기존 단일 `IDLE` 상태를 `MENU_IDLE`(음성, 기본)/`MENU_OTA`(OTA 대기)로 분리. 로터리 엔코더 클릭 이벤트(`EV_MENU_SELECT_IDLE`/`EV_MENU_SELECT_OTA`)로만 전환되며, 음성 송수신·OTA 수신/적용 중에는 이 전이가 정의돼 있지 않아 메뉴 변경이 SW적으로 불가능함
   - 부수 효과: 음성 통화 중 OTA가 강제로 끼어드는 이전 전이(`TX_AUDIO`/`RX_AUDIO` → `OTA_RECEIVING` on `EV_OTA_START`)는 폐기 — 이제 `MENU_OTA`에서만 OTA 수신이 유효함
 - [x] `components/display_ui/` — 0.96" I2C OLED(SSD1306, 128x64) 상태 표시 컴포넌트, **실기기 테스트 완료**
-  - `display_ui_config.h` — I2C 핀 SDA=GPIO21/SCL=GPIO47(실기기 테스트 배선, 최종 확정 전까지 바뀔 수 있음)·주소·해상도 매크로
+  - `display_ui_config.h` — I2C 핀 SDA=GPIO21/SCL=GPIO20(2026-08-11 브레드보드 재구성 배선, 최종 확정 전까지 바뀔 수 있음)·주소·해상도 매크로
   - `display_ui.h` / `display_ui.c` — `driver/i2c_master.h`(ESP-IDF v5.2+ 신규 API) 기반 SSD1306 드라이버
   - `font8x8_basic.h` — 공개도메인 8x8 비트맵 폰트 ([dhepper/font8x8](https://github.com/dhepper/font8x8) 원본과 바이트 단위 대조 검증)
   - 공개 API: `display_ui_init()`, `display_ui_clear()`, `oled_update_text(row, text)`, `oled_update_text_fmt(row, fmt, ...)`
 - [x] `components/ptt_button/` — PTT 버튼 디바운스 컴포넌트
-  - `ptt_button_config.h` — 핀(placeholder)/active level/디바운스 파라미터
+  - `ptt_button_config.h` — 핀(GPIO1, 2026-08-11 브레드보드 재구성 배선)/active level/디바운스 파라미터
   - `ptt_button.h` / `ptt_button.c` — 폴링 기반 디바운스(ISR 미사용), 콜백/폴링 API 제공
   - 공개 API: `ptt_button_init()`, `ptt_button_set_callback(cb, ctx)`, `ptt_button_is_pressed()`
 - [x] `components/rotary_encoder/` — 메뉴 선택용 로터리 엔코더(A/B/SW) 컴포넌트
-  - `rotary_encoder_config.h` — 핀 A/B/SW=GPIO8/9/10(placeholder). **주의**: GPIO5/6/7은 audio_io 마이크와 겹쳐서 사용 금지(겹치면 I2S BCLK 토글이 회전으로 오인되는 버그 있었음, 2026-08-10)
+  - `rotary_encoder_config.h` — 핀 A/B/SW=GPIO8/9/15(placeholder). **주의**: GPIO5/6/7은 audio_io 마이크와 겹쳐서 사용 금지(겹치면 I2S BCLK 토글이 회전으로 오인되는 버그 있었음, 2026-08-10). SW는 2026-08-11 audio_io 스피커 SD가 GPIO10을 쓰게 되면서 GPIO10→GPIO15로 이동
   - `rotary_encoder.h` / `rotary_encoder.c` — quadrature 폴링 디코딩 + SW 디바운스, 커서 이동은 순환(`MENU_IDLE ↔ MENU_OTA`)
   - 공개 API: `rotary_encoder_init()`, `rotary_encoder_set_cursor_callback()`, `rotary_encoder_set_select_callback()`, `rotary_encoder_get_cursor()`
 - [x] `components/audio_io/` — I2S 마이크(INMP441)/스피커(MAX98357A) 입출력 + audio_codec 연결, **마이크 캡처 실기기 테스트 완료, 앰프 배선/테스트 진행 중**
-  - `audio_io_config.h` — 마이크(GPIO5/6/7)/스피커(BCLK=15,LRC=16,DIN=17,GAIN=18,SD=11, ESP32-S3-DevKitC-1 J1 헤더 기준 배치) 핀 설정
+  - `audio_io_config.h` — 마이크(GPIO5/6/7)/스피커(LRC=14,BCLK=13,DIN=12,GAIN=11,SD=10, 2026-08-11 브레드보드 재구성 배선) 핀 설정
   - 마이크(RX)=`I2S_NUM_0`, 스피커(TX)=`I2S_NUM_1` 별도 포트 고정 배정 (재설정 없이 동시 존재)
   - 공개 API: `audio_io_init()`, `audio_io_capture_encode(out, cap)`, `audio_io_decode_play(data, len)`, `audio_io_speaker_enable()`/`audio_io_speaker_disable()`, `audio_io_play_beep()` — 내부에서 `audio_codec_encode/decode` 호출
   - **스피커 채널은 지연 활성화**: 마이크와 달리 `audio_io_init()`에서 채널만 만들고 enable 안 함 — 실제 재생 시점(`RX_AUDIO` 진입, 또는 삐빅음 재생 직전)에만 `audio_io_speaker_enable()`로 켬. 켜둔 채 한 번도 안 쓰면 GDMA TX 인터럽트가 NULL 컨텍스트로 불려 재부팅되는 문제가 실기기에서 확인돼 수정함(2026-08-10)

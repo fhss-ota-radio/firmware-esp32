@@ -35,7 +35,7 @@ if (ptt_button_is_pressed()) { ... }
 
 ## 하드웨어 배선 확정 시 수정할 것 (`ptt_button_config.h`)
 
-- `PTT_BUTTON_GPIO` — 현재 GPIO4는 **placeholder**, 실배선에 맞게 변경 필수
+- `PTT_BUTTON_GPIO` — 현재 GPIO1(2026-08-11 브레드보드 재구성 배선), 실배선에 맞게 변경 필수
 - `PTT_BUTTON_ACTIVE_LOW` — 버튼을 GND로 물리면 1(내부 풀업), 3.3V로 물리면 0(내부 풀다운)
 - `PTT_BUTTON_POLL_MS` / `PTT_BUTTON_DEBOUNCE_COUNT` — 버튼 채터링이 심하면 디바운스 시간(둘의 곱) 늘리기
 

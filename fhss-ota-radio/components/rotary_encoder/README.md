@@ -44,7 +44,7 @@ rotary_encoder_menu_t cur = rotary_encoder_get_cursor();
 
 ## 하드웨어 배선 확정 시 수정할 것 (`rotary_encoder_config.h`)
 
-- `ROTARY_ENCODER_GPIO_A` / `_B` / `_SW` — 현재 GPIO8/9/10은 **placeholder** (GPIO5/6/7은 audio_io 마이크와 겹쳐서 사용 금지 — 겹치면 I2S BCLK 토글이 회전으로 오인됨)
+- `ROTARY_ENCODER_GPIO_A` / `_B` / `_SW` — 현재 GPIO8/9/15은 **placeholder** (GPIO5/6/7은 audio_io 마이크와 겹쳐서 사용 금지 — 겹치면 I2S BCLK 토글이 회전으로 오인됨. SW는 원래 GPIO10이었으나 2026-08-11 audio_io 스피커 SD가 GPIO10을 쓰게 돼서 GPIO15로 옮김)
 - 방향이 반대로 돈다고 느껴지면 **A/B 핀 배선(또는 config의 A/B 매크로)을 서로 바꾸기** — 코드 로직 안 건드려도 됨
 - `ROTARY_ENCODER_STEPS_PER_DETENT` — 딸깍 1칸에 메뉴가 안 움직이거나 여러 칸씩 튀면 조정 (기본 4)
 - `ROTARY_ENCODER_SW_ACTIVE_LOW` — SW를 GND로 물리면 1(내부 풀업), 3.3V로 물리면 0(내부 풀다운)
