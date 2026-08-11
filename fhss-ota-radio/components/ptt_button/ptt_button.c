@@ -52,7 +52,8 @@ static void ptt_button_task(void *arg)
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(PTT_BUTTON_POLL_MS));
+        const TickType_t poll_ticks = pdMS_TO_TICKS(PTT_BUTTON_POLL_MS);
+        vTaskDelay(poll_ticks > 0U ? poll_ticks : 1U);
     }
 }
 
