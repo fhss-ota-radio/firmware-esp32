@@ -1,0 +1,9 @@
+idf_component_register(
+    SRCS
+        "ota_rf_bridge.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        ota_client
+        rf_transport
+)
