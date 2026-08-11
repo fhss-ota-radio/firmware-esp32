@@ -43,6 +43,7 @@ static QueueHandle_t s_rx_audio_queue;
 /* 상태별 이름/이벤트별 이름: 로그 및 OLED 표시용 */
 static const char *s_state_names[FSM_STATE_COUNT] = {
     [FSM_STATE_BOOT_INIT]     = "BOOT_INIT",
+    [FSM_STATE_MENU_COMM]     = "MENU_COMM",
     [FSM_STATE_MENU_IDLE]     = "MENU_IDLE",
     [FSM_STATE_MENU_OTA]      = "MENU_OTA",
     [FSM_STATE_TX_AUDIO]      = "TX_AUDIO",
@@ -55,6 +56,7 @@ static const char *s_state_names[FSM_STATE_COUNT] = {
 static const char *s_event_names[FSM_EVENT_COUNT] = {
     [FSM_EVENT_INIT_DONE]      = "INIT_DONE",
     [FSM_EVENT_SYNC_LOST]      = "SYNC_LOST",
+    [FSM_EVENT_MENU_SELECT_COMM] = "MENU_SELECT_COMM",
     [FSM_EVENT_MENU_SELECT_IDLE] = "MENU_SELECT_IDLE",
     [FSM_EVENT_MENU_SELECT_OTA]  = "MENU_SELECT_OTA",
     [FSM_EVENT_PTT_PRESS]      = "PTT_PRESS",
@@ -76,23 +78,26 @@ static const char *s_event_names[FSM_EVENT_COUNT] = {
  * 브로드캐스트 방식이라 "동기 획득 대기" 상태가 없다 — PTT 누른 쪽이 정해진
  * 시작 채널로 먼저 송신하고 그 순간부터 시드 기반으로 제멋대로 호핑하며,
  * 받는 쪽은 그 수신 시점을 기준으로 같은 시드로 호핑을 추종한다. 그래서
- * BOOT_INIT 이후엔 곧바로 MENU_IDLE(정해진 채널에서 대기)로 들어간다.
+ * BOOT_INIT 이후엔 곧바로 MENU_COMM(정해진 채널에서 통신 대기)으로 들어간다.
  *
  * EV_SYNC_LOST는 그래도 전역 안전장치로 남겨둔다 — 무선 계층(rf_transport/
  * fhss_core)이 홉 추종 중 연속 미수신 등으로 타이밍이 완전히 깨졌다고
- * 판단하면 이 이벤트를 올리고, FSM은 지금 어느 상태에 있든 MENU_IDLE(정해진
- * 채널)로 강제 복귀한다. 정상적인 한 세션 종료(TX_AUDIO의 PTT_RELEASE,
+ * 판단하면 이 이벤트를 올리고, FSM은 지금 어느 상태에 있든 MENU_COMM(정해진
+ * 채널)으로 강제 복귀한다. 정상적인 한 세션 종료(TX_AUDIO의 PTT_RELEASE,
  * RX_AUDIO의 RX_DONE)와는 별개의, 진짜 이상 상황용 탈출구다.
  *
  * 음성(FHSS)과 OTA는 같은 CC1101 라디오를 쓰는 단일 반이중 트랜시버이므로,
  * OTA_RECEIVING 진입 시 음성 호핑 이탈은 정책이 아니라 하드웨어 제약이다.
  *
- * MENU_IDLE/MENU_OTA는 수신 패킷 해석을 게이팅하는 메뉴 모드다. 메뉴 전환
- * 이벤트(MENU_SELECT_IDLE/OTA)는 이 둘 사이에서만 정의돼있고 TX_AUDIO/
+ * MENU_COMM/MENU_IDLE/MENU_OTA는 수신 패킷 해석을 게이팅하는 3-way 메뉴
+ * 모드다(2026-08-11 UI 재설계로 MENU_IDLE이 "뮤트"로 새로 추가됨 — 기존
+ * MENU_IDLE은 MENU_COMM으로 개명). MENU_COMM=음성 통신, MENU_OTA=펌웨어
+ * 청크, MENU_IDLE=뮤트(수신 처리 없음, PTT/RX_FRAME 전이도 없음). 메뉴 전환
+ * 이벤트(MENU_SELECT_COMM/IDLE/OTA)는 이 세 상태끼리만 정의돼있고 TX_AUDIO/
  * RX_AUDIO/OTA_RECEIVING/OTA_APPLYING에는 없다 — 그 상태에서 메뉴 전환
  * 이벤트가 오면 unhandled로 무시되며, 이게 곧 "활동 중 메뉴 변경 불가"의
- * 구현이다. 같은 이유로 OTA_START는 MENU_OTA에서만 유효해서, 음성 통화
- * 중(TX_AUDIO/RX_AUDIO)에는 OTA가 끼어들 수 없다.
+ * 구현이다. 같은 이유로 OTA_START는 MENU_OTA에서만, PTT_PRESS/RX_FRAME은
+ * MENU_COMM에서만 유효해서 서로 끼어들 수 없다.
  */
 typedef struct {
     fsm_state_t state;
@@ -101,18 +106,23 @@ typedef struct {
 } fsm_transition_t;
 
 static const fsm_transition_t s_transitions[] = {
-    { FSM_STATE_BOOT_INIT,     FSM_EVENT_INIT_DONE,      FSM_STATE_MENU_IDLE },
+    { FSM_STATE_BOOT_INIT,     FSM_EVENT_INIT_DONE,      FSM_STATE_MENU_COMM },
 
-    { FSM_STATE_MENU_IDLE,     FSM_EVENT_PTT_PRESS,      FSM_STATE_TX_AUDIO },
-    { FSM_STATE_MENU_IDLE,     FSM_EVENT_RX_FRAME,       FSM_STATE_RX_AUDIO },
+    { FSM_STATE_MENU_COMM,     FSM_EVENT_PTT_PRESS,      FSM_STATE_TX_AUDIO },
+    { FSM_STATE_MENU_COMM,     FSM_EVENT_RX_FRAME,       FSM_STATE_RX_AUDIO },
+    { FSM_STATE_MENU_COMM,     FSM_EVENT_MENU_SELECT_IDLE, FSM_STATE_MENU_IDLE },
+    { FSM_STATE_MENU_COMM,     FSM_EVENT_MENU_SELECT_OTA, FSM_STATE_MENU_OTA },
+
+    { FSM_STATE_MENU_IDLE,     FSM_EVENT_MENU_SELECT_COMM, FSM_STATE_MENU_COMM },
     { FSM_STATE_MENU_IDLE,     FSM_EVENT_MENU_SELECT_OTA, FSM_STATE_MENU_OTA },
 
+    { FSM_STATE_MENU_OTA,      FSM_EVENT_MENU_SELECT_COMM, FSM_STATE_MENU_COMM },
     { FSM_STATE_MENU_OTA,      FSM_EVENT_MENU_SELECT_IDLE, FSM_STATE_MENU_IDLE },
     { FSM_STATE_MENU_OTA,      FSM_EVENT_OTA_START,      FSM_STATE_OTA_RECEIVING },
 
-    { FSM_STATE_TX_AUDIO,      FSM_EVENT_PTT_RELEASE,    FSM_STATE_MENU_IDLE },
+    { FSM_STATE_TX_AUDIO,      FSM_EVENT_PTT_RELEASE,    FSM_STATE_MENU_COMM },
 
-    { FSM_STATE_RX_AUDIO,      FSM_EVENT_RX_DONE,        FSM_STATE_MENU_IDLE },
+    { FSM_STATE_RX_AUDIO,      FSM_EVENT_RX_DONE,        FSM_STATE_MENU_COMM },
 
     { FSM_STATE_OTA_RECEIVING, FSM_EVENT_OTA_CHUNK,      FSM_STATE_OTA_RECEIVING },
     { FSM_STATE_OTA_RECEIVING, FSM_EVENT_OTA_COMPLETE,   FSM_STATE_OTA_APPLYING },
@@ -134,7 +144,7 @@ static void on_ptt_event(bool pressed, void *ctx)
 {
     /* status_led는 FSM 처리 결과를 기다리지 않고 PTT 원시 입력을 그대로
      * 반영한다 — GPIO 디바운스만 통과하면 바로 켜지는 테스트용 표시라,
-     * FSM 전이표가 어떻게 바뀌든(지금은 MENU_IDLE에서 TX_AUDIO로 실제 전이됨)
+     * FSM 전이표가 어떻게 바뀌든(지금은 MENU_COMM에서 TX_AUDIO로 실제 전이됨)
      * 영향받지 않는다. */
     if (pressed) {
         status_led_set_white_dim();
@@ -145,19 +155,55 @@ static void on_ptt_event(bool pressed, void *ctx)
     fsm_post_event(pressed ? FSM_EVENT_PTT_PRESS : FSM_EVENT_PTT_RELEASE);
 }
 
+/* rotary_encoder_menu_t <-> display_ui_menu_item_t는 순서가 같은 3-way라
+ * 매핑이 자명하지만, 열거형이 나중에 각자 따로 바뀔 수 있으니 캐스트 대신
+ * 명시적으로 변환한다. */
+static display_ui_menu_item_t menu_item_from_rotary(rotary_encoder_menu_t cursor)
+{
+    switch (cursor) {
+        case ROTARY_ENCODER_MENU_COMM: return DISPLAY_UI_MENU_COMM;
+        case ROTARY_ENCODER_MENU_OTA:  return DISPLAY_UI_MENU_OTA;
+        default:                       return DISPLAY_UI_MENU_IDLE;
+    }
+}
+
+/* 현재 FSM 상태를 화면에 표시할 메뉴 항목으로 변환한다. TX_AUDIO/RX_AUDIO는
+ * MENU_COMM에서만, OTA_RECEIVING/OTA_APPLYING은 MENU_OTA에서만 진입 가능하니
+ * (전이표 참고) 그 상태들도 각각 COMM/OTA로 매핑하는 게 실제로 맞다. */
+static display_ui_menu_item_t menu_item_from_fsm_state(fsm_state_t state)
+{
+    switch (state) {
+        case FSM_STATE_MENU_COMM:
+        case FSM_STATE_TX_AUDIO:
+        case FSM_STATE_RX_AUDIO:
+            return DISPLAY_UI_MENU_COMM;
+        case FSM_STATE_MENU_IDLE:
+            return DISPLAY_UI_MENU_IDLE;
+        case FSM_STATE_MENU_OTA:
+        case FSM_STATE_OTA_RECEIVING:
+        case FSM_STATE_OTA_APPLYING:
+            return DISPLAY_UI_MENU_OTA;
+        default:
+            return DISPLAY_UI_MENU_COMM;
+    }
+}
+
 static void on_menu_select(rotary_encoder_menu_t selected, void *ctx)
 {
-    fsm_post_event(selected == ROTARY_ENCODER_MENU_OTA
-                       ? FSM_EVENT_MENU_SELECT_OTA
-                       : FSM_EVENT_MENU_SELECT_IDLE);
+    fsm_event_t event;
+    switch (selected) {
+        case ROTARY_ENCODER_MENU_COMM: event = FSM_EVENT_MENU_SELECT_COMM; break;
+        case ROTARY_ENCODER_MENU_OTA:  event = FSM_EVENT_MENU_SELECT_OTA;  break;
+        default:                       event = FSM_EVENT_MENU_SELECT_IDLE; break;
+    }
+    fsm_post_event(event);
 }
 
 /* 로터리 회전만으로는 FSM 이벤트가 없다 (docs/fsm-design.md §메뉴 게이팅) —
- * 클릭으로 확정하기 전까지는 화면에 미리보기 하이라이트만 갱신한다. */
+ * 클릭으로 확정하기 전까지는 화면에 미리보기(흰 테두리)만 갱신한다. */
 static void on_menu_cursor(rotary_encoder_menu_t cursor, void *ctx)
 {
-    /* TODO(팀1): 실제 메뉴 UI 레이아웃은 display_ui 담당자가 다듬을 것 (지금은 1줄짜리 placeholder) */
-    oled_update_text(1, cursor == ROTARY_ENCODER_MENU_OTA ? "> OTA" : "> IDLE");
+    display_ui_draw_menu(menu_item_from_fsm_state(fsm_get_state()), menu_item_from_rotary(cursor));
 }
 
 /*
@@ -165,7 +211,7 @@ static void on_menu_cursor(rotary_encoder_menu_t cursor, void *ctx)
  * 동안) 20ms마다 마이크를 읽어 Speex로 인코딩한다. rf_transport가 아직 없어
  * 인코딩된 프레임을 실제로 보낼 곳이 없으므로 그 부분만 TODO — 캡처/인코딩
  * 자체는 audio_io가 이미 있으니 추측 없이 그대로 동작한다.
- * MENU_IDLE 진입(PTT_RELEASE) 시 on_enter_menu_idle()에서 태스크를 정리한다.
+ * MENU_COMM 진입(PTT_RELEASE) 시 on_enter_menu_comm()에서 태스크를 정리한다.
  *
  * "말하기 시작" 삐빅음은 여기(태스크 안)가 아니라 on_enter_tx_audio()에서,
  * 즉 이 태스크를 만들기 *전에* fsm_task 안에서 재생한다 — PTT를 아주 빠르게
@@ -198,7 +244,7 @@ static void tx_audio_task(void *arg)
  * 없어서 무음/타임아웃 기반으로 정한 것(값은 1초로 확정, 추후 실측 후 조정 가능).
  *
  * s_rx_audio_task를 NULL로 되돌리고 나서 vTaskDelete(NULL)로 자기 자신을
- * 지운다 — on_enter_menu_idle()이 FSM_EVENT_RX_DONE 처리 시 다시 한번
+ * 지운다 — on_enter_menu_comm()이 FSM_EVENT_RX_DONE 처리 시 다시 한번
  * s_rx_audio_task를 정리하려 하는데, 이미 NULL이라 아무 일도 안 하고
  * 넘어간다(이중 삭제 방지).
  *
@@ -244,7 +290,11 @@ static void on_enter_boot_init(void)
 
     /* TODO(팀2): SPI(rf_transport/CC1101) 초기화 — 해당 컴포넌트 생기면 추가 */
 }
-static void on_enter_menu_idle(void)
+/* MENU_COMM: 통신 대기(기본 메뉴). TX_AUDIO/RX_AUDIO는 여기서만 나가고
+ * 여기로만 돌아오니, 오디오 태스크 정리는 전부 여기서 한다(이전엔
+ * on_enter_menu_idle이라는 이름이었음 — 2026-08-11에 개명, 새 MENU_IDLE은
+ * 완전히 다른 뮤트 상태). */
+static void on_enter_menu_comm(void)
 {
     if (s_tx_audio_task != NULL) {
         vTaskDelete(s_tx_audio_task);
@@ -255,9 +305,21 @@ static void on_enter_menu_idle(void)
         s_rx_audio_task = NULL;
         audio_io_speaker_disable();
     }
-    oled_update_text(0, "MODE: IDLE");
+    display_ui_draw_menu(DISPLAY_UI_MENU_COMM, menu_item_from_rotary(rotary_encoder_get_cursor()));
 }
-static void on_enter_menu_ota(void) { oled_update_text(0, "MODE: OTA"); /* TODO(팀2): CC1101 OTA 채널 리스닝 준비 */ }
+
+/* MENU_IDLE(뮤트): TX_AUDIO/RX_AUDIO로 들어오는 전이가 없어서(전이표 참고)
+ * 오디오 태스크가 실행 중일 수 없다 — 정리할 게 없다. */
+static void on_enter_menu_idle(void)
+{
+    display_ui_draw_menu(DISPLAY_UI_MENU_IDLE, menu_item_from_rotary(rotary_encoder_get_cursor()));
+}
+
+static void on_enter_menu_ota(void)
+{
+    display_ui_draw_menu(DISPLAY_UI_MENU_OTA, menu_item_from_rotary(rotary_encoder_get_cursor()));
+    /* TODO(팀2): CC1101 OTA 채널 리스닝 준비 */
+}
 static void on_enter_tx_audio(void)
 {
     /* fsm_task 안에서 블로킹으로 끝까지 재생 — 이유는 tx_audio_task 주석 참고. */
@@ -284,6 +346,7 @@ static void on_enter_error(void)         { /* TODO(팀1/PM): 오류 로깅, 안�
 
 static void (*const s_enter_actions[FSM_STATE_COUNT])(void) = {
     [FSM_STATE_BOOT_INIT]     = on_enter_boot_init,
+    [FSM_STATE_MENU_COMM]     = on_enter_menu_comm,
     [FSM_STATE_MENU_IDLE]     = on_enter_menu_idle,
     [FSM_STATE_MENU_OTA]      = on_enter_menu_ota,
     [FSM_STATE_TX_AUDIO]      = on_enter_tx_audio,
@@ -329,7 +392,7 @@ static void fsm_task(void *arg)
         if (event == FSM_EVENT_SYNC_LOST &&
             s_state != FSM_STATE_BOOT_INIT &&
             s_state != FSM_STATE_ERROR) {
-            fsm_transition_to(FSM_STATE_MENU_IDLE);
+            fsm_transition_to(FSM_STATE_MENU_COMM);
             continue;
         }
 

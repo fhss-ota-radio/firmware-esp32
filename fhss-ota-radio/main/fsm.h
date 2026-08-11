@@ -14,11 +14,12 @@ extern "C" {
  * 브로드캐스트 방식이라 "동기 획득 대기" 상태(FSM_STATE_FHSS_SYNC)가 없다.
  * PTT 누른 쪽이 정해진 시작 채널로 먼저 송신하고 그 순간부터 시드 기반으로
  * 호핑하며, 받는 쪽은 그 수신 시점을 기준으로 같은 시드를 따라 호핑을
- * 추종한다(팀5 담당) — 그래서 BOOT_INIT 다음엔 곧바로 MENU_IDLE로 들어간다.
+ * 추종한다(팀5 담당) — 그래서 BOOT_INIT 다음엔 곧바로 MENU_COMM(통신 대기,
+ * 기본 메뉴)으로 들어간다.
  *
  * FSM_EVENT_SYNC_LOST는 그래도 전역 안전장치 이벤트로 남아있다. 무선 계층이
  * 호핑 추종 중 연속 미수신 등으로 타이밍이 완전히 깨졌다고 판단하면 이
- * 이벤트를 올리고, FSM은 지금 상태와 무관하게 MENU_IDLE(정해진 채널)로 강제
+ * 이벤트를 올리고, FSM은 지금 상태와 무관하게 MENU_COMM(정해진 채널)으로 강제
  * 복귀한다. TX_AUDIO/RX_AUDIO의 정상 세션 종료(PTT_RELEASE/RX_DONE)와는
  * 별개의, 이상 상황 전용 탈출구다.
  *
@@ -26,16 +27,19 @@ extern "C" {
  * OTA_RECEIVING 동안은 CC1101이 의도적으로 음성 호핑을 이탈하므로, 그 사이의
  * 미수신은 동기 상실로 세지 않는다.
  *
- * FSM_STATE_MENU_IDLE(음성, 기본)과 FSM_STATE_MENU_OTA(OTA 대기)는 수신 패킷의
- * 해석 자체를 게이팅한다 — MENU_IDLE에서 받은 패킷은 음성, MENU_OTA에서 받은
- * 패킷은 펌웨어 청크로 간주한다. 메뉴 전환(FSM_EVENT_MENU_SELECT_IDLE/OTA)은
- * 로터리 엔코더 클릭으로만 발생하며, 이 두 메뉴 상태 사이에서만 정의되어 있어
+ * 메뉴는 3-way다(2026-08-11 UI 재설계): FSM_STATE_MENU_COMM(통신, 부팅 후
+ * 기본값)/FSM_STATE_MENU_IDLE(뮤트 — 통신도 OTA도 아님, PTT/수신 전이 없음)/
+ * FSM_STATE_MENU_OTA(OTA 대기). 수신 패킷 해석은 MENU_COMM/MENU_OTA에서만
+ * 게이팅되고(MENU_COMM=음성, MENU_OTA=펌웨어 청크), MENU_IDLE에서는 수신을
+ * 아예 처리하지 않는다(뮤트). 메뉴 전환(FSM_EVENT_MENU_SELECT_COMM/IDLE/OTA)은
+ * 로터리 엔코더 클릭으로만 발생하며, 이 세 메뉴 상태 사이에서만 정의되어 있어
  * TX_AUDIO/RX_AUDIO/OTA_RECEIVING/OTA_APPLYING 중에는 전이가 없다 = 메뉴 변경 불가.
  * 회전(커서 이동)은 FSM 이벤트가 아니라 display_ui 로컬 상태다.
  * 자세한 내용은 docs/fsm-design.md §1, §1.1 참고.
  */
 typedef enum {
     FSM_STATE_BOOT_INIT = 0,
+    FSM_STATE_MENU_COMM,
     FSM_STATE_MENU_IDLE,
     FSM_STATE_MENU_OTA,
     FSM_STATE_TX_AUDIO,
@@ -49,6 +53,7 @@ typedef enum {
 typedef enum {
     FSM_EVENT_INIT_DONE = 0,
     FSM_EVENT_SYNC_LOST,
+    FSM_EVENT_MENU_SELECT_COMM,
     FSM_EVENT_MENU_SELECT_IDLE,
     FSM_EVENT_MENU_SELECT_OTA,
     FSM_EVENT_PTT_PRESS,
