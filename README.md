@@ -39,7 +39,7 @@ firmware-esp32/
 └── docs/
 ```
 
-## 현재 구현 현황 (`feature/oled-ui-rotate-redesign`)
+## 현재 구현 현황 (`feature/reserve-cc1101-pins`)
 
 **2026-08-10: 실기기 첫 검증 성공** — OLED/PTT/LED/마이크 캡처가 실제 ESP32-S3 보드에서 정상 동작 확인됨 (PTT 누르면 FSM이 `TX_AUDIO`로 실제 전이, LED 점등, 크래시 없음). 앰프(MAX98357A) GAIN/SD GPIO 제어 + PTT 삐빅음 테스트 진행 중.
 
@@ -72,7 +72,8 @@ firmware-esp32/
   - 공개 API: `audio_io_init()`, `audio_io_capture_encode(out, cap)`, `audio_io_decode_play(data, len)`, `audio_io_speaker_enable()`/`audio_io_speaker_disable()`, `audio_io_play_beep()` — 내부에서 `audio_codec_encode/decode` 호출
   - **스피커 채널은 지연 활성화**: 마이크와 달리 `audio_io_init()`에서 채널만 만들고 enable 안 함 — 실제 재생 시점(`RX_AUDIO` 진입, 또는 삐빅음 재생 직전)에만 `audio_io_speaker_enable()`로 켬. 켜둔 채 한 번도 안 쓰면 GDMA TX 인터럽트가 NULL 컨텍스트로 불려 재부팅되는 문제가 실기기에서 확인돼 수정함(2026-08-10)
   - **GAIN/SD GPIO 제어 추가**: GAIN은 항상 HIGH(VDD)=6dB 고정(GPIO로 저항 없이 가능한 값 중 최소), SD는 `audio_io_speaker_enable/disable()`에서 HIGH(왼쪽 채널 출력)/LOW(완전 꺼짐)로 제어
-  - **PTT 테스트용 삐빅음**: `RX_AUDIO`(수신 재생) 미구현 상태에서 앰프 동작 확인용으로 `audio_io_play_beep()` 추가 — A5(880Hz)→D6(1175Hz) 2음. 볼륨은 GAIN 6dB + 소프트웨어 진폭(`AUDIO_IO_BEEP_AMPLITUDE`=500/32767, 약 1.5%)로 이중으로 최소화
+  - **PTT 테스트용 알림음**: `RX_AUDIO`(수신 재생) 미구현 상태에서 앰프 동작 확인용으로 `audio_io_play_beep()` 추가 — A5(880Hz)→D6(1175Hz) 2음. 볼륨은 GAIN 6dB + 소프트웨어 진폭(`AUDIO_IO_BEEP_AMPLITUDE`=500/32767, 약 1.5%)로 이중으로 최소화
+  - **`LOOPBACK_ENABLE`(임시, 기본 꺼짐)**: 켜면 MENU_IDLE에서 PTT로 mic->Speex 인코딩/디코딩 왕복->1초 뒤 스피커 재생하는 loopback 테스트(`main/fsm.c`의 `mic_test_task`)가 활성화됨 — INMP441 실배선 확인용. INMP441은 아날로그 게인이 없어 일반 발화 거리에서 캡처 진폭이 원래 작아서(실측 peak 846/32767) `audio_io_decode_play_scaled()`로 소프트웨어 gain(16배) 증폭 후 재생. 진단 과정은 로컬 `troubleshoot/mic_loopback_test-inmp441_low_amplitude.md` 참고(git 비관리)
 - [x] **`display_ui`/`ptt_button`/`rotary_encoder`/`audio_io` → FSM wiring 완료** (`main/fsm.c`)
   - 부팅 시(`on_enter_boot_init()`) 네 컴포넌트 `init()` + 콜백 등록: `ptt_button` press/release → `FSM_EVENT_PTT_PRESS/RELEASE`, `rotary_encoder` 클릭 → `FSM_EVENT_MENU_SELECT_COMM/IDLE/OTA`, 로터리 회전 → `display_ui_draw_menu()`로 흰 테두리(hover)만 갱신(FSM 이벤트 아님), `audio_codec_init()`/`audio_io_init()`
   - `on_enter_menu_comm`/`on_enter_menu_idle`/`on_enter_menu_ota`에서 `display_ui_draw_menu(selected, hovered)`로 메뉴 화면 갱신 — `fsm.c`의 `menu_item_from_fsm_state()`/`menu_item_from_rotary()`가 FSM/로터리 enum을 `display_ui_menu_item_t`로 변환

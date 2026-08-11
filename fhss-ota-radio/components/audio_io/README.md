@@ -52,6 +52,16 @@ audio_io_speaker_disable();
 - INMP441의 L/R 핀은 3V3 고정(우채널) 배선 — `audio_io.c`에서 `I2S_STD_SLOT_RIGHT`로 수신. 다르게 배선하면 `I2S_STD_SLOT_LEFT`로 변경
 - MAX98357A의 SD/GAIN 핀은 이제 GPIO 직결 — VDD/GND 직결 배선이면 안 됨(GPIO가 직접 제어함). GAIN을 다른 값으로 바꾸려면 `spk_channel_init()`의 `gpio_set_level(AUDIO_IO_SPK_GAIN_GPIO, ...)` 수정
 
+## LOOPBACK_ENABLE (임시 마이크 테스트, 검증 끝나면 제거)
+
+`audio_io_config.h`의 `LOOPBACK_ENABLE` 매크로(기본 꺼짐, 주석 처리)를 켜면
+`audio_io_decode_play_scaled(data, len, gain)`/`audio_io_decode_peek_peak(data, len)`
+두 함수가 컴파일에 포함된다. `main/fsm.c`의 `mic_test_task`(MENU_IDLE에서
+PTT로 mic->Speex->스피커 loopback)가 이 함수들을 사용 — INMP441 실배선
+확인용 임시 코드. 자세한 배경/실측값은 로컬
+`~/Documents/projects/kcci-final/troubleshoot/mic_loopback_test-inmp441_low_amplitude.md`
+참고(git 비관리).
+
 ## 제약 / TODO
 
 - `audio_io_capture_encode`/`decode_play`는 한 번에 한 프레임(20ms)만 처리 — 호출 주기 관리(태스크/타이머)는 상위(FSM TX_AUDIO/RX_AUDIO)에서 담당
