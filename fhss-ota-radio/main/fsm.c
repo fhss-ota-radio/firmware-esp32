@@ -54,7 +54,6 @@ static const char *s_state_names[FSM_STATE_COUNT] = {
 
 static const char *s_event_names[FSM_EVENT_COUNT] = {
     [FSM_EVENT_INIT_DONE]      = "INIT_DONE",
-    [FSM_EVENT_SYNC_ACQUIRED]  = "SYNC_ACQUIRED",
     [FSM_EVENT_SYNC_LOST]      = "SYNC_LOST",
     [FSM_EVENT_MENU_SELECT_IDLE] = "MENU_SELECT_IDLE",
     [FSM_EVENT_MENU_SELECT_OTA]  = "MENU_SELECT_OTA",
@@ -311,11 +310,6 @@ static void fsm_task(void *arg)
         /* 전역 전이: 어느 상태에서든 적용 */
         if (event == FSM_EVENT_ERROR && s_state != FSM_STATE_ERROR) {
             fsm_transition_to(FSM_STATE_ERROR);
-            continue;
-        }
-        if (event == FSM_EVENT_SYNC_ACQUIRED) {
-            ESP_LOGI(TAG, "FHSS synchronization acquired in state %s",
-                     s_state_names[s_state]);
             continue;
         }
         if (event == FSM_EVENT_SYNC_LOST &&
