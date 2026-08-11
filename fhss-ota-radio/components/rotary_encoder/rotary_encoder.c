@@ -117,8 +117,7 @@ static void rotary_encoder_task(void *arg)
             }
         }
 
-        const TickType_t poll_ticks = pdMS_TO_TICKS(ROTARY_ENCODER_POLL_MS);
-        vTaskDelay(poll_ticks > 0U ? poll_ticks : 1U);
+        vTaskDelay(pdMS_TO_TICKS(ROTARY_ENCODER_POLL_MS));
     }
 }
 
