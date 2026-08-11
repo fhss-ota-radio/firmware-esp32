@@ -3,6 +3,13 @@
 #include "driver/gpio.h"
 #include "driver/i2s_std.h"
 
+/* TEMP(마이크 loopback 테스트, 검증 끝나면 이 매크로와 관련 코드 전부 제거):
+ * 이 매크로가 정의되어 있으면 MENU_IDLE에서 PTT로 mic->Speex->스피커
+ * loopback 테스트(main/fsm.c의 mic_test_task 등)가 활성화된다.
+ * audio_io.c/audio_io.h/main/fsm.c에서 공통으로 이 매크로를 본다 —
+ * 켜려면 아래 줄의 주석만 해제. */
+// #define LOOPBACK_ENABLE
+
 /* === 마이크 (INMP441, I2S RX 전용) — I2S_NUM_0 ===
  * L/R 핀은 3V3 고정 배선(우채널 고정, 2026-08-11 확정) -> 코드에서 SLOT_RIGHT로 수신. */
 #define AUDIO_IO_MIC_I2S_PORT  I2S_NUM_0
