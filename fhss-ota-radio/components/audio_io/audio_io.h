@@ -20,11 +20,20 @@ extern "C" {
  */
 void audio_io_init(void);
 
-/* 스피커 채널을 켠다/끈다. RX_AUDIO 진입/이탈 시에만 호출할 것 — 부팅 시
- * 자동으로 켜두지 않는 이유는 audio_io_init() 주석 참고. disable은 이미
- * 꺼진 상태에서 불러도 안전(에러 무시). */
+/* 스피커 채널(I2S DMA + SD 핀)을 켠다/끈다. RX_AUDIO 진입/이탈, 또는
+ * audio_io_play_beep() 호출 전후에만 쓸 것 — 부팅 시 자동으로 켜두지 않는
+ * 이유는 audio_io_init() 주석 참고. disable은 이미 꺼진 상태에서 불러도
+ * 안전(에러 무시). */
 void audio_io_speaker_enable(void);
 void audio_io_speaker_disable(void);
+
+/*
+ * PTT 눌렀을 때 "말하기 시작"을 알리는 짧은 2음 삐빅음을 재생한다(블로킹,
+ * 총 ~210ms). 호출 전에 audio_io_speaker_enable()이 먼저 호출돼 있어야 한다.
+ * RX_AUDIO(수신 재생)가 아직 미구현이라 앰프 배선/동작을 확인하기 위한
+ * 테스트용 — 나중에 실제 음성 재생 붙으면 그대로 둬도 되고 빼도 된다.
+ */
+void audio_io_play_beep(void);
 
 /*
  * 마이크에서 한 프레임(AUDIO_CODEC_FRAME_SAMPLES=160 샘플, 20ms)을 읽어

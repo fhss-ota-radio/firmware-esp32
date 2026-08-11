@@ -37,17 +37,24 @@ if (n > 0) { /* frame[0..n) 을 rf_transport로 송신 */ }
 audio_io_speaker_enable();
 audio_io_decode_play(rx_frame, rx_len);
 audio_io_speaker_disable();
+
+// 테스트용: RX_AUDIO 미구현 상태에서 앰프 배선/동작 확인용 삐빅음
+// (main/fsm.c의 tx_audio_task, PTT 누르면 재생)
+audio_io_speaker_enable();
+audio_io_play_beep();
+audio_io_speaker_disable();
 ```
 
 ## 하드웨어 배선 확정 시 수정할 것 (`audio_io_config.h`)
 
-- `AUDIO_IO_MIC_*_GPIO` (BCLK/WS/SD) — INMP441, 현재 GPIO5/6/7은 **placeholder**
-- `AUDIO_IO_SPK_*_GPIO` (BCLK/WS/DOUT) — MAX98357A, 현재 GPIO15/16/17은 **placeholder**
+- `AUDIO_IO_MIC_*_GPIO` (BCLK/WS/SD) — INMP441, 현재 GPIO5/6/7 (마이크 실기기 테스트 완료 배선)
+- `AUDIO_IO_SPK_*_GPIO` (BCLK/WS(LRC)/DOUT(DIN)/GAIN/SD) — MAX98357A, 현재 GPIO13/14/12/11/10 (2026-08-11 브레드보드 재구성 배선). SD=GPIO10이 로터리 엔코더 SW와 겹쳐서 로터리 SW를 GPIO15로 옮김 — 핀 또 바꿀 땐 `rotary_encoder_config.h`도 같이 확인할 것
 - INMP441의 L/R 핀은 GND 고정(좌채널) 배선 가정 — 다르게 배선하면 `audio_io.c`의 `I2S_STD_SLOT_LEFT`를 `I2S_STD_SLOT_RIGHT`로 변경
-- MAX98357A의 SD(SHUTDOWN) 핀은 VDD 직결(상시 활성) 가정 — GPIO로 켜고 끄려면 `AUDIO_IO_SPK_SD_GPIO` 정의 후 `audio_io.c`에서 사용
+- MAX98357A의 SD/GAIN 핀은 이제 GPIO 직결 — VDD/GND 직결 배선이면 안 됨(GPIO가 직접 제어함). GAIN을 다른 값으로 바꾸려면 `spk_channel_init()`의 `gpio_set_level(AUDIO_IO_SPK_GAIN_GPIO, ...)` 수정
 
 ## 제약 / TODO
 
 - `audio_io_capture_encode`/`decode_play`는 한 번에 한 프레임(20ms)만 처리 — 호출 주기 관리(태스크/타이머)는 상위(FSM TX_AUDIO/RX_AUDIO)에서 담당
-- `audio_io_decode_play()` 호출 전 반드시 `audio_io_speaker_enable()`을 먼저 불러야 함 — 안 그러면 채널이 READY 상태라 `i2s_channel_write()`가 실패함
-- 캡처 품질(마이크 게인, 앰프 볼륨 등)은 실기기 브링업 중이라 미검증
+- `audio_io_decode_play()`/`audio_io_play_beep()` 호출 전 반드시 `audio_io_speaker_enable()`을 먼저 불러야 함 — 안 그러면 채널이 READY 상태라 `i2s_channel_write()`가 실패함
+- `AUDIO_IO_BEEP_AMPLITUDE`(500/32767)와 GAIN 고정값(6dB)로 볼륨을 이중으로 낮춰둔 상태 — 정식 음량은 나중에 조정 필요
+- 캡처 품질(마이크 게인 등)은 실기기 브링업 중이라 미검증
