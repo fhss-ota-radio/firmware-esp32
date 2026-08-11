@@ -57,7 +57,7 @@ firmware-esp32/
   - `display_ui.h` / `display_ui.c` — `driver/i2c_master.h`(ESP-IDF v5.2+ 신규 API) 기반 SSD1306 드라이버
   - `font8x8_basic.h` — 공개도메인 8x8 비트맵 폰트 ([dhepper/font8x8](https://github.com/dhepper/font8x8) 원본과 바이트 단위 대조 검증)
   - 공개 API(레거시, 물리/가로 좌표): `display_ui_init()`, `display_ui_clear()`, `oled_update_text(row, text)`, `oled_update_text_fmt(row, fmt, ...)`
-  - **회전 메뉴 화면(2026-08-11)**: `display_ui_draw_menu(selected, hovered)` 신규 API — 배선(SDA/SCL) 그대로 두고 화면 내용만 좌측 90도 회전(세로, 논리 64x128)해서 COMM/IDLE/OTA 3항목 메뉴를 그림. SSD1306엔 진짜 90도 회전 명령이 없어(A0/A1·C0/C8은 0/180도 반전만 지원) 프레임버퍼에 좌표 변환(`px=WIDTH-1-ly, py=lx`)으로 직접 그린 뒤 8페이지 전체 flush. 텍스트는 기존 8x8 폰트를 2배 확대(픽셀 더블링)해서 크고 굵게 — 새 폰트 에셋 없이 구현. `selected` 항목은 배경/글자색 반전, `hovered` 항목은 흰색(반전과 겹치면 검은색) 테두리
+  - **회전 메뉴 화면(2026-08-11)**: `display_ui_draw_menu(selected, hovered)` 신규 API — 배선(SDA/SCL) 그대로 두고 화면 내용만 좌측 90도 회전(세로, 논리 64x128)해서 COMM/IDLE/OTA 3항목 메뉴를 그림. SSD1306엔 진짜 90도 회전 명령이 없어(A0/A1·C0/C8은 0/180도 반전만 지원) 프레임버퍼에 좌표 변환(`px=ly, py=HEIGHT-1-lx`, 실기기로 방향 확인 후 확정)으로 직접 그린 뒤 8페이지 전체 flush. 텍스트는 기존 8x8 폰트를 2배 확대(픽셀 더블링)해서 크고 굵게 — 새 폰트 에셋 없이 구현. `selected` 항목은 배경/글자색 반전, `hovered` 항목은 흰색(반전과 겹치면 검은색) 테두리
 - [x] `components/ptt_button/` — PTT 버튼 디바운스 컴포넌트
   - `ptt_button_config.h` — 핀(GPIO1, 2026-08-11 브레드보드 재구성 배선)/active level/디바운스 파라미터
   - `ptt_button.h` / `ptt_button.c` — 폴링 기반 디바운스(ISR 미사용), 콜백/폴링 API 제공

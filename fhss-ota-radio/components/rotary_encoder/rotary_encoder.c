@@ -76,10 +76,15 @@ static void rotary_encoder_task(void *arg)
             int8_t prev_step = s_gray_to_step[prev_ab];
             int8_t curr_step = s_gray_to_step[curr_ab];
             int8_t delta = (int8_t)(((curr_step - prev_step) + 4) % 4);
-            if (delta == 1) {
-                accum++;   /* 정방향(코드상 CW로 정의) 1 step */
-            } else if (delta == 3) {
-                accum--;   /* 역방향 1 step */
+            /* delta==1/3 중 어느 쪽이 실제 시계방향인지는 A/B 배선 순서에
+             * 달려있어서 코드만으로 알 수 없다 — 실기기로 확인해보니 반대라
+             * 여기서 뒤집어서 물리적 시계방향이 accum++(메뉴 아래로)가
+             * 되게 맞춤(2026-08-11). 방향이 또 바뀌면 이 두 줄만 서로
+             * 바꾸면 된다(README의 "A/B 핀 서로 바꾸기"와 동일 효과). */
+            if (delta == 3) {
+                accum++;   /* 물리적 시계방향 1 step */
+            } else if (delta == 1) {
+                accum--;   /* 물리적 반시계방향 1 step */
             }
             /* delta==2: 두 스텝 이상 건너뜀(폴링 놓침/노이즈) — 신뢰 못 하므로 무시 */
             prev_ab = curr_ab;

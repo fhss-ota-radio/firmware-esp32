@@ -78,9 +78,10 @@ static void flush_all_pages(const char *what)
  *
  * 배선은 그대로(물리 좌표 px∈[0,DISPLAY_UI_WIDTH), py∈[0,DISPLAY_UI_HEIGHT)),
  * 논리(회전된, 세로) 좌표 lx∈[0,DISPLAY_UI_HEIGHT), ly∈[0,DISPLAY_UI_WIDTH)로
- * 그린다. 매핑(좌측 90도 회전 = 반시계):
- *   px = (DISPLAY_UI_WIDTH  - 1) - ly
- *   py = lx
+ * 그린다. 매핑(좌측 90도 회전, 실기기로 방향 확인 후 확정 — 처음 식은 반대
+ * 방향으로 돌아서 아래로 뒤집음, 2026-08-11):
+ *   px = ly
+ *   py = (DISPLAY_UI_HEIGHT - 1) - lx
  * 이 아래 함수들은 전부 논리 좌표를 받는다.
  */
 static inline void set_pixel(int lx, int ly, bool on)
@@ -88,8 +89,8 @@ static inline void set_pixel(int lx, int ly, bool on)
     if (lx < 0 || lx >= DISPLAY_UI_HEIGHT || ly < 0 || ly >= DISPLAY_UI_WIDTH) {
         return;
     }
-    int px = (DISPLAY_UI_WIDTH - 1) - ly;
-    int py = lx;
+    int px = ly;
+    int py = (DISPLAY_UI_HEIGHT - 1) - lx;
     int page = py / 8;
     int bit = py % 8;
     if (on) {
