@@ -358,4 +358,4 @@ SEARCHING
   - `8695cae`
   - `3ee35f9`
   - `028c968`
-- Pull Request: 아직 생성하지 않음
+- Pull Request: [#24 GDO0-based synchronized FHSS hopping](https://github.com/fhss-ota-radio/firmware-esp32/pull/24) (Draft)
