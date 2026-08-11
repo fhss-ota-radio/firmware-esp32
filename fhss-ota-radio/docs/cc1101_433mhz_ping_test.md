@@ -97,7 +97,177 @@ FHSS RX PASS: scan_slot=164 channel=20 payload="FHSS:671:20:2" RSSI=-59 dBm LQI=
 | ESP-IDF 전체 빌드 | 성공 |
 | 펌웨어 크기 | `0x33470`, 앱 파티션 80% 여유 |
 
-## 6. 현재 한계와 다음 작업
+## 6. 트러블슈팅과 디버깅
+
+### 6.1 권장 디버깅 순서
+
+FHSS 수신이 되지 않을 때 처음부터 홉 로직을 의심하면 원인 범위가 너무 넓어진다. 다음 순서대로 한 계층씩 확인한다.
+
+```text
+COM 포트 연결
+    ↓
+펌웨어 flash 및 부팅 로그
+    ↓
+CC1101 PARTNUM / VERSION
+    ↓
+고정 채널 PING
+    ↓
+채널별 단독 송수신
+    ↓
+3채널 순환 검색
+    ↓
+SYNC 기반 슬롯 동기화
+```
+
+앞 단계가 실패한 상태에서는 다음 단계의 결과를 신뢰할 수 없다. 예를 들어 `PARTNUM` 읽기가 실패하면 FHSS 계산이 정상이어도 실제 채널 변경 여부를 판단할 수 없다.
+
+### 6.2 COM 포트가 열리지 않는 경우
+
+대표 로그:
+
+```text
+Could not open COM5, the port is busy or doesn't exist.
+PermissionError(13, '액세스가 거부되었습니다.')
+```
+
+먼저 현재 포트를 확인한다.
+
+```powershell
+[System.IO.Ports.SerialPort]::GetPortNames()
+```
+
+포트가 목록에 있는데도 열리지 않으면 기존 ESP-IDF monitor가 포트를 점유하고 있을 가능성이 높다.
+
+```powershell
+Get-CimInstance Win32_Process |
+    Where-Object { $_.CommandLine -match 'COM5|idf_monitor' } |
+    Select-Object ProcessId, Name, CommandLine
+```
+
+출력된 명령줄이 실제 COM5 monitor인지 확인한 뒤 해당 PID만 종료한다. 예전 PID를 한꺼번에 종료하면 이미 끝난 프로세스에 대해 `NoProcessFoundForGivenId`가 출력될 수 있지만, 이는 보드나 펌웨어 오류가 아니다.
+
+### 6.3 Flash와 Monitor 문제를 구분하는 방법
+
+`build`, `flash`, `monitor`는 서로 다른 단계다.
+
+- `build` 성공: 소스와 컴포넌트 연결이 컴파일됨
+- `flash` 성공: 바이너리가 ESP32-S3 플래시에 기록됨
+- `monitor` 성공: PC가 UART/USB 로그 포트를 열었음
+
+따라서 빌드가 성공했어도 COM 포트 점유 때문에 flash가 실패할 수 있고, flash가 성공했어도 monitor만 실패할 수 있다. 로그의 마지막 `Executing action`과 `A fatal error occurred` 위치를 확인해 실패 단계를 먼저 구분한다.
+
+### 6.4 SPI 연결 진단
+
+정상 로그:
+
+```text
+CC1101 SPI OK: PARTNUM=0x00, VERSION=0x14
+```
+
+이 로그는 ESP32-S3가 CC1101의 상태 레지스터를 실제로 읽었다는 의미다. 다음과 같은 값은 배선이나 SPI 응답을 우선 확인해야 한다.
+
+- 매번 `0xFF`: MISO가 풀업 상태이거나 CC1101이 응답하지 않을 가능성
+- 매번 `0x00` 두 개: MISO 고정, CS/SCLK 문제 또는 잘못된 읽기 명령 가능성
+- 실행할 때마다 값이 변함: 전원, GND, 배선 접촉 또는 SPI 신호 무결성 문제 가능성
+- `status=4`: CC1101 SO/MISO ready 대기 timeout
+- `status=3`: SPI 전송 또는 FIFO 상태 오류
+
+확인 순서:
+
+1. CC1101 전원을 3.3 V로 공급했는지 확인
+2. 두 보드와 CC1101의 GND가 공통인지 확인
+3. SCLK 12, MOSI 11, MISO 13, CS 14 배선 확인
+4. CS가 다른 장치와 공유되지 않는지 확인
+5. SPI 속도를 1 MHz로 유지한 상태에서 재검증
+6. 가능하면 로직 애널라이저로 CS 하강 후 SCLK와 MISO 응답 확인
+
+### 6.5 TX는 성공하지만 RX 출력이 없는 경우
+
+`TX PASS`는 TX FIFO가 정상적으로 비워졌다는 뜻이지 상대 보드가 수신했다는 뜻은 아니다. 다음 항목을 양쪽 보드에서 비교한다.
+
+- 동일한 433 MHz CC1101 모듈인지
+- 안테나가 연결되어 있는지
+- `FREQ2/FREQ1/FREQ0`, 변조, 데이터 속도, sync word가 동일한지
+- TX와 RX가 같은 `CHANNR`에 머물렀는지
+- RX 소스가 실제로 RX 역할로 빌드됐는지
+
+패킷에 채널 번호를 포함했기 때문에 다음 두 값도 비교할 수 있다.
+
+```text
+channel=20 payload="FHSS:671:20:2"
+```
+
+로그의 현재 수신 채널과 payload 내부 송신 채널이 같아야 한다. 서로 다르면 로그 생성 또는 슬롯/채널 관리 코드부터 점검한다.
+
+### 6.6 일부 홉 채널만 계속 누락되는 경우
+
+이번 테스트에서는 RX 체류 시간 200 ms를 사용했을 때 채널 0과 10만 수신되고 채널 20은 계속 누락됐다. 채널 20 RF 자체의 문제처럼 보일 수 있지만, 원인은 주기 간 위상 고정이었다.
+
+```text
+TX: 채널당 3회 × 100 ms = 300 ms
+RX: 채널당 200 ms
+```
+
+두 주기가 일정한 공통 패턴을 만들면서 RX가 채널 20을 청취할 때 TX는 반복적으로 다른 채널에 있었다. RX 체류 시간을 137 ms로 변경하자 채널 0, 10, 20이 모두 수신됐다.
+
+이 문제를 디버깅할 때는 다음 로그를 최소 10초 이상 수집하고 채널별 성공 횟수를 센다.
+
+```powershell
+idf.py -p COM5 monitor
+```
+
+판단 기준:
+
+- 특정 채널만 0회: 먼저 검색/송신 주기의 위상 관계 확인
+- 특정 채널의 CRC 실패만 증가: 해당 주파수의 간섭이나 주파수 오차 확인
+- 모든 채널이 불규칙하게 누락: 전원, 안테나, 거리, RX FIFO 처리 확인
+- 채널 변경 직후만 실패: IDLE 전환, 보정 시간 및 RX 진입 순서 확인
+
+### 6.7 CRC, RSSI, LQI 로그 해석
+
+```text
+FHSS RX PASS: ... RSSI=-59 dBm LQI=12
+```
+
+- `PASS`: CC1101이 패킷 CRC를 정상으로 판정
+- `CRC_FAIL`: 패킷은 감지했지만 내용이 손상됨
+- RSSI: 수신 신호 세기의 상대적인 진단값. 0에 가까울수록 강함
+- LQI: 현재 구현에서는 CC1101 상태 바이트의 7비트 값을 그대로 출력
+
+RSSI와 LQI 하나만으로 성공 여부를 판단하지 않는다. 가장 중요한 기준은 CRC를 통과한 payload가 올바른 순서와 채널에서 반복 수신되는지다.
+
+### 6.8 Watchdog Backtrace가 발생하는 경우
+
+다음과 같은 backtrace는 CC1101 통신 실패 로그가 아니다.
+
+```text
+task_wdt_timeout_handling
+vTaskDelay
+ptt_button_task
+```
+
+기존 FSM과 주변장치 태스크가 함께 실행되면서 발생한 별도 태스크 watchdog 문제다. 현재 Smoke Test에서는 `CC1101_SMOKE_TEST_ONLY`를 활성화해 FSM 시작을 보류한다. Backtrace의 마지막 애플리케이션 함수가 `rf_transport`인지 다른 컴포넌트인지 확인해 문제 범위를 분리한다.
+
+### 6.9 디버깅 로그 개선 방향
+
+현재 로그를 다음 구조로 통일하면 비교가 쉬워진다.
+
+```text
+[RX] result=PASS local_slot=164 tx_slot=671 channel=20 repeat=2 rssi=-59 lqi=12
+```
+
+후속 구현에서 추가할 진단값:
+
+- 채널별 TX/RX 성공 횟수
+- CRC 실패 및 timeout 횟수
+- 마지막 정상 수신 이후 경과 시간
+- 예상 슬롯과 실제 수신 슬롯 차이
+- 채널 전환 소요 시간
+- 동기 상태와 상태 전이 원인
+
+이 통계가 있으면 단순 RF 손실, 특정 채널 간섭, 슬롯 동기 오차를 로그만으로 구분하기 쉬워진다.
+
+## 7. 현재 한계와 다음 작업
 
 - RX는 TX와 시간 동기화된 상태가 아니라 세 채널을 순환 검색한다.
 - 패킷의 TX 슬롯과 RX의 `scan_slot`은 서로 다른 로컬 카운터다.
