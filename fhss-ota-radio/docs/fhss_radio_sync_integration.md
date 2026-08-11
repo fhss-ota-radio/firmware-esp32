@@ -10,7 +10,8 @@ CC1101 GDO0 인터럽트의 수신 시각과 SYNC 패킷의 슬롯 번호를 결
 - `fhss_slot_scheduler`
 - SYNC 패킷 기반 RX 기준 slot/time 설정
 - TX/RX synchronized hopping
-- `SYNC_ACQUIRED`, `SYNC_LOST`의 main FSM 연결
+- `SYNC_ACQUIRED`, `SYNC_LOST`의 FHSS 내부 판정
+- 제품 FSM과 분리된 독립 하드웨어 example
 
 ## 2. 하드웨어 설정
 
@@ -42,7 +43,7 @@ fhss_service
     ├─ TRACKING
     └─ TRANSMITTING
     ↓ SYNC_ACQUIRED / SYNC_LOST
-main/fsm
+examples/fhss_sync_test callback
 ```
 
 ISR에서는 timestamp 저장과 FreeRTOS 큐 전달만 수행한다. SPI FIFO 읽기, 로그, FHSS 계산과 채널 변경은 서비스 태스크에서 수행한다.
@@ -128,7 +129,7 @@ SYNC RX: state=SEARCHING slot=5 channel=20 error=0 us
 SYNC RX: state=SYNCHRONIZING slot=6 channel=0 error=5 us
 SYNC RX: state=SYNCHRONIZING slot=7 channel=10 error=-2 us
 FHSS service event: SYNC_ACQUIRED
-fsm: FHSS synchronization acquired in state MENU_IDLE
+fhss_sync_test: SYNC_ACQUIRED
 SYNC RX: state=TRACKING slot=8 channel=20 error=-6 us
 ```
 
@@ -152,7 +153,7 @@ TX는 고정 기준 시계를 유지하고 GDO timestamp를 관측 용도로만 
 
 FreeRTOS tick보다 짧은 2 ms와 5 ms polling 주기가 `pdMS_TO_TICKS()`에서 0 tick이 되면서 `rotary_encoder`, `ptt_button` 태스크가 IDLE 태스크를 굶겼다.
 
-두 polling 태스크 모두 최소 1 tick을 지연하도록 변경했고 전역 FSM 활성 상태에서 watchdog이 재발하지 않았다.
+원인은 확인했지만 `ptt_button`과 `rotary_encoder`는 타 팀 소유 컴포넌트이므로 이 FHSS 브랜치에서는 수정하지 않는다. 해당 수정은 담당 팀과 별도 PR로 처리해야 한다.
 
 ### Timing Window early margin
 
@@ -160,12 +161,16 @@ FreeRTOS tick보다 짧은 2 ms와 5 ms polling 주기가 `pdMS_TO_TICKS()`에�
 
 ## 8. 현재 설정과 후속 작업
 
-현재 소스는 RX 역할이며 전역 FSM 연결이 활성화돼 있다.
+고정 TX/RX 검증 코드는 제품 `main`이 아니라 `examples/fhss_sync_test/main/main.c`에 있다.
 
 ```c
-#define FHSS_APP_ROLE FHSS_APP_ROLE_RX
-#define FHSS_SYNC_TEST_ONLY 0
+#define FHSS_TEST_ROLE FHSS_TEST_ROLE_RX
 ```
+
+제품 `main/fsm.*`에는 `SYNC_ACQUIRED`를 추가하지 않는다. `fsm-design.md`에 따라
+획득은 FHSS 내부 상태로 유지하며, 제품 FSM이 소비할 이벤트는 완전히 추종을
+놓쳤을 때의 `FSM_EVENT_SYNC_LOST`뿐이다. 이 연결은 한 단말이 세션마다 TX/RX
+역할을 바꿀 수 있는 start/stop API와 함께 후속 adapter에서 구현한다.
 
 후속 작업:
 

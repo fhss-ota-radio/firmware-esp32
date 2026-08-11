@@ -9,8 +9,9 @@
 - CC1101 GDO0 인터럽트로 sync word 검출 시각을 마이크로초 단위로 기록한다.
 - SYNC 패킷의 `slot_number`와 GDO0 timestamp를 결합해 RX의 슬롯 시간축을 설정한다.
 - TX와 RX가 동일한 슬롯 번호와 홉 채널을 실제 하드웨어에서 추종하도록 한다.
-- 동기 획득과 상실 이벤트를 상위 FSM에 전달한다.
-- `main.c`의 임시 Smoke Test 루프를 서비스 컴포넌트로 분리한다.
+- 동기 획득과 상실을 FHSS 내부 FSM에서 판정한다.
+- 고정 TX/RX Smoke Test를 제품 `main`에서 독립 example로 분리한다.
+- 최신 `develop`과 `fsm-design.md`의 애플리케이션 FSM을 수정하지 않는다.
 
 ## 주요 변경 사항
 
@@ -50,17 +51,13 @@
 - 연속 3회 유효 수신 시 `SYNC_ACQUIRED`
 - 연속 5회 MISS 시 `SYNC_LOST`
 
-### Main FSM
+### Develop FSM 경계
 
-- `FSM_EVENT_SYNC_ACQUIRED` 추가
-- ACQUIRED는 관측 로그로 처리하며 별도 전역 상태 전이는 만들지 않음
-- LOST는 기존 정책대로 `MENU_IDLE` 안전 상태로 복귀
-- `main.c`는 설정, `fhss_service_init()`, `fhss_service_start()` 중심으로 단순화
-
-### Watchdog 안정화
-
-- `ptt_button` 5 ms polling과 `rotary_encoder` 2 ms polling이 0 tick으로 변환되지 않도록 최소 1 tick 보장
-- 전역 FSM 활성 상태에서 IDLE task watchdog 재발이 없음을 확인
+- `main/fsm.c`, `main/fsm.h`, `main/main.c`를 변경하지 않음
+- `SYNC_ACQUIRED`는 `fsm-design.md` 결정대로 FHSS 내부 관측 이벤트로만 유지
+- `SYNC_LOST`를 제품 FSM에 전달하는 연결은 session 기반 role 전환 API와 함께 후속 구현
+- 고정 역할 TX/RX 하드웨어 테스트는 `examples/fhss_sync_test`로 이동
+- `ptt_button`, `rotary_encoder`, audio, display, OTA 등 타 팀 컴포넌트를 변경하지 않음
 
 ## 동기화 흐름
 
@@ -139,26 +136,25 @@ SYNC RX: state=TRACKING slot=309 channel=0  error=-3 us
 COM3 TX를 RTS로 약 3초 reset했다.
 
 ```text
-FHSS service event: SYNC_LOST
+fhss_sync_test: SYNC_LOST
 SYNC RX: state=SEARCHING slot=5 channel=20
 SYNC RX: state=SYNCHRONIZING slot=6 channel=0
 SYNC RX: state=SYNCHRONIZING slot=7 channel=10
-FHSS service event: SYNC_ACQUIRED
-fsm: FHSS synchronization acquired in state MENU_IDLE
+fhss_sync_test: SYNC_ACQUIRED
 SYNC RX: state=TRACKING slot=8 channel=20
 ```
 
 - `TRACKING → SEARCHING` 성공
 - TX 재부팅 후 자동 재획득 성공
-- `SYNC_ACQUIRED / SYNC_LOST` main callback 전달 성공
-- 전역 FSM 활성 상태에서 watchdog 재발 없음
+- example callback에서 `SYNC_ACQUIRED / SYNC_LOST` 확인
+- 제품 전역 FSM과 분리된 상태로 검증
 
 ## 빌드 검증
 
-- `ninja -C build` 성공
-- `fhss-ota-radio.bin` 생성 성공
-- 최종 바이너리 크기: `0x4f7c0`
-- 최소 앱 파티션 여유: 69%
+- 제품 루트 `ninja -C build` 성공
+- 독립 `examples/fhss_sync_test` 빌드 성공
+- example 바이너리 크기: `0x2cb10`
+- example 앱 파티션 여유: 83%
 - `git diff --check` 통과
 
 ## 리뷰 포인트
@@ -169,7 +165,8 @@ SYNC RX: state=TRACKING slot=8 channel=20
 - [ ] 첫 SYNC bootstrap과 이후 timing window 검증 흐름이 구분되는가?
 - [ ] scheduler의 기준 이전 시각과 overflow 처리가 충분한가?
 - [ ] SYNCHRONIZING 중 MISS 발생 시 SEARCHING으로 안전하게 복귀하는가?
-- [ ] ACQUIRED는 관측 이벤트, LOST는 전역 안전 전이라는 정책이 기존 FSM 설계와 일치하는가?
+- [ ] ACQUIRED가 FHSS 내부에만 머물러 `fsm-design.md` 정책과 일치하는가?
+- [ ] 고정 역할 테스트가 제품 `main`과 완전히 분리됐는가?
 - [ ] GPIO18이 다른 실제 보드 기능과 충돌하지 않는가?
 
 ## 영향 범위와 의존성
@@ -179,7 +176,8 @@ SYNC RX: state=TRACKING slot=8 channel=20
 - 커밋:
   - `8695cae` — slot scheduler와 sync controller
   - `3ee35f9` — GDO0 synchronized FHSS service
-  - `028c968` — polling watchdog 안정화와 검증 문서
+  - `028c968` — 실기기 검증 중 polling watchdog 원인 확인
+  - `a4bee5b` — 제품 FSM 침범 제거 및 독립 example 분리
 - 선행 기능:
   - CC1101 SPI/RF transport
   - SYNC packet encode/decode
@@ -190,6 +188,8 @@ SYNC RX: state=TRACKING slot=8 channel=20
 ## 제외 범위
 
 - 실제 음성 프레임 송수신
+- 제품 FSM의 `TX_AUDIO`/`RX_AUDIO` 기반 동적 role 시작·정지 adapter
+- `FSM_EVENT_SYNC_LOST` 전달 연결
 - OTA 데이터와 FHSS 스케줄의 모드 전환
 - ACK 및 재전송
 - 장시간 clock drift 통계
@@ -200,4 +200,4 @@ SYNC RX: state=TRACKING slot=8 channel=20
 ## PR 상태
 
 - 원격 브랜치 push 완료
-- GitHub Pull Request는 아직 생성하지 않음
+- GitHub Draft Pull Request #24 생성
