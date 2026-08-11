@@ -13,7 +13,7 @@
 #define CC1101_MOSI_GPIO GPIO_NUM_11
 #define CC1101_MISO_GPIO GPIO_NUM_13
 #define CC1101_CS_GPIO   GPIO_NUM_14
-#define CC1101_GDO0_GPIO GPIO_NUM_18
+#define CC1101_GDO0_GPIO GPIO_NUM_9
 
 static const char *TAG = "fhss_sync_test";
 static const uint8_t s_hop_channels[] = {0U, 10U, 20U};
