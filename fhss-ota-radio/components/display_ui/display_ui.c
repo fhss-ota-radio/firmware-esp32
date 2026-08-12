@@ -101,24 +101,72 @@ static inline void set_pixel(int lx, int ly, bool on)
     }
 }
 
-static void fill_rect(int x, int y, int w, int h, bool on)
+static void draw_hline(int x, int y, int w, bool on)
+{
+    for (int i = 0; i < w; i++) {
+        set_pixel(x + i, y, on);
+    }
+}
+
+/*
+ * (px,py)가 (x,y,w,h) 사각형을 4모서리만 반지름 r 원으로 깎은 "둥근 사각형"
+ * 내부인지 판정한다. r이 작아서(2~4px) 브루트포스 거리 계산으로도 충분히
+ * 빠르다 — 메뉴 갱신 시(사람이 보는 빈도)만 호출되지 프레임마다 도는 게 아님.
+ */
+static bool inside_rounded_rect(int px, int py, int x, int y, int w, int h, int r)
+{
+    if (px < x || px >= x + w || py < y || py >= y + h) {
+        return false;
+    }
+
+    int cx, cy;
+    if (px < x + r && py < y + r) {
+        cx = x + r; cy = y + r;
+    } else if (px >= x + w - r && py < y + r) {
+        cx = x + w - 1 - r; cy = y + r;
+    } else if (px < x + r && py >= y + h - r) {
+        cx = x + r; cy = y + h - 1 - r;
+    } else if (px >= x + w - r && py >= y + h - r) {
+        cx = x + w - 1 - r; cy = y + h - 1 - r;
+    } else {
+        return true; /* 모서리 구역 밖 -> 그냥 사각형 내부 */
+    }
+
+    int dx = px - cx;
+    int dy = py - cy;
+    return (dx * dx + dy * dy) <= r * r;
+}
+
+static void fill_rounded_rect(int x, int y, int w, int h, int r, bool on)
 {
     for (int j = 0; j < h; j++) {
         for (int i = 0; i < w; i++) {
-            set_pixel(x + i, y + j, on);
+            int px = x + i, py = y + j;
+            if (inside_rounded_rect(px, py, x, y, w, h, r)) {
+                set_pixel(px, py, on);
+            }
         }
     }
 }
 
-static void draw_rect_outline(int x, int y, int w, int h, bool on)
+/* 둥근 사각형의 1px 테두리만 그린다 — 내부 픽셀 중 상하좌우 이웃 하나라도
+ * 도형 밖이면 "테두리"로 판정. */
+static void draw_rounded_rect_outline(int x, int y, int w, int h, int r, bool on)
 {
-    for (int i = 0; i < w; i++) {
-        set_pixel(x + i, y, on);
-        set_pixel(x + i, y + h - 1, on);
-    }
     for (int j = 0; j < h; j++) {
-        set_pixel(x, y + j, on);
-        set_pixel(x + w - 1, y + j, on);
+        for (int i = 0; i < w; i++) {
+            int px = x + i, py = y + j;
+            if (!inside_rounded_rect(px, py, x, y, w, h, r)) {
+                continue;
+            }
+            bool is_border = !inside_rounded_rect(px - 1, py, x, y, w, h, r)
+                           || !inside_rounded_rect(px + 1, py, x, y, w, h, r)
+                           || !inside_rounded_rect(px, py - 1, x, y, w, h, r)
+                           || !inside_rounded_rect(px, py + 1, x, y, w, h, r);
+            if (is_border) {
+                set_pixel(px, py, on);
+            }
+        }
     }
 }
 
@@ -247,28 +295,45 @@ void oled_update_text_fmt(uint8_t row, const char *fmt, ...)
 
 /*
  * 메뉴 화면 레이아웃 상수. 논리 캔버스는 64(=DISPLAY_UI_HEIGHT, 가로) x
- * 128(=DISPLAY_UI_WIDTH, 세로). 항목 3개(24px) + 간격 2개(6px) = 84px,
- * 헤더 아래(16px)부터 시작해서 끝나면(100px 지점) 상태 메시지 영역으로
- * STATUS_H(28px)를 확보한다(2026-08-12 — 예전엔 항목이 더 커서(28px/8px
- * 간격) 상태 표시용 여유가 8px밖에 안 남았음, 지금 모드별 상태 텍스트를
- * 넣으려고 항목을 살짝 줄임).
+ * 128(=DISPLAY_UI_WIDTH, 세로).
+ *
+ * 2026-08-12(2차): 항목을 둥근 사각형(MENU_ITEM_RADIUS)으로 바꾸고, 헤더/상태
+ * 영역 사이에 얇은 구분선(rule)을 넣어 구획을 분명히 함 — 그전엔 진한 사각형
+ * 블록이 화면에 꽉 차서(항목 3개가 거의 이어붙은 느낌) 딱딱해 보였음.
+ * 항목 자체의 좌우 폭은 여전히 0~64(전체 폭) 그대로 둠 — "COMM"/"IDLE"이
+ * scale2(글자당 16px)에서 정확히 4*16=64px을 채워야 해서 좌우 여백을 주면
+ * 텍스트가 카드 밖으로 삐져나간다(실측 확인). 대신 세로 리듬(줄 간격,
+ * 구분선)과 모서리 둥글림만으로 카드 느낌을 낸다.
  */
 #define MENU_HEADER_X    4
 #define MENU_HEADER_Y    4
+
+/* 헤더/구획 구분선. 항목과 달리 텍스트 폭 제약이 없어서 좌우로 살짝
+ * 인셋해서(RULE_X) 화면 가장자리에 딱 붙지 않게 — 이 여백이 "카드" 느낌의
+ * 시각적 단서가 된다. */
+#define RULE_X           4
+#define RULE_W           (DISPLAY_UI_HEIGHT - 2 * RULE_X)
+#define HEADER_RULE_Y    14
+
 #define MENU_ITEM_X      0
 #define MENU_ITEM_W      DISPLAY_UI_HEIGHT
-#define MENU_ITEM_START_Y 16
+#define MENU_ITEM_START_Y 18
 #define MENU_ITEM_H      24
 #define MENU_ITEM_GAP    6
+#define MENU_ITEM_RADIUS 3
 #define MENU_TEXT_SCALE  2
 
+#define MENU_BLOCK_BOTTOM (MENU_ITEM_START_Y + DISPLAY_UI_MENU_COUNT * MENU_ITEM_H \
+                            + (DISPLAY_UI_MENU_COUNT - 1) * MENU_ITEM_GAP)
+#define STATUS_RULE_Y     (MENU_BLOCK_BOTTOM + 4)
+
 /*
- * 상태 메시지 영역(메뉴 3항목 바로 아래, 화면 끝까지). scale1 폰트라
- * 한 글자 8px, 논리 너비 64px이므로 한 줄에 STATUS_MAX_CHARS(8자)까지만
- * 들어간다 — 더 긴 문구는 짧게 줄여서 넣을 것. 애니메이션 문구(base+마침표
- * 0~3개)는 base가 5자 이하여야 마침표 3개를 더해도 8자를 안 넘는다.
- * STATUS_H(28px)는 텍스트 한 줄(8px)보다 넉넉히 잡아뒀다 — 나중에 OTA
- * 진행률 바를 텍스트 아래에 추가할 여유 공간(TODO, 팀2).
+ * 상태 메시지 영역(구분선 아래, 화면 끝까지). scale1 폰트라 한 글자 8px,
+ * 논리 너비 64px이므로 한 줄에 STATUS_MAX_CHARS(8자)까지만 들어간다 — 더
+ * 긴 문구는 짧게 줄여서 넣을 것(텍스트는 항목과 달리 RULE_X 인셋 없이 전체
+ * 폭으로 그림 — "HOLD PTT"/"PTT:TEST"가 정확히 8자라 인셋을 주면 잘림).
+ * 애니메이션 문구(base+마침표 0~3개)는 base가 5자 이하여야 마침표 3개를
+ * 더해도 8자를 안 넘는다.
  */
 #define STATUS_MAX_CHARS  8
 #define STATUS_DOT_MAX    3
@@ -279,8 +344,7 @@ void oled_update_text_fmt(uint8_t row, const char *fmt, ...)
  * 정적으로 배제할 수 있다(안 그러면 -Werror=format-truncation 빌드 에러). */
 #define STATUS_TEXT_BUF_LEN (STATUS_MAX_CHARS + STATUS_DOT_MAX + 1)
 #define STATUS_TEXT_SCALE 1
-#define STATUS_Y (MENU_ITEM_START_Y + DISPLAY_UI_MENU_COUNT * MENU_ITEM_H \
-                  + (DISPLAY_UI_MENU_COUNT - 1) * MENU_ITEM_GAP)
+#define STATUS_Y (STATUS_RULE_Y + 4)
 #define STATUS_H (DISPLAY_UI_WIDTH - STATUS_Y)
 #define STATUS_ANIM_INTERVAL_MS 250
 
@@ -302,25 +366,31 @@ static void render_screen(void)
     memset(s_framebuf, 0, sizeof(s_framebuf));
 
     draw_text(MENU_HEADER_X, MENU_HEADER_Y, "mode", 1, false);
+    draw_hline(RULE_X, HEADER_RULE_Y, RULE_W, true);
 
     for (int i = 0; i < DISPLAY_UI_MENU_COUNT; i++) {
         int item_y = MENU_ITEM_START_Y + i * (MENU_ITEM_H + MENU_ITEM_GAP);
         bool is_selected = (i == s_last_selected);
         bool is_hovered = (i == s_last_hovered);
 
-        fill_rect(MENU_ITEM_X, item_y, MENU_ITEM_W, MENU_ITEM_H, is_selected);
+        if (is_selected) {
+            fill_rounded_rect(MENU_ITEM_X, item_y, MENU_ITEM_W, MENU_ITEM_H, MENU_ITEM_RADIUS, true);
+        }
         draw_text_centered(MENU_ITEM_X, item_y, MENU_ITEM_W, MENU_ITEM_H,
                             s_menu_labels[i], MENU_TEXT_SCALE, is_selected);
 
         if (is_hovered) {
             /* selected(흰 배경)와 겹치면 테두리는 검은색으로, 아니면(검은
              * 배경) 흰색으로 — 배경과 항상 대비되게. */
-            draw_rect_outline(MENU_ITEM_X, item_y, MENU_ITEM_W, MENU_ITEM_H, !is_selected);
+            draw_rounded_rect_outline(MENU_ITEM_X, item_y, MENU_ITEM_W, MENU_ITEM_H,
+                                       MENU_ITEM_RADIUS, !is_selected);
         }
     }
 
+    draw_hline(RULE_X, STATUS_RULE_Y, RULE_W, true);
+
     if (s_status_text[0] != '\0') {
-        draw_text_centered(MENU_ITEM_X, STATUS_Y, MENU_ITEM_W, STATUS_H,
+        draw_text_centered(0, STATUS_Y, DISPLAY_UI_HEIGHT, STATUS_H,
                             s_status_text, STATUS_TEXT_SCALE, false);
     }
 
