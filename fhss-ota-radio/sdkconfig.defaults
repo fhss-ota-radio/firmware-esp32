@@ -1,0 +1,10 @@
+# 기본값(100Hz, tick 10ms)이면 rotary_encoder/ptt_button처럼 10ms보다 짧은
+# 폴링 주기를 쓰는 태스크의 vTaskDelay(pdMS_TO_TICKS(x))가 정수 나눗셈으로
+# 0틱이 돼 사실상 busy-loop이 된다(2026-08-12 실기기에서 CPU 99% 점유로
+# 확인, 로컬 troubleshoot/task_wdt-poll_ms_zero_tick_busyloop.md 참고).
+# sdkconfig(git 비추적) 안에만 넣으면 이 저장소를 새로 clone/build하는
+# 사람에게 안 퍼지므로 여기(git 추적)에도 명시해둔다 — 이미 로컬 sdkconfig가
+# 있는 사람은 이 파일이 자동 병합되지 않으니 직접 CONFIG_FREERTOS_HZ를
+# 1000으로 올려야 한다(menuconfig > Component config > FreeRTOS > Kernel >
+# Tick rate, 또는 sdkconfig에서 직접 수정).
+CONFIG_FREERTOS_HZ=1000
