@@ -3,6 +3,7 @@
 #include "ota_client.h"
 #include "ota_client_internal.h"
 #include "freertos/queue.h"
+#include "ota_protocol.h"
 
 static ota_client_context_t s_ota_client;
 
@@ -18,6 +19,9 @@ esp_err_t ota_client_init(const ota_client_config_t *config)
         return ESP_ERR_INVALID_ARG;
     }
     if (config->send_callback == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (config->device_id > OTA_DEVICE_ID_MAX) {
         return ESP_ERR_INVALID_ARG;
     }
     if (config->receive_timeout_ms == 0) {
@@ -53,9 +57,10 @@ ota_client_state_t ota_client_get_state(void)
 esp_err_t ota_client_start_session(
     uint32_t session_id,
     uint32_t image_size,
-    uint32_t total_chunks
+    uint32_t total_chunks,
+    const uint8_t expected_sha256[32]
 ) {
-    if (image_size == 0U || total_chunks == 0U) {
+    if (image_size == 0U || total_chunks == 0U || expected_sha256 == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     if (total_chunks != ota_client_calculate_total_chunks(image_size)) {
@@ -88,6 +93,11 @@ esp_err_t ota_client_start_session(
     s_ota_client.received_bytes = 0;
     s_ota_client.total_chunks = total_chunks;
     s_ota_client.expected_sequence = 0;
+    memcpy(
+        s_ota_client.expected_sha256,
+        expected_sha256,
+        sizeof(s_ota_client.expected_sha256)
+    );
     ota_batch_cache_prepare(
         &s_ota_client.batch_cache,
         s_ota_client.expected_sequence,
@@ -214,7 +224,9 @@ esp_err_t ota_client_write_chunk(
 }
 
 esp_err_t ota_client_finish_session(
-    uint32_t session_id
+    uint32_t session_id,
+    uint32_t image_size,
+    uint32_t total_chunks
 )
 {
     if (s_ota_client.state != OTA_CLIENT_STATE_RECEIVING) {
@@ -223,6 +235,10 @@ esp_err_t ota_client_finish_session(
 
     if (session_id != s_ota_client.session_id) {
         return ESP_ERR_INVALID_ARG;
+    }
+    if (image_size != s_ota_client.image_size ||
+        total_chunks != s_ota_client.total_chunks) {
+        return ESP_ERR_INVALID_SIZE;
     }
 
     /*
@@ -236,7 +252,19 @@ esp_err_t ota_client_finish_session(
 
     s_ota_client.state = OTA_CLIENT_STATE_VERIFYING;
 
-    esp_err_t err = ota_writer_finish(&s_ota_client.writer);
+    if (s_ota_client.config.event_callback != NULL) {
+        s_ota_client.config.event_callback(
+            OTA_CLIENT_EVENT_APPLYING,
+            100,
+            ESP_OK,
+            s_ota_client.config.callback_context
+        );
+    }
+
+    esp_err_t err = ota_writer_finish(
+        &s_ota_client.writer,
+        s_ota_client.expected_sha256
+    );
 
     if (err != ESP_OK) {
         s_ota_client.state = OTA_CLIENT_STATE_ERROR;
@@ -368,4 +396,17 @@ esp_err_t ota_client_receive_packet(
     return xQueueReceive(s_ota_client.rx_queue, out_packet, wait_ticks) == pdTRUE
         ? ESP_OK
         : ESP_ERR_TIMEOUT;
+}
+
+esp_err_t ota_client_start_consumer(void)
+{
+    if (s_ota_client.state == OTA_CLIENT_STATE_UNINITIALIZED ||
+        s_ota_client.rx_queue == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_ota_client.consumer_task != NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    return ota_consumer_start(&s_ota_client);
 }

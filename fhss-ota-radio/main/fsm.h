@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "ota_client.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -60,7 +62,6 @@ typedef enum {
     FSM_EVENT_PTT_RELEASE,
     FSM_EVENT_RX_FRAME,
     FSM_EVENT_RX_DONE,
-    FSM_EVENT_OTA_DISCOVER_RX,
     FSM_EVENT_OTA_START,
     FSM_EVENT_OTA_CHUNK,
     FSM_EVENT_OTA_COMPLETE,
@@ -93,20 +94,15 @@ void fsm_post_event(fsm_event_t event);
  */
 bool fsm_post_rx_audio_frame(const uint8_t *data, size_t len);
 
-/*
- * OTA_DISCOVER 패킷(1바이트, components/ota_client/include/ota_discover_packet.h)을
- * 수신했을 때 호출한다. 길이가 OTA_DISCOVER_PACKET_LENGTH가 아니면 디코드
- * 실패로 보고 false를 반환하며 아무 이벤트도 올리지 않는다. 디코드에
- * 성공하면 FSM_EVENT_OTA_DISCOVER_RX를 올리고 true를 반환한다 — 단, 이
- * 이벤트는 전이표가 아니라 fsm_task()에서 MENU_OTA 상태일 때만 특별
- * 처리되어 device_id + 펌웨어 버전을 담은 ACK를 준비한다(상태 전이는
- * 일으키지 않음). MENU_OTA가 아닌 상태에서 들어오면 조용히 무시된다.
- *
- * rf_transport가 수신 프레임을 검증한 뒤 여기로 넘기는 용도로 설계됨
- * (아직 그 컴포넌트가 없어 실제 호출자는 없음 — 인터페이스만 먼저 정의,
- * fsm_post_rx_audio_frame()과 동일한 패턴). ISR에서는 안전하지 않음.
- */
-bool fsm_post_ota_discover_frame(const uint8_t *data, size_t len);
+/* ota_client_config_t에 그대로 연결하는 제품 FSM adapter. Wire packet의
+ * 파싱/ACK 생성은 ota_consumer가 담당하고 FSM은 모드/상태 전이만 담당한다. */
+bool fsm_ota_mode_callback(void *context);
+void fsm_ota_event_callback(
+    ota_client_event_t event,
+    uint32_t progress_percent,
+    esp_err_t error,
+    void *context
+);
 
 /* 현재 상태 조회 (디버그/OLED 표시용). */
 fsm_state_t fsm_get_state(void);

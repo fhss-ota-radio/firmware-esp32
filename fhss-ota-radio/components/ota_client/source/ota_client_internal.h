@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/task.h"
 
 #include "ota_client.h"
 #include "ota_batch_cache.h"
@@ -19,6 +20,7 @@ typedef struct {
     ota_client_state_t state;
     ota_client_config_t config;
     QueueHandle_t rx_queue;
+    TaskHandle_t consumer_task;
 
     ota_writer_t writer;
 
@@ -42,7 +44,8 @@ esp_err_t ota_client_receive_packet(
 esp_err_t ota_client_start_session(
     uint32_t session_id,
     uint32_t image_size,
-    uint32_t total_chunks
+    uint32_t total_chunks,
+    const uint8_t expected_sha256[32]
 );
 
 esp_err_t ota_client_write_chunk(
@@ -53,5 +56,9 @@ esp_err_t ota_client_write_chunk(
 );
 
 esp_err_t ota_client_finish_session(
-    uint32_t session_id
+    uint32_t session_id,
+    uint32_t image_size,
+    uint32_t total_chunks
 );
+
+esp_err_t ota_consumer_start(ota_client_context_t *context);

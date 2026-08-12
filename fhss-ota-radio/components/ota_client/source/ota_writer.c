@@ -1,5 +1,7 @@
 #include "ota_writer.h"
 
+#include <string.h>
+
 esp_err_t ota_writer_begin(
     ota_writer_t *writer,
     size_t image_size
@@ -72,10 +74,11 @@ esp_err_t ota_writer_write(
 }
 
 esp_err_t ota_writer_finish(
-    ota_writer_t *writer
+    ota_writer_t *writer,
+    const uint8_t expected_sha256[32]
 )
 {
-    if (writer == NULL) {
+    if (writer == NULL || expected_sha256 == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -98,6 +101,15 @@ esp_err_t ota_writer_finish(
 
     if (err != ESP_OK) {
         return err;
+    }
+
+    uint8_t actual_sha256[32];
+    err = esp_partition_get_sha256(writer->partition, actual_sha256);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (memcmp(actual_sha256, expected_sha256, sizeof(actual_sha256)) != 0) {
+        return ESP_ERR_INVALID_CRC;
     }
 
     err = esp_ota_set_boot_partition(writer->partition);

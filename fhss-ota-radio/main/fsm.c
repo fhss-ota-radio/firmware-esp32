@@ -1,6 +1,7 @@
 #include "fsm.h"
 
 #include <stdbool.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,8 +14,6 @@
 #include "audio_io.h"
 #include "device_id.h"
 #include "display_ui.h"
-#include "firmware_version.h"
-#include "ota_discover_packet.h"
 #include "ptt_button.h"
 #include "rotary_encoder.h"
 #include "status_led.h"
@@ -67,7 +66,6 @@ static const char *s_event_names[FSM_EVENT_COUNT] = {
     [FSM_EVENT_PTT_RELEASE]    = "PTT_RELEASE",
     [FSM_EVENT_RX_FRAME]       = "RX_FRAME",
     [FSM_EVENT_RX_DONE]        = "RX_DONE",
-    [FSM_EVENT_OTA_DISCOVER_RX] = "OTA_DISCOVER_RX",
     [FSM_EVENT_OTA_START]      = "OTA_START",
     [FSM_EVENT_OTA_CHUNK]      = "OTA_CHUNK",
     [FSM_EVENT_OTA_COMPLETE]   = "OTA_COMPLETE",
@@ -445,37 +443,6 @@ static void on_enter_ota_receiving(void) { /* TODO(팀2): OTA 수신 버퍼 초�
 static void on_enter_ota_applying(void)  { /* TODO(팀2): 이미지 검증 및 OTA 파티션 기록 */ }
 static void on_enter_error(void)         { /* TODO(팀1/PM): 오류 로깅, 안전 상태로 정지 */ }
 
-/*
- * MENU_OTA 상태에서 FSM_EVENT_OTA_DISCOVER_RX를 수신했을 때만 fsm_task()가
- * 호출한다(아래 참고). 상태 전이를 일으키지 않는 "같은 상태에서의
- * 부수효과"라 s_transitions[]에는 넣지 않았다 — self-transition을 넣어도
- * fsm_transition_to()가 next_state==s_state를 no-op 처리해서 enter action이
- * 아예 안 불린다(다른 self-loop 항목인 OTA_RECEIVING/OTA_CHUNK도 동일 이유로
- * 실제로는 이 함수와 같은 방식의 별도 처리가 필요함, TODO 팀2).
- */
-static void handle_ota_discover_ack(void)
-{
-    ota_discover_ack_t ack;
-    uint8_t device_id[DEVICE_ID_LEN];
-    device_id_get(device_id);
-    ack.device_id = ((uint32_t)device_id[0] << 16) |
-                    ((uint32_t)device_id[1] << 8) |
-                    (uint32_t)device_id[2];
-    ack.fw_major = FIRMWARE_VERSION_MAJOR;
-    ack.fw_minor = FIRMWARE_VERSION_MINOR;
-    ack.fw_patch = FIRMWARE_VERSION_PATCH;
-
-    uint8_t buf[OTA_DISCOVER_ACK_LENGTH];
-    size_t len = 0;
-    if (ota_discover_ack_encode(&ack, buf, sizeof(buf), &len) != OTA_DISCOVER_STATUS_OK) {
-        ESP_LOGW(TAG, "OTA discover ack encode failed");
-        return;
-    }
-
-    ESP_LOGI(TAG, "OTA discover ack ready (%u bytes)", (unsigned)len);
-    /* TODO(팀2): buf[0..len)을 rf_transport로 OTA 채널에 송신 */
-}
-
 static void (*const s_enter_actions[FSM_STATE_COUNT])(void) = {
     [FSM_STATE_BOOT_INIT]     = on_enter_boot_init,
     [FSM_STATE_MENU_COMM]     = on_enter_menu_comm,
@@ -528,13 +495,6 @@ static void fsm_task(void *arg)
             continue;
         }
 
-        /* 상태 전이 없는 부수효과: MENU_OTA에서만 ACK 준비, 그 외 상태면
-         * 전이표에 이 이벤트가 없어 아래에서 unhandled로 조용히 무시된다. */
-        if (event == FSM_EVENT_OTA_DISCOVER_RX && s_state == FSM_STATE_MENU_OTA) {
-            handle_ota_discover_ack();
-            continue;
-        }
-
         /* 상태별 전이표 조회 */
         bool handled = false;
         for (size_t i = 0; i < sizeof(s_transitions) / sizeof(s_transitions[0]); i++) {
@@ -581,17 +541,6 @@ bool fsm_post_rx_audio_frame(const uint8_t *data, size_t len)
     return true;
 }
 
-bool fsm_post_ota_discover_frame(const uint8_t *data, size_t len)
-{
-    ota_discover_packet_t packet;
-    if (ota_discover_packet_decode(data, len, &packet) != OTA_DISCOVER_STATUS_OK) {
-        return false;
-    }
-
-    fsm_post_event(FSM_EVENT_OTA_DISCOVER_RX);
-    return true;
-}
-
 fsm_state_t fsm_get_state(void)
 {
     return s_state;
@@ -605,4 +554,48 @@ const char *fsm_state_name(fsm_state_t state)
 const char *fsm_event_name(fsm_event_t event)
 {
     return (event < FSM_EVENT_COUNT) ? s_event_names[event] : "UNKNOWN";
+}
+
+bool fsm_ota_mode_callback(void *context)
+{
+    (void)context;
+    return fsm_get_state() == FSM_STATE_MENU_OTA;
+}
+
+void fsm_ota_event_callback(
+    ota_client_event_t event,
+    uint32_t progress_percent,
+    esp_err_t error,
+    void *context
+)
+{
+    (void)context;
+
+    switch (event) {
+        case OTA_CLIENT_EVENT_STARTED:
+            fsm_post_event(FSM_EVENT_OTA_START);
+            break;
+        case OTA_CLIENT_EVENT_PROGRESS:
+            ESP_LOGI(TAG, "OTA progress: %" PRIu32 "%%", progress_percent);
+            break;
+        case OTA_CLIENT_EVENT_APPLYING:
+            fsm_post_event(FSM_EVENT_OTA_COMPLETE);
+            break;
+        case OTA_CLIENT_EVENT_COMPLETED:
+            fsm_post_event(FSM_EVENT_OTA_VERIFY_OK);
+            break;
+        case OTA_CLIENT_EVENT_FAILED:
+            ESP_LOGE(TAG, "OTA failed: %s", esp_err_to_name(error));
+            if (fsm_get_state() == FSM_STATE_OTA_APPLYING) {
+                fsm_post_event(FSM_EVENT_OTA_VERIFY_FAIL);
+            } else {
+                fsm_post_event(FSM_EVENT_ERROR);
+            }
+            break;
+        case OTA_CLIENT_EVENT_ABORTED:
+            ESP_LOGW(TAG, "OTA aborted at %" PRIu32 "%%", progress_percent);
+            break;
+        default:
+            break;
+    }
 }

@@ -51,11 +51,11 @@ OTA 패킷 형식은 별도 `ota-protocol` 저장소의 공용 헤더를 사용�
 components/ota_client/
 ├── CMakeLists.txt
 ├── README.md
-├── include/
-│   └── ota_client.h       외부 공개 API
-├── ota_client.c           세션 및 패킷 처리, 전용 태스크/큐
-├── ota_writer.c           ESP-IDF OTA 파티션 기록과 검증
-└── ota_writer.h           컴포넌트 내부 API
+├── include/ota_client.h   외부 공개 API
+└── source/
+    ├── ota_client.c       세션, 수신 Queue, 배치 cache 연결
+    ├── ota_consumer.c     Queue 소비 Task와 wire protocol parser
+    └── ota_writer.c       ESP-IDF OTA 파티션 기록과 검증
 ```
 
 초기 구현은 위 구조로 시작하고, 재전송 정책이나 세션 관리가 커질 때만 파일을 추가한다.
@@ -104,6 +104,7 @@ typedef struct {
 typedef enum {
     OTA_CLIENT_EVENT_STARTED,
     OTA_CLIENT_EVENT_PROGRESS,
+    OTA_CLIENT_EVENT_APPLYING,
     OTA_CLIENT_EVENT_COMPLETED,
     OTA_CLIENT_EVENT_FAILED,
     OTA_CLIENT_EVENT_ABORTED,
@@ -123,13 +124,16 @@ typedef void (*ota_client_event_callback_t)(
 
 typedef struct {
     uint32_t device_id;
+    uint8_t firmware_version[3];
     uint32_t receive_timeout_ms;
     ota_client_send_callback_t send_callback;
     ota_client_event_callback_t event_callback;
+    ota_client_ota_mode_callback_t ota_mode_callback;
     void *callback_context;
 } ota_client_config_t;
 
 esp_err_t ota_client_init(const ota_client_config_t *config);
+esp_err_t ota_client_start_consumer(void);
 
 esp_err_t ota_client_submit_packet(
     const uint8_t *packet,
@@ -160,14 +164,17 @@ GDO 인터럽트
 
 ## 패킷 처리
 
-### OTA_DISCOVER (스캔 응답, 2026-08-12 구조 선반영)
+### OTA_DISCOVER (스캔 응답)
 
-`OTA_START` 이전 단계 — Qt 앱이 OTA 대기 중인 기기를 찾으려고 방송하는 스캔 신호에 대한 응답. `include/ota_discover_packet.h`/`source/ota_discover_packet.c`로 인코드/디코드만 정의(값은 미확정, TODO).
+`OTA_START` 이전 단계로, Qt 앱이 OTA 대기 중인 기기를 찾으려고 방송하는
+스캔 신호에 대한 응답이다. 포맷은 공용 `ota_protocol.h`를 그대로 사용한다.
 
 - `OTA_DISCOVER`(Qt 앱 → ESP, 1바이트): `type=6`
 - `OTA_DISCOVER_ACK`(ESP → Qt 앱, 7바이트): `type=7` + `device_id` 3바이트 Little Endian + `firmware_version` 3바이트(major/minor/patch)
 
-`main/fsm.c`의 `fsm_post_ota_discover_frame()`이 디코드해 `FSM_EVENT_OTA_DISCOVER_RX`를 올리고, `MENU_OTA` 상태일 때만 `handle_ota_discover_ack()`가 ACK를 인코딩까지 해둔다(상태 전이 없음). 실제 RF 송수신은 `rf_transport`가 없어 TODO — 자세한 배경은 [docs/fsm-design.md](../../docs/fsm-design.md) 결정 이력(2026-08-12) 참고.
+`ota_consumer`가 직접 디코드하고, `ota_mode_callback`이 true일 때만
+`DISCOVER_ACK`를 `send_callback`으로 보낸다. DISCOVER는 제품 상태를 바꾸지
+않으므로 FSM 이벤트로 전달하지 않는다.
 
 ### OTA_START
 
