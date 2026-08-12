@@ -1,7 +1,7 @@
 # OTA queue copy test
 
 RF 하드웨어 없이 `ota_client_submit_packet()`의 값 복사와 5청크 고정 배치의
-누락 bitmap·선택 재전송·순차 기록을 검증하는 ESP32용 테스트 앱이다. OLED,
+개별 ACK 추적·선택 재전송·순차 기록을 검증하는 ESP32용 테스트 앱이다. OLED,
 로터리 엔코더, 오디오와 `main/fsm.c`는 빌드하거나 초기화하지 않는다.
 
 프로젝트 본체와 동일한 8MB A/B 파티션 테이블을 사용하므로 테스트 플래시가
@@ -19,11 +19,15 @@ idf.py -p COM4 flash monitor
 I OTA_QUEUE_TEST: 60-byte source buffer reuse test PASS
 I OTA_QUEUE_TEST: packet length validation test PASS
 I OTA_QUEUE_TEST: queue capacity test PASS
-I OTA_QUEUE_TEST: 5-chunk missing-mask/retransmission test PASS
-I OTA_QUEUE_TEST: ordered batch flash-write test PASS
+I OTA_QUEUE_TEST: ota-protocol v0.2 DATA payload 48-byte limit test PASS
+I OTA_QUEUE_TEST: START image_size/total_chunks validation test PASS
+I OTA_QUEUE_TEST: 5-chunk individual-ACK/retransmission test PASS
+I OTA_QUEUE_TEST: ordered batch write-callback test PASS
 I OTA_QUEUE_TEST: partial final batch test PASS
 I OTA_QUEUE_TEST: ALL TESTS PASS
 ```
 
-배치 테스트 중에는 `RX DATA`, `BATCH CHECK`, `BATCH NACK`, `RETRY RX DATA`,
-`FLASH WRITE`, `BATCH ACK` 순서도 함께 출력된다.
+배치 테스트 중에는 `RX DATA`, seq별 `TX ACK`, Gateway의 ACK tracker,
+`RETRY RX DATA`, 자동 배치 완료와 `ORDERED WRITE CALLBACK` 순서도 함께 출력된다.
+이 콜백은 RAM에 기록 순서를 캡처하는 테스트 대역이며 실제 OTA 파티션 쓰기 검증은
+아니다.

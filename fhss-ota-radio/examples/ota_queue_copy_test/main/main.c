@@ -119,7 +119,7 @@ static esp_err_t capture_batch_write(
     }
 
     memcpy(&capture->data[capture->length], data, data_size);
-    ESP_LOGI(TAG, "FLASH WRITE: seq=%u, length=%u",
+    ESP_LOGI(TAG, "ORDERED WRITE CALLBACK: seq=%u, length=%u",
              data[0], (unsigned)data_size);
     capture->length += data_size;
     return ESP_OK;
@@ -145,26 +145,26 @@ static bool run_batch_retransmission_test(void)
 {
     ota_batch_cache_t cache = {0};
     ota_batch_cache_prepare(&cache, 0U, 8U);
+    uint8_t acknowledged_mask = 0U;
 
     ESP_LOGI(TAG, "BATCH START: base=0, count=5, range=[0..4]");
-    ESP_LOGI(TAG, "RX DATA: seq=0");
-    ESP_LOGI(TAG, "RX DATA: seq=2");
-    ESP_LOGI(TAG, "RX DATA: seq=4");
-
-    if (!store_test_chunk(&cache, 0U, 0U) ||
-        !store_test_chunk(&cache, 2U, 2U) ||
-        !store_test_chunk(&cache, 4U, 4U)) {
-        ESP_LOGE(TAG, "initial batch store failed");
-        return false;
+    const uint8_t first_sequences[] = {0U, 2U, 4U};
+    for (size_t i = 0U; i < sizeof(first_sequences); ++i) {
+        const uint8_t sequence = first_sequences[i];
+        ESP_LOGI(TAG, "RX DATA: seq=%u", sequence);
+        if (!store_test_chunk(&cache, sequence, sequence)) {
+            ESP_LOGE(TAG, "initial batch store failed at seq=%u", sequence);
+            return false;
+        }
+        acknowledged_mask |= (uint8_t)(1U << sequence);
+        ESP_LOGI(TAG, "TX ACK: seq=%u", sequence);
     }
 
-    /* seq 1과 3만 빠졌으므로 bit 1, 3이 설정되어야 한다. */
+    /* Gateway는 5개를 보낸 뒤 개별 ACK 수신 여부로 재전송 대상을 고른다. */
     const uint8_t first_missing_mask = ota_batch_cache_missing_mask(&cache);
-    ESP_LOGI(TAG, "BATCH CHECK: base=0, received_mask=0x%02X",
-             cache.received_mask);
-    ESP_LOGI(TAG, "BATCH NACK: missing_mask=0x%02X, missing=[1,3]",
-             first_missing_mask);
-    if (first_missing_mask != 0x0AU) {
+    ESP_LOGI(TAG, "GATEWAY ACK TRACKER: acked_mask=0x%02X, no_ack=[1,3]",
+             acknowledged_mask);
+    if (first_missing_mask != 0x0AU || acknowledged_mask != 0x15U) {
         ESP_LOGE(TAG, "missing mask mismatch: expected=0x0A actual=0x%02X",
                  first_missing_mask);
         return false;
@@ -178,19 +178,22 @@ static bool run_batch_retransmission_test(void)
         ESP_LOGE(TAG, "duplicate chunk was not detected");
         return false;
     }
-    ESP_LOGI(TAG, "DUPLICATE DATA: seq=2 ignored");
+    ESP_LOGI(TAG, "DUPLICATE DATA: seq=2 ignored, TX ACK seq=2 again");
 
     ESP_LOGI(TAG, "RETRY RX DATA: seq=1");
+    if (!store_test_chunk(&cache, 1U, 1U)) {
+        ESP_LOGE(TAG, "selective retransmission did not complete batch");
+        return false;
+    }
+    ESP_LOGI(TAG, "TX ACK: seq=1");
     ESP_LOGI(TAG, "RETRY RX DATA: seq=3");
-    if (!store_test_chunk(&cache, 1U, 1U) ||
-        !store_test_chunk(&cache, 3U, 3U) ||
+    if (!store_test_chunk(&cache, 3U, 3U) ||
         !ota_batch_cache_is_complete(&cache)) {
         ESP_LOGE(TAG, "selective retransmission did not complete batch");
         return false;
     }
-    ESP_LOGI(TAG, "BATCH CHECK: base=0, received_mask=0x%02X, missing_mask=0x00",
-             cache.received_mask);
-    ESP_LOGI(TAG, "BATCH COMPLETE: writing seq 0..4 in order");
+    ESP_LOGI(TAG, "TX ACK: seq=3");
+    ESP_LOGI(TAG, "BATCH COMPLETE AUTOMATIC: writing seq 0..4 in order");
 
     batch_write_capture_t capture = {0};
     size_t written_size = 0U;
@@ -209,7 +212,7 @@ static bool run_batch_retransmission_test(void)
             return false;
         }
     }
-    ESP_LOGI(TAG, "BATCH ACK: base=0, next_sequence=5");
+    ESP_LOGI(TAG, "BATCH ADVANCE: next_sequence=5 (no BATCH_ACK packet)");
 
     /* 마지막 배치는 total_chunks=8이므로 seq 5~7 세 개만 요구한다. */
     ota_batch_cache_prepare(&cache, 5U, 8U);
@@ -223,20 +226,60 @@ static bool run_batch_retransmission_test(void)
         ESP_LOGE(TAG, "partial final batch handling failed");
         return false;
     }
-    ESP_LOGI(TAG, "BATCH NACK: base=5, missing_mask=0x02, missing=[6]");
+    ESP_LOGI(TAG, "TX ACK: seq=7");
+    ESP_LOGI(TAG, "TX ACK: seq=5");
+    ESP_LOGI(TAG, "GATEWAY ACK TRACKER: no_ack=[6]");
     ESP_LOGI(TAG, "RETRY RX DATA: seq=6");
     if (!store_test_chunk(&cache, 6U, 6U) ||
         !ota_batch_cache_is_complete(&cache)) {
         ESP_LOGE(TAG, "partial final batch retry failed");
         return false;
     }
+    ESP_LOGI(TAG, "TX ACK: seq=6");
     ESP_LOGI(TAG, "FINAL BATCH COMPLETE: received_mask=0x%02X",
              cache.received_mask);
-    ESP_LOGI(TAG, "BATCH ACK: base=5, next_sequence=8");
+    ESP_LOGI(TAG, "BATCH ADVANCE: next_sequence=8 (no BATCH_ACK packet)");
 
-    ESP_LOGI(TAG, "5-chunk missing-mask/retransmission test PASS");
-    ESP_LOGI(TAG, "ordered batch flash-write test PASS");
+    ESP_LOGI(TAG, "5-chunk individual-ACK/retransmission test PASS");
+    ESP_LOGI(TAG, "ordered batch write-callback test PASS");
     ESP_LOGI(TAG, "partial final batch test PASS");
+    return true;
+}
+
+static bool run_protocol_payload_limit_test(void)
+{
+    ota_batch_cache_t cache = {0};
+    ota_batch_cache_prepare(&cache, 0U, 5U);
+
+    uint8_t maximum_payload[OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE] = {0};
+    uint8_t oversized_payload[OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE + 1U] = {0};
+
+    if (OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE != 48U ||
+        ota_batch_cache_store(
+            &cache, 0U, maximum_payload, sizeof(maximum_payload), NULL
+        ) != ESP_OK ||
+        ota_batch_cache_store(
+            &cache, 1U, oversized_payload, sizeof(oversized_payload), NULL
+        ) != ESP_ERR_INVALID_ARG) {
+        ESP_LOGE(TAG, "ota-protocol v0.2 payload limit mismatch");
+        return false;
+    }
+
+    ESP_LOGI(TAG, "ota-protocol v0.2 DATA payload 48-byte limit test PASS");
+    return true;
+}
+
+static bool run_start_metadata_validation_test(void)
+{
+    /* 49B image needs ceil(49 / 48) == 2 DATA chunks. The writer must not
+     * start when the Gateway advertises an inconsistent chunk count. */
+    if (ota_client_start_session(1U, 49U, 1U) != ESP_ERR_INVALID_SIZE ||
+        ota_client_get_state() != OTA_CLIENT_STATE_IDLE) {
+        ESP_LOGE(TAG, "inconsistent START metadata was accepted");
+        return false;
+    }
+
+    ESP_LOGI(TAG, "START image_size/total_chunks validation test PASS");
     return true;
 }
 
@@ -257,6 +300,8 @@ void app_main(void)
         run_copy_test() &&
         run_length_validation_test() &&
         run_queue_capacity_test() &&
+        run_protocol_payload_limit_test() &&
+        run_start_metadata_validation_test() &&
         run_batch_retransmission_test();
 
     if (passed) {

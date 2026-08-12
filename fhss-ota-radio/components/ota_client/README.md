@@ -181,24 +181,27 @@ GDO 인터럽트
 
 ### OTA_DATA
 
-초기 구현은 5청크 고정 배치 방식으로 구성한다. RF 패킷 전체 한도가
-60바이트이고 OTA 헤더가 9바이트이므로 DATA payload는 최대 51바이트다.
+초기 구현은 Selective-Repeat 고정 배치 방식으로 구성한다. RF 패킷 전체 한도가
+60바이트이고 `ota-protocol` v0.2 DATA 헤더가 12바이트이므로 DATA payload는
+최대 48바이트다. 초기 배치 크기는 5다. 공통 `version` 필드는 사용하지 않고,
+OTA 세션 패킷은 `session_id`로 식별한다.
 
 ```text
 DATA 5개 수신
   → 각 payload CRC와 sequence 범위 검증
   → 배치 RAM cache에 저장
+  → 각 DATA sequence에 개별 ACK/NACK
 
-BATCH_CHECK(base_sequence)
-  → 누락 존재: BATCH_NACK(base_sequence, missing_mask)
-  → 누락 없음: sequence 순서로 esp_ota_write()
-  → BATCH_ACK(next_sequence)
+5개가 모두 모임
+  → 별도 BATCH_CHECK 없이 sequence 순서로 esp_ota_write()
+  → 다음 배치로 이동
 ```
 
-배치 크기는 5개로 고정하며 bitmap은 하위 5bit만 사용한다. 예를 들어
-`base_sequence=10`, `missing_mask=0x0A`이면 seq 11과 13이 누락된 것이다.
-ACK가 유실되어 동일한 `BATCH_CHECK`가 다시 들어오면 직전 완료 배치의 ACK를
-재응답한다. 전체 이미지 bitmap이나 랜덤 플래시 쓰기는 사용하지 않는다.
+ESP32의 `received_mask`는 현재 배치가 완성됐는지 판단하는 내부 상태일 뿐 wire에
+실리지 않는다. Gateway는 5개를 보낸 뒤 개별 ACK를 받지 못한 sequence만 다시
+보낸다. ACK 유실로 이미 처리한 DATA가 다시 들어오면 Flash에 중복 기록하지 않고
+해당 sequence ACK를 다시 보낼 수 있도록 성공으로 처리한다. 별도 `BATCH_CHECK`,
+`BATCH_ACK`, missing bitmap 패킷은 사용하지 않는다.
 
 ### OTA_END
 
