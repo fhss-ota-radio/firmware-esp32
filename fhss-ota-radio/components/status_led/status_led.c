@@ -1,11 +1,27 @@
 #include "status_led.h"
 
+#include <stdbool.h>
+
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "led_strip.h"
 
 static const char *TAG = "status_led";
 
 static led_strip_handle_t s_strip;
+static esp_timer_handle_t s_blink_timer;
+static bool s_blink_on;
+
+static void blink_tick(void *arg)
+{
+    s_blink_on = !s_blink_on;
+    if (s_blink_on) {
+        led_strip_set_pixel(s_strip, 0, STATUS_LED_DIM_BRIGHTNESS, 0, 0);
+        led_strip_refresh(s_strip);
+    } else {
+        led_strip_clear(s_strip);
+    }
+}
 
 void status_led_init(void)
 {
@@ -33,5 +49,34 @@ void status_led_set_white_dim(void)
 
 void status_led_off(void)
 {
+    led_strip_clear(s_strip);
+}
+
+void status_led_start_error_blink(void)
+{
+    if (s_blink_timer == NULL) {
+        const esp_timer_create_args_t timer_args = {
+            .callback = blink_tick,
+            .name = "status_led_blink",
+        };
+        if (esp_timer_create(&timer_args, &s_blink_timer) != ESP_OK) {
+            ESP_LOGW(TAG, "blink timer create failed");
+            return;
+        }
+    } else {
+        esp_timer_stop(s_blink_timer); /* 재시작 전 정지(이미 돌고 있었을 수 있음) */
+    }
+
+    s_blink_on = true;
+    led_strip_set_pixel(s_strip, 0, STATUS_LED_DIM_BRIGHTNESS, 0, 0);
+    led_strip_refresh(s_strip);
+    esp_timer_start_periodic(s_blink_timer, (uint64_t)STATUS_LED_BLINK_INTERVAL_MS * 1000);
+}
+
+void status_led_stop_error_blink(void)
+{
+    if (s_blink_timer != NULL) {
+        esp_timer_stop(s_blink_timer); /* 이미 멈춰있어도 안전(에러 무시) */
+    }
     led_strip_clear(s_strip);
 }

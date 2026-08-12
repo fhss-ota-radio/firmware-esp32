@@ -33,19 +33,23 @@ display_ui_draw_menu(DISPLAY_UI_MENU_COMM, DISPLAY_UI_MENU_IDLE);
 - `selected`/`hovered`는 같은 항목일 수 있음(반전 배경 위에 테두리)
 - 호출마다 프레임버퍼 전체를 지우고 다시 그리므로, 회전/선택 시마다 전체 화면이 다시 그려짐(부분 갱신 아님)
 
+**2026-08-12(2차) 비주얼 다듬기**: 항목 배경/테두리를 각진 사각형에서 **둥근 사각형**(`MENU_ITEM_RADIUS`=3px, 4모서리만 원으로 깎음)으로 바꾸고, 헤더 아래·상태 영역 위에 얇은 구분선(rule)을 넣어 구획을 분명히 함 — 예전엔 항목 3개가 화면에 꽉 차서 딱딱해 보였음. 항목 자체의 좌우 폭(0~64, 전체 폭)은 그대로 뒀음 — `COMM`/`IDLE`이 scale2(글자당 16px)에서 정확히 4×16=64px을 채워야 해서 좌우 여백을 주면 텍스트가 카드 밖으로 삐져나감(실측 확인) — 구분선만 좌우로 살짝 인셋(`RULE_X`=4)해서 카드 느낌을 냄.
+
 ## 상태 메시지 (2026-08-12 추가)
 
 메뉴 3항목 바로 아래에 "지금 이 모드에서 뭘 하고 있는지"를 짧게 보여주는 한 줄(scale1, 최대 8자 — 논리 너비 64px 한계).
 
 ```c
-display_ui_set_status("HOLD PTT");        // 정적 텍스트
-display_ui_set_status_animated("TX");     // base + 마침표 0~3개가 250ms마다 늘어남(내부 타이머로 자동 반복)
-display_ui_clear_status();                // 비우기(애니메이션 중이면 멈춤)
+display_ui_set_status("HOLD PTT");                    // 정적 텍스트(최대 8자, 넘으면 잘림)
+display_ui_set_status_animated("TX");                 // base + 마침표 0~3개가 250ms마다 늘어남(내부 타이머로 자동 반복)
+display_ui_set_status_scroll("HOLD PTT TO SPEAK");    // 왼쪽으로 천천히 흐르는 문구(내부 타이머, 400ms/1px)
+display_ui_clear_status();                            // 비우기(애니메이션/스크롤 중이면 멈춤)
 ```
 
 - `display_ui_draw_menu()`를 다시 불러도(로터리 커서 이동 등) 마지막 상태 텍스트는 유지됨
-- 애니메이션 base는 마침표 3개를 더해도 8자를 안 넘게 5자 이하로 (`main/fsm.c`: TX_AUDIO="TX", RX_AUDIO="RX", MENU_OTA="WAIT")
-- `main/fsm.c`의 `on_enter_*` 함수들에 연결됨: MENU_COMM="HOLD PTT", TX_AUDIO="TX...", RX_AUDIO="RX...", MENU_IDLE="MUTED"(`LOOPBACK_ENABLE` 켜면 "PTT:TEST"), MENU_OTA="WAIT..."
+- 애니메이션(`set_status_animated`) base는 마침표 3개를 더해도 8자를 안 넘게 5자 이하로 (`main/fsm.c`: TX_AUDIO="TX", RX_AUDIO="RX")
+- 흐르는 문구(`set_status_scroll`)는 8자 제한이 없음 — 폭보다 긴 문구는 왼쪽으로 흐르고, 짧아도(예: "STANDBY") 끊김 없이 계속 흘러서 "동작 중"임을 겸해 표현함. 픽셀 단위가 아니라 **글자 하나 폭씩**(200ms마다 8px, `STATUS_SCROLL_STEP_PX`) 통째로 옮겨서 항상 글자 경계에 맞춰 이동함 — 어중간하게 잘린 글자가 화면에 걸치지 않아 깔끔함. 갱신 주기는 200ms(초당 5회)까지 낮춰봄 — render_screen()이 화면 전체를 다시 그리고 8페이지를 I2C로 flush하는 비용이 있어 이보다 더 빠르게 하려면 주기를 더 줄이기보다 `STATUS_SCROLL_STEP_PX`를 올리는 쪽을 우선 고려(display_ui.c `STATUS_SCROLL_*` 주석 참고)
+- `main/fsm.c`의 `on_enter_*` 함수들에 연결됨: MENU_COMM="HOLD PTT TO SPEAK"(흐름), TX_AUDIO="TX..."(점), RX_AUDIO="RX..."(점), MENU_IDLE="MUTED"(`LOOPBACK_ENABLE` 켜면 "PRESS PTT TO TEST LOOPBACK", 흐름), MENU_OTA="STANDBY"(흐름)
 - 상태 영역 높이(28px)는 텍스트 한 줄보다 넉넉히 잡아뒀음 — 나중에 OTA 진행률 바를 추가할 여유(TODO, 팀2)
 
 ## 레거시 텍스트 API (물리/가로 좌표, 회전 미적용)
