@@ -393,6 +393,7 @@ static void on_enter_menu_comm(void)
         audio_io_speaker_disable();
     }
     display_ui_draw_menu(DISPLAY_UI_MENU_COMM, menu_item_from_rotary(rotary_encoder_get_cursor()));
+    display_ui_set_status("HOLD PTT");
 }
 
 /* MENU_IDLE(뮤트): TX_AUDIO/RX_AUDIO로 들어오는 전이가 없어서(전이표 참고)
@@ -400,15 +401,26 @@ static void on_enter_menu_comm(void)
 static void on_enter_menu_idle(void)
 {
     display_ui_draw_menu(DISPLAY_UI_MENU_IDLE, menu_item_from_rotary(rotary_encoder_get_cursor()));
+#ifdef LOOPBACK_ENABLE
+    /* "PTT 눌러서 마이크/스피커 테스트" 안내 — 8자 한도라 최대한 축약
+     * (원문 의도: test mic and speaker via pressing ptt button). */
+    display_ui_set_status("PTT:TEST");
+#else
+    display_ui_set_status("MUTED");
+#endif
 }
 
 static void on_enter_menu_ota(void)
 {
     display_ui_draw_menu(DISPLAY_UI_MENU_OTA, menu_item_from_rotary(rotary_encoder_get_cursor()));
-    /* TODO(팀2): CC1101 OTA 채널 리스닝 준비 */
+    display_ui_set_status_animated("WAIT");
+    /* TODO(팀2): CC1101 OTA 채널 리스닝 준비. OTA_RECEIVING 진행률 표시는
+     * 상태 영역에 여유(STATUS_H, display_ui.c 참고)를 남겨뒀으니 그때 추가. */
 }
 static void on_enter_tx_audio(void)
 {
+    display_ui_set_status_animated("TX");
+
     /* fsm_task 안에서 블로킹으로 끝까지 재생 — 이유는 tx_audio_task 주석 참고. */
     audio_io_speaker_enable();
     audio_io_play_beep();
@@ -423,6 +435,8 @@ static void on_enter_tx_audio(void)
 }
 static void on_enter_rx_audio(void)
 {
+    display_ui_set_status_animated("RX");
+
     /* audio_codec_decode()도 같은 호출 체인 무게라 tx와 동일하게 8192로. */
     audio_io_speaker_enable();
     xTaskCreate(rx_audio_task, "rx_audio", 8192, NULL, tskIDLE_PRIORITY + 3, &s_rx_audio_task);

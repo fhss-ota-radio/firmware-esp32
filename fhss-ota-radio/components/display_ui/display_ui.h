@@ -51,6 +51,26 @@ typedef enum {
  */
 void display_ui_draw_menu(display_ui_menu_item_t selected, display_ui_menu_item_t hovered);
 
+/*
+ * 메뉴 3항목 바로 아래 상태 메시지 한 줄을 정적 텍스트로 표시한다(scale1,
+ * 논리 너비 64px 기준 최대 8자 — 넘는 부분은 그냥 잘려 그려짐). 애니메이션
+ * 중이었으면 멈추고 이 텍스트로 덮어쓴다. 가장 최근 display_ui_draw_menu()
+ * 호출의 선택/커서 상태는 그대로 유지된 채 상태 줄만 바뀐다.
+ */
+void display_ui_set_status(const char *text);
+
+/*
+ * base 뒤에 마침표(.)가 0~3개, 250ms마다 하나씩 늘었다가 다시 0개로
+ * 돌아가는 로딩 애니메이션을 시작한다(내부 esp_timer 주기 타이머로 자체
+ * 갱신 — 호출자가 계속 다시 부를 필요 없음). base는 마침표 3개를 더해도
+ * 8자를 넘지 않게 5자 이하로 줄 것(예: "TX", "WAIT"). display_ui_set_status()
+ * 또는 display_ui_clear_status() 호출 시 자동으로 멈춘다.
+ */
+void display_ui_set_status_animated(const char *base);
+
+/* 상태 메시지 영역을 비운다(애니메이션 중이었으면 멈춤). */
+void display_ui_clear_status(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "font8x8_basic.h"
 
@@ -244,21 +245,59 @@ void oled_update_text_fmt(uint8_t row, const char *fmt, ...)
     oled_update_text(row, buf);
 }
 
-/* 메뉴 화면 레이아웃 상수. 논리 캔버스는 64(=DISPLAY_UI_HEIGHT) x
- * 128(=DISPLAY_UI_WIDTH). 항목 3개(28px) + 간격 2개(8px) = 100px, 헤더
- * 아래(20px)부터 시작해서 끝나면 128 중 8px 남음(여유). */
+/*
+ * 메뉴 화면 레이아웃 상수. 논리 캔버스는 64(=DISPLAY_UI_HEIGHT, 가로) x
+ * 128(=DISPLAY_UI_WIDTH, 세로). 항목 3개(24px) + 간격 2개(6px) = 84px,
+ * 헤더 아래(16px)부터 시작해서 끝나면(100px 지점) 상태 메시지 영역으로
+ * STATUS_H(28px)를 확보한다(2026-08-12 — 예전엔 항목이 더 커서(28px/8px
+ * 간격) 상태 표시용 여유가 8px밖에 안 남았음, 지금 모드별 상태 텍스트를
+ * 넣으려고 항목을 살짝 줄임).
+ */
 #define MENU_HEADER_X    4
 #define MENU_HEADER_Y    4
 #define MENU_ITEM_X      0
 #define MENU_ITEM_W      DISPLAY_UI_HEIGHT
-#define MENU_ITEM_START_Y 20
-#define MENU_ITEM_H      28
-#define MENU_ITEM_GAP    8
+#define MENU_ITEM_START_Y 16
+#define MENU_ITEM_H      24
+#define MENU_ITEM_GAP    6
 #define MENU_TEXT_SCALE  2
+
+/*
+ * 상태 메시지 영역(메뉴 3항목 바로 아래, 화면 끝까지). scale1 폰트라
+ * 한 글자 8px, 논리 너비 64px이므로 한 줄에 STATUS_MAX_CHARS(8자)까지만
+ * 들어간다 — 더 긴 문구는 짧게 줄여서 넣을 것. 애니메이션 문구(base+마침표
+ * 0~3개)는 base가 5자 이하여야 마침표 3개를 더해도 8자를 안 넘는다.
+ * STATUS_H(28px)는 텍스트 한 줄(8px)보다 넉넉히 잡아뒀다 — 나중에 OTA
+ * 진행률 바를 텍스트 아래에 추가할 여유 공간(TODO, 팀2).
+ */
+#define STATUS_MAX_CHARS  8
+#define STATUS_DOT_MAX    3
+/* s_status_text 버퍼는 base(최대 STATUS_MAX_CHARS자) + 마침표(최대
+ * STATUS_DOT_MAX개) + NUL의 이론상 최댓값으로 잡는다 — 실제 화면엔
+ * STATUS_MAX_CHARS자까지만 보이지만(위 주석 참고), 버퍼를 이렇게 넉넉히
+ * 잡아둬야 컴파일러가 snprintf()의 "%s%.*s" 결합에서 트렁케이션 가능성을
+ * 정적으로 배제할 수 있다(안 그러면 -Werror=format-truncation 빌드 에러). */
+#define STATUS_TEXT_BUF_LEN (STATUS_MAX_CHARS + STATUS_DOT_MAX + 1)
+#define STATUS_TEXT_SCALE 1
+#define STATUS_Y (MENU_ITEM_START_Y + DISPLAY_UI_MENU_COUNT * MENU_ITEM_H \
+                  + (DISPLAY_UI_MENU_COUNT - 1) * MENU_ITEM_GAP)
+#define STATUS_H (DISPLAY_UI_WIDTH - STATUS_Y)
+#define STATUS_ANIM_INTERVAL_MS 250
 
 static const char *const s_menu_labels[DISPLAY_UI_MENU_COUNT] = { "COMM", "IDLE", "OTA" };
 
-void display_ui_draw_menu(display_ui_menu_item_t selected, display_ui_menu_item_t hovered)
+/* display_ui_draw_menu()/display_ui_set_status*()가 공유하는 현재 화면 상태.
+ * 각 API는 이 중 자기 관련 필드만 갱신하고 항상 render_screen()으로 전체를
+ * 다시 그린다 — 그래야 예를 들어 상태 텍스트만 바뀌어도(display_ui_set_status)
+ * 마지막으로 그렸던 메뉴 선택/커서가 화면에 계속 유지된다. */
+static display_ui_menu_item_t s_last_selected = DISPLAY_UI_MENU_COMM;
+static display_ui_menu_item_t s_last_hovered = DISPLAY_UI_MENU_COMM;
+static char s_status_base[STATUS_MAX_CHARS + 1];
+static char s_status_text[STATUS_TEXT_BUF_LEN];
+static int s_status_dot_count;
+static esp_timer_handle_t s_status_timer;
+
+static void render_screen(void)
 {
     memset(s_framebuf, 0, sizeof(s_framebuf));
 
@@ -266,8 +305,8 @@ void display_ui_draw_menu(display_ui_menu_item_t selected, display_ui_menu_item_
 
     for (int i = 0; i < DISPLAY_UI_MENU_COUNT; i++) {
         int item_y = MENU_ITEM_START_Y + i * (MENU_ITEM_H + MENU_ITEM_GAP);
-        bool is_selected = (i == selected);
-        bool is_hovered = (i == hovered);
+        bool is_selected = (i == s_last_selected);
+        bool is_hovered = (i == s_last_hovered);
 
         fill_rect(MENU_ITEM_X, item_y, MENU_ITEM_W, MENU_ITEM_H, is_selected);
         draw_text_centered(MENU_ITEM_X, item_y, MENU_ITEM_W, MENU_ITEM_H,
@@ -280,5 +319,77 @@ void display_ui_draw_menu(display_ui_menu_item_t selected, display_ui_menu_item_
         }
     }
 
-    flush_all_pages("draw_menu");
+    if (s_status_text[0] != '\0') {
+        draw_text_centered(MENU_ITEM_X, STATUS_Y, MENU_ITEM_W, STATUS_H,
+                            s_status_text, STATUS_TEXT_SCALE, false);
+    }
+
+    flush_all_pages("render_screen");
+}
+
+/* 애니메이션 타이머가 도는 중이면 멈춘다. NULL(한 번도 애니메이션을 시작한
+ * 적 없음)이면 아무 것도 안 함 — esp_timer_stop(NULL) 크래시 방지. */
+static void stop_status_animation(void)
+{
+    if (s_status_timer != NULL) {
+        esp_timer_stop(s_status_timer); /* 이미 멈춰있어도 안전(에러 무시) */
+    }
+}
+
+/* esp_timer 콜백은 esp_timer 전용 태스크 컨텍스트에서 250ms마다 불린다.
+ * fsm_task/rotary_encoder_task도 각자 display_ui_draw_menu()/set_status*()를
+ * 부를 수 있어 s_framebuf 등 공유 상태에 뮤텍스 없이 여러 태스크가 접근하는
+ * 구조인데, 이건 이 컴포넌트가 원래(회전 그리기 도입 때부터) 갖고 있던
+ * 패턴을 그대로 따른 것 — 갱신이 드물고(사람이 보는 UI) 한 프레임 정도
+ * 밀려도 다음 tick에서 바로 정정되니 지금은 문제되지 않는다. */
+static void status_anim_tick(void *arg)
+{
+    s_status_dot_count = (s_status_dot_count + 1) % (STATUS_DOT_MAX + 1);
+    snprintf(s_status_text, sizeof(s_status_text), "%s%.*s", s_status_base, s_status_dot_count, "...");
+    render_screen();
+}
+
+void display_ui_draw_menu(display_ui_menu_item_t selected, display_ui_menu_item_t hovered)
+{
+    s_last_selected = selected;
+    s_last_hovered = hovered;
+    render_screen();
+}
+
+void display_ui_set_status(const char *text)
+{
+    stop_status_animation();
+    snprintf(s_status_text, sizeof(s_status_text), "%s", (text != NULL) ? text : "");
+    render_screen();
+}
+
+void display_ui_set_status_animated(const char *base)
+{
+    snprintf(s_status_base, sizeof(s_status_base), "%s", (base != NULL) ? base : "");
+    s_status_dot_count = 0;
+    snprintf(s_status_text, sizeof(s_status_text), "%s", s_status_base);
+
+    if (s_status_timer == NULL) {
+        const esp_timer_create_args_t timer_args = {
+            .callback = status_anim_tick,
+            .name = "status_anim",
+        };
+        if (esp_timer_create(&timer_args, &s_status_timer) != ESP_OK) {
+            ESP_LOGW(TAG, "status anim timer create failed");
+            render_screen();
+            return;
+        }
+    } else {
+        esp_timer_stop(s_status_timer); /* 재시작 전 정지(이미 돌고 있었을 수 있음) */
+    }
+
+    esp_timer_start_periodic(s_status_timer, (uint64_t)STATUS_ANIM_INTERVAL_MS * 1000);
+    render_screen();
+}
+
+void display_ui_clear_status(void)
+{
+    stop_status_animation();
+    s_status_text[0] = '\0';
+    render_screen();
 }

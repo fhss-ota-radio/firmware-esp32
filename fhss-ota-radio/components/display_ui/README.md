@@ -28,10 +28,25 @@ display_ui_init(); // 부팅 시 1회
 display_ui_draw_menu(DISPLAY_UI_MENU_COMM, DISPLAY_UI_MENU_IDLE);
 ```
 
-- 좌상단에 작은 "mode" 라벨, 그 아래 COMM/IDLE/OTA 세 박스(간격 있음)
+- 좌상단에 작은 "mode" 라벨, 그 아래 COMM/IDLE/OTA 세 박스(간격 있음), 그 아래 상태 메시지 한 줄(아래 참고)
 - 각 박스 텍스트는 기존 8x8 폰트를 2배 확대(픽셀 더블링)해서 굵고 크게 표시 — 새 폰트 에셋 없이 구현
 - `selected`/`hovered`는 같은 항목일 수 있음(반전 배경 위에 테두리)
 - 호출마다 프레임버퍼 전체를 지우고 다시 그리므로, 회전/선택 시마다 전체 화면이 다시 그려짐(부분 갱신 아님)
+
+## 상태 메시지 (2026-08-12 추가)
+
+메뉴 3항목 바로 아래에 "지금 이 모드에서 뭘 하고 있는지"를 짧게 보여주는 한 줄(scale1, 최대 8자 — 논리 너비 64px 한계).
+
+```c
+display_ui_set_status("HOLD PTT");        // 정적 텍스트
+display_ui_set_status_animated("TX");     // base + 마침표 0~3개가 250ms마다 늘어남(내부 타이머로 자동 반복)
+display_ui_clear_status();                // 비우기(애니메이션 중이면 멈춤)
+```
+
+- `display_ui_draw_menu()`를 다시 불러도(로터리 커서 이동 등) 마지막 상태 텍스트는 유지됨
+- 애니메이션 base는 마침표 3개를 더해도 8자를 안 넘게 5자 이하로 (`main/fsm.c`: TX_AUDIO="TX", RX_AUDIO="RX", MENU_OTA="WAIT")
+- `main/fsm.c`의 `on_enter_*` 함수들에 연결됨: MENU_COMM="HOLD PTT", TX_AUDIO="TX...", RX_AUDIO="RX...", MENU_IDLE="MUTED"(`LOOPBACK_ENABLE` 켜면 "PTT:TEST"), MENU_OTA="WAIT..."
+- 상태 영역 높이(28px)는 텍스트 한 줄보다 넉넉히 잡아뒀음 — 나중에 OTA 진행률 바를 추가할 여유(TODO, 팀2)
 
 ## 레거시 텍스트 API (물리/가로 좌표, 회전 미적용)
 
