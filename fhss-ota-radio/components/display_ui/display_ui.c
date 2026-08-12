@@ -354,16 +354,19 @@ void oled_update_text_fmt(uint8_t row, const char *fmt, ...)
 #define STATUS_ANIM_INTERVAL_MS 250
 
 /*
- * 흐르는 문구(marquee) 튜닝값. 점 애니메이션(250ms)보다 갱신 주기를 일부러
- * 더 느리게(400ms) 잡고 한 틱에 1px만 옮긴다 — esp_timer 콜백 + 매번 8페이지
- * 전체를 I2C로 flush하는 render_screen()이 태스크 입장에서 공짜가 아니라서,
- * 너무 자주 갱신하면(예: 부드러움을 위해 50~100ms 주기) 불필요한 부담이
- * 된다. 1px/400ms(~2.5px/s)면 갱신 빈도는 낮게 유지하면서도 눈에는 "천천히
- * 흐른다"는 게 충분히 보인다.
+ * 흐르는 문구(marquee) 튜닝값. 픽셀 단위 대신 한 틱에 글자 하나 폭만큼
+ * (STATUS_TEXT_SCALE*8px) 통째로 옮긴다 — 항상 글자 경계에 맞춰 이동해서
+ * 어중간하게 잘린 글자가 화면에 걸치는 일이 없어 더 깔끔하다. 이번엔
+ * 이동량(STEP_PX)이 아니라 갱신 주기(INTERVAL_MS)를 200ms로 줄여서 속도를
+ * 2배로 냄 — render_screen()은 매번 화면 전체(메뉴 3항목 포함)를 다시
+ * 그리고 8페이지 전부를 I2C로 flush하므로 무한정 줄일 수는 없지만, 초당
+ * 5회(200ms)는 아직 여유 있는 수준이라 판단. 더 빠르게 해야 하면 다음은
+ * STEP_PX를 올리는 쪽을 우선 고려할 것(갱신 횟수를 더 늘리기 전에).
  */
-#define STATUS_SCROLL_INTERVAL_MS 400
-#define STATUS_SCROLL_STEP_PX     1
-/* 텍스트가 한 바퀴 돌고 다시 이어질 때 붙지 않도록 두는 여백(px). */
+#define STATUS_SCROLL_INTERVAL_MS 200
+#define STATUS_SCROLL_STEP_PX     (STATUS_TEXT_SCALE * 8)
+/* 텍스트가 한 바퀴 돌고 다시 이어질 때 붙지 않도록 두는 여백(px) — 글자
+ * 경계 정렬이 깨지지 않도록 8의 배수(글자 폭의 배수)로 잡는다. */
 #define STATUS_SCROLL_GAP_PX      16
 
 static const char *const s_menu_labels[DISPLAY_UI_MENU_COUNT] = { "COMM", "IDLE", "OTA" };
