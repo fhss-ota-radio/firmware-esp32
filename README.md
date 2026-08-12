@@ -16,6 +16,8 @@ device_id_get_hex(hex, sizeof(hex));  // 예: "4A1BC7"
 
 ## ⚠️ 빌드 전 준비 (필독)
 
+> **⚠️ 기존 `sdkconfig`가 로컬에 있다면 `CONFIG_FREERTOS_HZ=1000`인지 확인.** `100`(기본값)이면 `rotary_encoder`/`ptt_button` 폴링이 `vTaskDelay(0)`이 돼 CPU 99%를 먹는 버그가 재현됨 → `idf.py menuconfig` → Component config → FreeRTOS → Kernel → Tick rate → **1000**으로 수정. (새로 clone한 경우는 `sdkconfig.defaults`가 자동 적용돼 조치 불필요. 배경: 로컬 `troubleshoot/task_wdt-poll_ms_zero_tick_busyloop.md`)
+
 `components/audio_codec/speex`는 git submodule(xiph/speex 원본)이라 **일반 clone만으로는 비어있습니다.** 빌드 전에 반드시 아래 중 하나를 실행하세요.
 
 ```bash
@@ -27,8 +29,6 @@ git submodule update --init --recursive
 ```
 
 이 폴더는 실제 소스가 아니라 "xiph/speex의 어느 커밋을 쓸지" 가리키는 포인터만 저장소에 커밋돼 있는 구조라, 각자 clone한 뒤 한 번씩 위 명령을 실행해야 합니다 (누가 먼저 실행했는지와 무관하게 매 clone마다 필요).
-
-**이미 로컬에 `sdkconfig`가 있다면 tick rate 확인**: `CONFIG_FREERTOS_HZ`가 `1000`인지 확인하세요(`sdkconfig.defaults`에 명시돼 있지만, 기존 `sdkconfig`가 있으면 자동 병합 안 됨). `100`(기본값)이면 `rotary_encoder`/`ptt_button`의 폴링이 `vTaskDelay(0)`이 되면서 사실상 busy-loop으로 CPU를 99% 먹는 버그가 재현됩니다(2026-08-12 확인, 로컬 `troubleshoot/task_wdt-poll_ms_zero_tick_busyloop.md` 참고) — `idf.py menuconfig` → Component config → FreeRTOS → Kernel → Tick rate에서 1000으로 바꾸세요. `sdkconfig`가 없는 새 clone은 `sdkconfig.defaults`가 자동 적용돼 신경 쓸 필요 없습니다.
 
 ## 핵심 기능
 - I2S 마이크/스피커 입출력, PTT 제어
