@@ -11,6 +11,7 @@
 
 #include "audio_codec.h"
 #include "audio_io.h"
+#include "device_id.h"
 #include "display_ui.h"
 #include "ptt_button.h"
 #include "rotary_encoder.h"
@@ -354,6 +355,10 @@ static void rx_audio_task(void *arg)
 /* 상태별 진입 동작. 실제 하드웨어 제어는 각 담당(TODO)이 채운다. */
 static void on_enter_boot_init(void)
 {
+    char id_hex[DEVICE_ID_LEN * 2 + 1];
+    device_id_get_hex(id_hex, sizeof(id_hex));
+    ESP_LOGI(TAG, "device id: %s", id_hex);
+
     display_ui_init();
     status_led_init();
 

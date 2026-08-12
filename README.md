@@ -2,6 +2,18 @@
 
 ESP32-S3 기반 무전기 단말 펌웨어. FHSS 음성 통신 + RF OTA 수신 담당.
 
+## 기기 고유 식별자 (`components/device_id/`)
+
+ESP32-S3 eFuse에 공장에서 구워진 base MAC 뒤 3바이트(`DEVICE_ID_LEN`)를 그대로 사용 — OTP라 재플래시해도 안 바뀌고, 기기별 빌드 분리 불필요.
+
+```c
+uint8_t id[DEVICE_ID_LEN];
+device_id_get(id);                    // 예: {0x4A, 0x1B, 0xC7}
+device_id_get_hex(hex, sizeof(hex));  // 예: "4A1BC7"
+```
+
+용도(예정): OTA 스캔 시 `MENU_OTA` 기기가 ACK에 이 값을 실어 회신 → Qt 앱이 응답자 구분. 자세한 내용은 [components/device_id/README.md](fhss-ota-radio/components/device_id/README.md).
+
 ## ⚠️ 빌드 전 준비 (필독)
 
 `components/audio_codec/speex`는 git submodule(xiph/speex 원본)이라 **일반 clone만으로는 비어있습니다.** 빌드 전에 반드시 아래 중 하나를 실행하세요.
@@ -35,11 +47,12 @@ firmware-esp32/
 │   ├── rf_transport/      # 팀원5(+2) — nRF24/CC1101 저수준 SPI
 │   ├── ptt_button/        # 팀원1 — PTT 디바운스, EV_PTT_PRESS/RELEASE
 │   ├── rotary_encoder/    # 팀원1 — 메뉴 커서, EV_MENU_SELECT_COMM/IDLE/OTA
-│   └── status_led/        # 팀원1 — 온보드 RGB LED 상태 표시 (디버그용)
+│   ├── status_led/        # 팀원1 — 온보드 RGB LED 상태 표시 (디버그용)
+│   └── device_id/         # 팀원1 — 기기 고유 식별자(MAC 뒤 3바이트)
 └── docs/
 ```
 
-## 현재 구현 현황 (`feature/reserve-cc1101-pins`)
+## 현재 구현 현황 (`feature/device-id`)
 
 **2026-08-10: 실기기 첫 검증 성공** — OLED/PTT/LED/마이크 캡처가 실제 ESP32-S3 보드에서 정상 동작 확인됨 (PTT 누르면 FSM이 `TX_AUDIO`로 실제 전이, LED 점등, 크래시 없음). 앰프(MAX98357A) GAIN/SD GPIO 제어 + PTT 삐빅음 테스트 진행 중.
 
@@ -88,6 +101,8 @@ firmware-esp32/
 - [x] `components/ota_client/` — OTA 세션/청크 검증/플래시 기록 컴포넌트 (팀2, 별도 브랜치에서 병합됨) — `rf_transport`(무선 송수신)가 아직 없어 실제 동작은 불가, 역할 분리만 잡혀있는 상태 (자세한 내용은 [components/ota_client/README.md](fhss-ota-radio/components/ota_client/README.md))
 - [x] `components/status_led/` — 온보드 WS2812 RGB LED(GPIO38, `led_strip` managed component) 상태 표시 (디버그용)
   - `main/fsm.c`의 `on_ptt_event()`에 직접 연결 — FSM 처리 결과를 기다리지 않고 GPIO 디바운스만 통과하면 바로 켜짐/꺼짐 (FSM 전이표 변경과 무관하게 동작)
+- [x] `components/device_id/` — 기기 고유 식별자(eFuse base MAC 뒤 3바이트, `DEVICE_ID_LEN`) — 자세한 배경은 위 "기기 고유 식별자" 섹션 참고
+  - `on_enter_boot_init()`에서 `device_id_get_hex()`로 부팅 시 로그 한 번 찍음 — OTA ACK 등 실제 사용처는 `rf_transport` 생기면 연결 예정
 - [x] `components/fhss_core/` — `fhss_sync_packet.c/h`(동기 패킷 encode/decode, big-endian 13바이트 와이어 포맷) 구현됨 (팀5, 별도 브랜치에서 병합됨)
   - `fhss_hop_sequence.c/h`는 아직 빈 스텁 — 호핑 시퀀스 계산 로직 미구현
 - [ ] CC1101 저수준 SPI(`rf_transport`), `fhss_hop_sequence` 실구현, `fhss_sync_state`(SEARCHING/LOCKED 판정, 헤더 비어있어 빌드 안 됨)는 아직 미완성 — 이게 없어서 FSM wiring도, `ota_client`도 실기기에서는 검증 못 하는 상태
