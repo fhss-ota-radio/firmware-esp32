@@ -355,6 +355,13 @@ static void rx_audio_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/* BOOT_INIT은 최초 부팅뿐 아니라 ERROR 상태의 EV_RETRY로도 재진입한다
+ * (s_transitions의 유일한 탈출구). 아래 하드웨어 init 함수들은 전부 "한 번만
+ * 불림"을 가정하고 있어(예: I2C 버스/GPIO ISR을 매번 새로 등록) 재진입 시
+ * 그대로 다시 부르면 이미 등록된 리소스에 충돌해 실패할 수 있다 — 그래서
+ * s_boot_init_done 플래그로 감싸 최초 1회만 실행되게 한다. */
+static bool s_boot_init_done;
+
 /* 상태별 진입 동작. 실제 하드웨어 제어는 각 담당(TODO)이 채운다. */
 static void on_enter_boot_init(void)
 {
@@ -362,31 +369,35 @@ static void on_enter_boot_init(void)
     device_id_get_hex(id_hex, sizeof(id_hex));
     ESP_LOGI(TAG, "device id: %s", id_hex);
 
-    display_ui_init();
-    status_led_init();
+    if (!s_boot_init_done) {
+        display_ui_init();
+        status_led_init();
+    }
 
-    /* ERROR -> RETRY로 여기 다시 들어왔을 수도 있으니(냉부팅이 아닌 경우),
-     * on_enter_error()에서 켠 빨간 점멸/OLED "ERROR" 표시를 확실히 정리한다
-     * — 둘 다 안 켜져 있었어도 안전(에러 무시). 반드시 위 *_init() 다음에
-     * 불러야 한다(냉부팅 시 s_strip/OLED 핸들이 아직 없는 상태에서 부르면
-     * 크래시). *_init() 자체는 여전히 "매번 새로 초기화"를 가정하고 있어
-     * 냉부팅 전용으로 설계돼 있는데, RETRY 경로로 재호출되면 이미 초기화된
-     * 드라이버를 다시 초기화하려다 실패할 수 있음 — 이건 이번 작업 범위
-     * 밖이라 손 안 댐(TODO). */
+    /* ERROR -> RETRY로 여기 다시 들어왔을 수도 있으니(최초 부팅이 아닌
+     * 경우), on_enter_error()에서 켠 빨간 점멸/OLED "ERROR" 표시를 확실히
+     * 정리한다 — 둘 다 안 켜져 있었어도 안전(에러 무시). 최초 부팅이든
+     * 재진입이든 이 시점엔 이미 display_ui_init()/status_led_init()이
+     * 호출된 뒤라(위 분기든 이전 진입이든) s_strip/OLED 핸들이 항상 존재해
+     * 안전하다. */
     status_led_stop_error_blink();
     display_ui_clear_status();
 
-    ptt_button_init();
-    ptt_button_set_callback(on_ptt_event, NULL);
+    if (!s_boot_init_done) {
+        ptt_button_init();
+        ptt_button_set_callback(on_ptt_event, NULL);
 
-    rotary_encoder_init();
-    rotary_encoder_set_select_callback(on_menu_select, NULL);
-    rotary_encoder_set_cursor_callback(on_menu_cursor, NULL);
+        rotary_encoder_init();
+        rotary_encoder_set_select_callback(on_menu_select, NULL);
+        rotary_encoder_set_cursor_callback(on_menu_cursor, NULL);
 
-    audio_codec_init();
-    audio_io_init();
+        audio_codec_init();
+        audio_io_init();
 
-    /* TODO(팀2): SPI(rf_transport/CC1101) 초기화 — 해당 컴포넌트 생기면 추가 */
+        /* TODO(팀2): SPI(rf_transport/CC1101) 초기화 — 해당 컴포넌트 생기면 추가 */
+
+        s_boot_init_done = true;
+    }
 }
 /* MENU_COMM: 통신 대기(기본 메뉴). TX_AUDIO/RX_AUDIO는 여기서만 나가고
  * 여기로만 돌아오니, 오디오 태스크 정리는 전부 여기서 한다(이전엔
