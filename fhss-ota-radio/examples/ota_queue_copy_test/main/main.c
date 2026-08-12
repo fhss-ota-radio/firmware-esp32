@@ -7,6 +7,7 @@
 #include "ota_batch_cache.h"
 #include "ota_client.h"
 #include "ota_client_internal.h"
+#include "ota_discover_packet.h"
 
 static const char *TAG = "OTA_QUEUE_TEST";
 
@@ -283,6 +284,47 @@ static bool run_start_metadata_validation_test(void)
     return true;
 }
 
+static bool run_discover_wire_format_test(void)
+{
+    const uint8_t discover[] = {OTA_DISCOVER_PACKET_TYPE};
+    const uint8_t legacy_discover[] = {1U, OTA_DISCOVER_PACKET_TYPE};
+    ota_discover_packet_t decoded = {0};
+
+    if (ota_discover_packet_decode(discover, sizeof(discover), &decoded) !=
+            OTA_DISCOVER_STATUS_OK ||
+        decoded.type != OTA_DISCOVER_PACKET_TYPE ||
+        ota_discover_packet_decode(
+            legacy_discover, sizeof(legacy_discover), &decoded
+        ) != OTA_DISCOVER_STATUS_INVALID_LENGTH) {
+        ESP_LOGE(TAG, "DISCOVER 1-byte wire format mismatch");
+        return false;
+    }
+
+    const ota_discover_ack_t ack = {
+        .device_id = 0x00AABBCCU,
+        .fw_major = 1U,
+        .fw_minor = 2U,
+        .fw_patch = 3U,
+    };
+    const uint8_t expected[] = {
+        OTA_DISCOVER_ACK_PACKET_TYPE, 0xCCU, 0xBBU, 0xAAU, 1U, 2U, 3U
+    };
+    uint8_t encoded[OTA_DISCOVER_ACK_LENGTH] = {0};
+    size_t encoded_length = 0U;
+
+    if (ota_discover_ack_encode(
+            &ack, encoded, sizeof(encoded), &encoded_length
+        ) != OTA_DISCOVER_STATUS_OK ||
+        encoded_length != sizeof(expected) ||
+        memcmp(encoded, expected, sizeof(expected)) != 0) {
+        ESP_LOGE(TAG, "DISCOVER_ACK 7-byte wire format mismatch");
+        return false;
+    }
+
+    ESP_LOGI(TAG, "versionless DISCOVER/DISCOVER_ACK wire format test PASS");
+    return true;
+}
+
 void app_main(void)
 {
     const ota_client_config_t config = {
@@ -302,6 +344,7 @@ void app_main(void)
         run_queue_capacity_test() &&
         run_protocol_payload_limit_test() &&
         run_start_metadata_validation_test() &&
+        run_discover_wire_format_test() &&
         run_batch_retransmission_test();
 
     if (passed) {

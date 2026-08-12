@@ -456,10 +456,14 @@ static void on_enter_error(void)         { /* TODO(팀1/PM): 오류 로깅, 안�
 static void handle_ota_discover_ack(void)
 {
     ota_discover_ack_t ack;
-    device_id_get(ack.device_id);
-    ack.firmware_version[0] = FIRMWARE_VERSION_MAJOR;
-    ack.firmware_version[1] = FIRMWARE_VERSION_MINOR;
-    ack.firmware_version[2] = FIRMWARE_VERSION_PATCH;
+    uint8_t device_id[DEVICE_ID_LEN];
+    device_id_get(device_id);
+    ack.device_id = ((uint32_t)device_id[0] << 16) |
+                    ((uint32_t)device_id[1] << 8) |
+                    (uint32_t)device_id[2];
+    ack.fw_major = FIRMWARE_VERSION_MAJOR;
+    ack.fw_minor = FIRMWARE_VERSION_MINOR;
+    ack.fw_patch = FIRMWARE_VERSION_PATCH;
 
     uint8_t buf[OTA_DISCOVER_ACK_LENGTH];
     size_t len = 0;

@@ -13,8 +13,11 @@ ota_discover_status_t ota_discover_packet_decode(
         return OTA_DISCOVER_STATUS_INVALID_LENGTH;
     }
 
-    out_packet->version = buffer[0];
-    out_packet->type = buffer[1];
+    if (buffer[0] != OTA_DISCOVER_PACKET_TYPE) {
+        return OTA_DISCOVER_STATUS_INVALID_ARG;
+    }
+
+    out_packet->type = buffer[0];
     return OTA_DISCOVER_STATUS_OK;
 }
 
@@ -31,14 +34,18 @@ ota_discover_status_t ota_discover_ack_encode(
     if (buffer_capacity < OTA_DISCOVER_ACK_LENGTH) {
         return OTA_DISCOVER_STATUS_INVALID_LENGTH;
     }
+    if (ack->device_id > OTA_DEVICE_ID_MAX) {
+        return OTA_DISCOVER_STATUS_INVALID_ARG;
+    }
 
     size_t offset = 0;
-    for (size_t i = 0; i < DEVICE_ID_LEN; i++) {
-        buffer[offset++] = ack->device_id[i];
-    }
-    for (size_t i = 0; i < 3; i++) {
-        buffer[offset++] = ack->firmware_version[i];
-    }
+    buffer[offset++] = OTA_DISCOVER_ACK_PACKET_TYPE;
+    buffer[offset++] = (uint8_t)(ack->device_id & 0xFFU);
+    buffer[offset++] = (uint8_t)((ack->device_id >> 8) & 0xFFU);
+    buffer[offset++] = (uint8_t)((ack->device_id >> 16) & 0xFFU);
+    buffer[offset++] = ack->fw_major;
+    buffer[offset++] = ack->fw_minor;
+    buffer[offset++] = ack->fw_patch;
 
     *out_length = offset;
     return OTA_DISCOVER_STATUS_OK;

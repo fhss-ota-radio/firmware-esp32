@@ -21,6 +21,7 @@ I OTA_QUEUE_TEST: packet length validation test PASS
 I OTA_QUEUE_TEST: queue capacity test PASS
 I OTA_QUEUE_TEST: ota-protocol v0.2 DATA payload 48-byte limit test PASS
 I OTA_QUEUE_TEST: START image_size/total_chunks validation test PASS
+I OTA_QUEUE_TEST: versionless DISCOVER/DISCOVER_ACK wire format test PASS
 I OTA_QUEUE_TEST: 5-chunk individual-ACK/retransmission test PASS
 I OTA_QUEUE_TEST: ordered batch write-callback test PASS
 I OTA_QUEUE_TEST: partial final batch test PASS

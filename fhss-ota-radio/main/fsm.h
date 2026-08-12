@@ -94,7 +94,7 @@ void fsm_post_event(fsm_event_t event);
 bool fsm_post_rx_audio_frame(const uint8_t *data, size_t len);
 
 /*
- * OTA_DISCOVER 패킷(2바이트, components/ota_client/include/ota_discover_packet.h)을
+ * OTA_DISCOVER 패킷(1바이트, components/ota_client/include/ota_discover_packet.h)을
  * 수신했을 때 호출한다. 길이가 OTA_DISCOVER_PACKET_LENGTH가 아니면 디코드
  * 실패로 보고 false를 반환하며 아무 이벤트도 올리지 않는다. 디코드에
  * 성공하면 FSM_EVENT_OTA_DISCOVER_RX를 올리고 true를 반환한다 — 단, 이

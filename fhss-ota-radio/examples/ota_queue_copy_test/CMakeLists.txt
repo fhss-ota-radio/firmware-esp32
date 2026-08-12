@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.22)
 set(IDF_TARGET "esp32" CACHE STRING "Target chip")
 set(EXTRA_COMPONENT_DIRS
     "${CMAKE_CURRENT_LIST_DIR}/../../components/ota_client"
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/device_id"
 )
 set(COMPONENTS main)
 
