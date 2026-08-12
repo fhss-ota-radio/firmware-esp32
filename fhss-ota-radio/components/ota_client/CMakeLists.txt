@@ -3,10 +3,13 @@ idf_component_register(
         "source/ota_client.c"
         "source/ota_batch_cache.c"
         "source/ota_writer.c"
+        "source/ota_discover_packet.c"
     INCLUDE_DIRS
         "include"
     PRIV_INCLUDE_DIRS
         "source"
+    REQUIRES
+        device_id
     PRIV_REQUIRES
         app_update
         esp_partition

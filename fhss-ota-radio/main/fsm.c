@@ -11,7 +11,10 @@
 
 #include "audio_codec.h"
 #include "audio_io.h"
+#include "device_id.h"
 #include "display_ui.h"
+#include "firmware_version.h"
+#include "ota_discover_packet.h"
 #include "ptt_button.h"
 #include "rotary_encoder.h"
 #include "status_led.h"
@@ -64,6 +67,7 @@ static const char *s_event_names[FSM_EVENT_COUNT] = {
     [FSM_EVENT_PTT_RELEASE]    = "PTT_RELEASE",
     [FSM_EVENT_RX_FRAME]       = "RX_FRAME",
     [FSM_EVENT_RX_DONE]        = "RX_DONE",
+    [FSM_EVENT_OTA_DISCOVER_RX] = "OTA_DISCOVER_RX",
     [FSM_EVENT_OTA_START]      = "OTA_START",
     [FSM_EVENT_OTA_CHUNK]      = "OTA_CHUNK",
     [FSM_EVENT_OTA_COMPLETE]   = "OTA_COMPLETE",
@@ -354,6 +358,10 @@ static void rx_audio_task(void *arg)
 /* 상태별 진입 동작. 실제 하드웨어 제어는 각 담당(TODO)이 채운다. */
 static void on_enter_boot_init(void)
 {
+    char id_hex[DEVICE_ID_LEN * 2 + 1];
+    device_id_get_hex(id_hex, sizeof(id_hex));
+    ESP_LOGI(TAG, "device id: %s", id_hex);
+
     display_ui_init();
     status_led_init();
 
@@ -385,6 +393,7 @@ static void on_enter_menu_comm(void)
         audio_io_speaker_disable();
     }
     display_ui_draw_menu(DISPLAY_UI_MENU_COMM, menu_item_from_rotary(rotary_encoder_get_cursor()));
+    display_ui_set_status("HOLD PTT");
 }
 
 /* MENU_IDLE(뮤트): TX_AUDIO/RX_AUDIO로 들어오는 전이가 없어서(전이표 참고)
@@ -392,15 +401,26 @@ static void on_enter_menu_comm(void)
 static void on_enter_menu_idle(void)
 {
     display_ui_draw_menu(DISPLAY_UI_MENU_IDLE, menu_item_from_rotary(rotary_encoder_get_cursor()));
+#ifdef LOOPBACK_ENABLE
+    /* "PTT 눌러서 마이크/스피커 테스트" 안내 — 8자 한도라 최대한 축약
+     * (원문 의도: test mic and speaker via pressing ptt button). */
+    display_ui_set_status("PTT:TEST");
+#else
+    display_ui_set_status("MUTED");
+#endif
 }
 
 static void on_enter_menu_ota(void)
 {
     display_ui_draw_menu(DISPLAY_UI_MENU_OTA, menu_item_from_rotary(rotary_encoder_get_cursor()));
-    /* TODO(팀2): CC1101 OTA 채널 리스닝 준비 */
+    display_ui_set_status_animated("WAIT");
+    /* TODO(팀2): CC1101 OTA 채널 리스닝 준비. OTA_RECEIVING 진행률 표시는
+     * 상태 영역에 여유(STATUS_H, display_ui.c 참고)를 남겨뒀으니 그때 추가. */
 }
 static void on_enter_tx_audio(void)
 {
+    display_ui_set_status_animated("TX");
+
     /* fsm_task 안에서 블로킹으로 끝까지 재생 — 이유는 tx_audio_task 주석 참고. */
     audio_io_speaker_enable();
     audio_io_play_beep();
@@ -415,6 +435,8 @@ static void on_enter_tx_audio(void)
 }
 static void on_enter_rx_audio(void)
 {
+    display_ui_set_status_animated("RX");
+
     /* audio_codec_decode()도 같은 호출 체인 무게라 tx와 동일하게 8192로. */
     audio_io_speaker_enable();
     xTaskCreate(rx_audio_task, "rx_audio", 8192, NULL, tskIDLE_PRIORITY + 3, &s_rx_audio_task);
@@ -422,6 +444,33 @@ static void on_enter_rx_audio(void)
 static void on_enter_ota_receiving(void) { /* TODO(팀2): OTA 수신 버퍼 초기화, 음성 태스크 일시 중단 */ }
 static void on_enter_ota_applying(void)  { /* TODO(팀2): 이미지 검증 및 OTA 파티션 기록 */ }
 static void on_enter_error(void)         { /* TODO(팀1/PM): 오류 로깅, 안전 상태로 정지 */ }
+
+/*
+ * MENU_OTA 상태에서 FSM_EVENT_OTA_DISCOVER_RX를 수신했을 때만 fsm_task()가
+ * 호출한다(아래 참고). 상태 전이를 일으키지 않는 "같은 상태에서의
+ * 부수효과"라 s_transitions[]에는 넣지 않았다 — self-transition을 넣어도
+ * fsm_transition_to()가 next_state==s_state를 no-op 처리해서 enter action이
+ * 아예 안 불린다(다른 self-loop 항목인 OTA_RECEIVING/OTA_CHUNK도 동일 이유로
+ * 실제로는 이 함수와 같은 방식의 별도 처리가 필요함, TODO 팀2).
+ */
+static void handle_ota_discover_ack(void)
+{
+    ota_discover_ack_t ack;
+    device_id_get(ack.device_id);
+    ack.firmware_version[0] = FIRMWARE_VERSION_MAJOR;
+    ack.firmware_version[1] = FIRMWARE_VERSION_MINOR;
+    ack.firmware_version[2] = FIRMWARE_VERSION_PATCH;
+
+    uint8_t buf[OTA_DISCOVER_ACK_LENGTH];
+    size_t len = 0;
+    if (ota_discover_ack_encode(&ack, buf, sizeof(buf), &len) != OTA_DISCOVER_STATUS_OK) {
+        ESP_LOGW(TAG, "OTA discover ack encode failed");
+        return;
+    }
+
+    ESP_LOGI(TAG, "OTA discover ack ready (%u bytes)", (unsigned)len);
+    /* TODO(팀2): buf[0..len)을 rf_transport로 OTA 채널에 송신 */
+}
 
 static void (*const s_enter_actions[FSM_STATE_COUNT])(void) = {
     [FSM_STATE_BOOT_INIT]     = on_enter_boot_init,
@@ -475,6 +524,13 @@ static void fsm_task(void *arg)
             continue;
         }
 
+        /* 상태 전이 없는 부수효과: MENU_OTA에서만 ACK 준비, 그 외 상태면
+         * 전이표에 이 이벤트가 없어 아래에서 unhandled로 조용히 무시된다. */
+        if (event == FSM_EVENT_OTA_DISCOVER_RX && s_state == FSM_STATE_MENU_OTA) {
+            handle_ota_discover_ack();
+            continue;
+        }
+
         /* 상태별 전이표 조회 */
         bool handled = false;
         for (size_t i = 0; i < sizeof(s_transitions) / sizeof(s_transitions[0]); i++) {
@@ -518,6 +574,17 @@ bool fsm_post_rx_audio_frame(const uint8_t *data, size_t len)
     }
 
     fsm_post_event(FSM_EVENT_RX_FRAME);
+    return true;
+}
+
+bool fsm_post_ota_discover_frame(const uint8_t *data, size_t len)
+{
+    ota_discover_packet_t packet;
+    if (ota_discover_packet_decode(data, len, &packet) != OTA_DISCOVER_STATUS_OK) {
+        return false;
+    }
+
+    fsm_post_event(FSM_EVENT_OTA_DISCOVER_RX);
     return true;
 }
 
