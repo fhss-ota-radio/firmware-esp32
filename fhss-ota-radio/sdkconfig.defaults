@@ -8,3 +8,14 @@
 # 1000으로 올려야 한다(menuconfig > Component config > FreeRTOS > Kernel >
 # Tick rate, 또는 sdkconfig에서 직접 수정).
 CONFIG_FREERTOS_HZ=1000
+
+# TEMP(main/main.c의 task_stats_task 진단 코드가 쓰는 설정, 그 코드 지울 때
+# 이 블록도 같이 지울 것): vTaskGetRunTimeStats()로 태스크별 실측 CPU
+# 점유율을 보려면 필요. main.c 쪽은 이 옵션이 꺼진 로컬에서도(CONFIG_FREERTOS_
+# GENERATE_RUN_TIME_STATS가 0이면) 빌드가 깨지지 않도록 #if로 방어돼 있어서
+# 이 블록이 없어도 빌드 자체는 되지만, 없으면 진단 로그가 안 찍힘.
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS=y
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_RUN_TIME_COUNTER_TYPE_U32=y
+CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER=y
