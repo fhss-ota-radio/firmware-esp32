@@ -365,6 +365,17 @@ static void on_enter_boot_init(void)
     display_ui_init();
     status_led_init();
 
+    /* ERROR -> RETRY로 여기 다시 들어왔을 수도 있으니(냉부팅이 아닌 경우),
+     * on_enter_error()에서 켠 빨간 점멸/OLED "ERROR" 표시를 확실히 정리한다
+     * — 둘 다 안 켜져 있었어도 안전(에러 무시). 반드시 위 *_init() 다음에
+     * 불러야 한다(냉부팅 시 s_strip/OLED 핸들이 아직 없는 상태에서 부르면
+     * 크래시). *_init() 자체는 여전히 "매번 새로 초기화"를 가정하고 있어
+     * 냉부팅 전용으로 설계돼 있는데, RETRY 경로로 재호출되면 이미 초기화된
+     * 드라이버를 다시 초기화하려다 실패할 수 있음 — 이건 이번 작업 범위
+     * 밖이라 손 안 댐(TODO). */
+    status_led_stop_error_blink();
+    display_ui_clear_status();
+
     ptt_button_init();
     ptt_button_set_callback(on_ptt_event, NULL);
 
@@ -443,7 +454,31 @@ static void on_enter_rx_audio(void)
 }
 static void on_enter_ota_receiving(void) { /* TODO(팀2): OTA 수신 버퍼 초기화, 음성 태스크 일시 중단 */ }
 static void on_enter_ota_applying(void)  { /* TODO(팀2): 이미지 검증 및 OTA 파티션 기록 */ }
-static void on_enter_error(void)         { /* TODO(팀1/PM): 오류 로깅, 안전 상태로 정지 */ }
+/*
+ * EV_ERROR는 전역 전이라(fsm_task() 참고) 어느 상태에서든 여기로 곧장 올 수
+ * 있다 — TX_AUDIO/RX_AUDIO 도중이었을 수도 있어서, on_enter_menu_comm()과
+ * 동일하게 그 태스크들부터 정리해야 "안전 상태로 정지"가 실제로 보장된다.
+ * LED 빨간 점멸(status_led_start_error_blink(), PTT 흰색 고정과 구분되는
+ * 패턴)과 OLED 상태 줄("ERROR")로 눈에 보이게 표시. ERROR의 유일한 탈출구인
+ * EV_RETRY -> BOOT_INIT에서 둘 다 정리된다(on_enter_boot_init() 참고).
+ */
+static void on_enter_error(void)
+{
+    ESP_LOGE(TAG, "entering ERROR state");
+
+    if (s_tx_audio_task != NULL) {
+        vTaskDelete(s_tx_audio_task);
+        s_tx_audio_task = NULL;
+    }
+    if (s_rx_audio_task != NULL) {
+        vTaskDelete(s_rx_audio_task);
+        s_rx_audio_task = NULL;
+        audio_io_speaker_disable();
+    }
+
+    status_led_start_error_blink();
+    display_ui_set_status("ERROR");
+}
 
 /*
  * MENU_OTA 상태에서 FSM_EVENT_OTA_DISCOVER_RX를 수신했을 때만 fsm_task()가
