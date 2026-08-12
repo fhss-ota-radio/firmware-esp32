@@ -16,7 +16,10 @@ device_id_get_hex(hex, sizeof(hex));  // 예: "4A1BC7"
 
 ## ⚠️ 빌드 전 준비 (필독)
 
-> **⚠️ 기존 `sdkconfig`가 로컬에 있다면 `CONFIG_FREERTOS_HZ=1000`인지 확인.** `100`(기본값)이면 `rotary_encoder`/`ptt_button` 폴링이 `vTaskDelay(0)`이 돼 CPU 99%를 먹는 버그가 재현됨 → `idf.py menuconfig` → Component config → FreeRTOS → Kernel → Tick rate → **1000**으로 수정. (새로 clone한 경우는 `sdkconfig.defaults`가 자동 적용돼 조치 불필요. 배경: 로컬 `troubleshoot/task_wdt-poll_ms_zero_tick_busyloop.md`)
+**⚠️ `CONFIG_FREERTOS_HZ` 확인 필수** — `100`(기본값)이면 `rotary_encoder`/`ptt_button` 폴링이 CPU 99% busy-loop 버그로 재현됨.
+
+- 기존 로컬 `sdkconfig` 있음: `CONFIG_FREERTOS_HZ=1000`인지 확인 (`idf.py menuconfig` > Component config > FreeRTOS > Kernel > Tick rate)
+- 새로 clone: `sdkconfig.defaults` 자동 적용, 조치 불필요
 
 `components/audio_codec/speex`는 git submodule(xiph/speex 원본)이라 **일반 clone만으로는 비어있습니다.** 빌드 전에 반드시 아래 중 하나를 실행하세요.
 
