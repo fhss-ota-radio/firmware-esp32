@@ -404,7 +404,7 @@ static void on_enter_menu_comm(void)
         audio_io_speaker_disable();
     }
     display_ui_draw_menu(DISPLAY_UI_MENU_COMM, menu_item_from_rotary(rotary_encoder_get_cursor()));
-    display_ui_set_status("HOLD PTT");
+    display_ui_set_status_scroll("HOLD PTT TO SPEAK");
 }
 
 /* MENU_IDLE(뮤트): TX_AUDIO/RX_AUDIO로 들어오는 전이가 없어서(전이표 참고)
@@ -413,9 +413,7 @@ static void on_enter_menu_idle(void)
 {
     display_ui_draw_menu(DISPLAY_UI_MENU_IDLE, menu_item_from_rotary(rotary_encoder_get_cursor()));
 #ifdef LOOPBACK_ENABLE
-    /* "PTT 눌러서 마이크/스피커 테스트" 안내 — 8자 한도라 최대한 축약
-     * (원문 의도: test mic and speaker via pressing ptt button). */
-    display_ui_set_status("PTT:TEST");
+    display_ui_set_status_scroll("PRESS PTT TO TEST LOOPBACK");
 #else
     display_ui_set_status("MUTED");
 #endif
@@ -424,7 +422,9 @@ static void on_enter_menu_idle(void)
 static void on_enter_menu_ota(void)
 {
     display_ui_draw_menu(DISPLAY_UI_MENU_OTA, menu_item_from_rotary(rotary_encoder_get_cursor()));
-    display_ui_set_status_animated("WAIT");
+    /* 글자 수는 화면 폭(8자)에 다 들어가지만, "대기 중"임을 시각적으로
+     * 드러내려고 일부러 흐르는 문구로 표시(display_ui_set_status_scroll()). */
+    display_ui_set_status_scroll("STANDBY");
     /* TODO(팀2): CC1101 OTA 채널 리스닝 준비. OTA_RECEIVING 진행률 표시는
      * 상태 영역에 여유(STATUS_H, display_ui.c 참고)를 남겨뒀으니 그때 추가. */
 }

@@ -329,24 +329,42 @@ void oled_update_text_fmt(uint8_t row, const char *fmt, ...)
 
 /*
  * 상태 메시지 영역(구분선 아래, 화면 끝까지). scale1 폰트라 한 글자 8px,
- * 논리 너비 64px이므로 한 줄에 STATUS_MAX_CHARS(8자)까지만 들어간다 — 더
- * 긴 문구는 짧게 줄여서 넣을 것(텍스트는 항목과 달리 RULE_X 인셋 없이 전체
- * 폭으로 그림 — "HOLD PTT"/"PTT:TEST"가 정확히 8자라 인셋을 주면 잘림).
- * 애니메이션 문구(base+마침표 0~3개)는 base가 5자 이하여야 마침표 3개를
- * 더해도 8자를 안 넘는다.
+ * 논리 너비 64px이라 정적/점(dot) 애니메이션 텍스트는 STATUS_MAX_CHARS(8자)
+ * 까지만 화면에 들어간다 — 애니메이션 문구(base+마침표 0~3개)는 base가
+ * 5자 이하여야 마침표 3개를 더해도 8자를 안 넘는다.
+ *
+ * 2026-08-12(3차) 흐르는 문구(marquee, display_ui_set_status_scroll())는 이
+ * 8자 제한이 적용되지 않는다 — 폭보다 긴 텍스트는 왼쪽으로 계속 흘러서
+ * 보여주고, 짧아도(예: "STANDBY") 끊김 없이 계속 흐른다("동작 중" 표현
+ * 겸용). 텍스트 자체는 항목과 달리 RULE_X 인셋 없이 전체 폭으로 그림.
  */
 #define STATUS_MAX_CHARS  8
 #define STATUS_DOT_MAX    3
-/* s_status_text 버퍼는 base(최대 STATUS_MAX_CHARS자) + 마침표(최대
- * STATUS_DOT_MAX개) + NUL의 이론상 최댓값으로 잡는다 — 실제 화면엔
- * STATUS_MAX_CHARS자까지만 보이지만(위 주석 참고), 버퍼를 이렇게 넉넉히
+/* 흐르는 문구는 더 긴 안내 문구(예: "PRESS PTT TO TEST LOOPBACK")를 담아야
+ * 해서 버퍼를 넉넉히 키움. */
+#define STATUS_TEXT_MAX_LEN 48
+/* s_status_text 버퍼는 base(최대 STATUS_TEXT_MAX_LEN자) + 마침표(최대
+ * STATUS_DOT_MAX개) + NUL의 이론상 최댓값으로 잡는다 — 버퍼를 이렇게 넉넉히
  * 잡아둬야 컴파일러가 snprintf()의 "%s%.*s" 결합에서 트렁케이션 가능성을
  * 정적으로 배제할 수 있다(안 그러면 -Werror=format-truncation 빌드 에러). */
-#define STATUS_TEXT_BUF_LEN (STATUS_MAX_CHARS + STATUS_DOT_MAX + 1)
+#define STATUS_TEXT_BUF_LEN (STATUS_TEXT_MAX_LEN + STATUS_DOT_MAX + 1)
 #define STATUS_TEXT_SCALE 1
 #define STATUS_Y (STATUS_RULE_Y + 4)
 #define STATUS_H (DISPLAY_UI_WIDTH - STATUS_Y)
 #define STATUS_ANIM_INTERVAL_MS 250
+
+/*
+ * 흐르는 문구(marquee) 튜닝값. 점 애니메이션(250ms)보다 갱신 주기를 일부러
+ * 더 느리게(400ms) 잡고 한 틱에 1px만 옮긴다 — esp_timer 콜백 + 매번 8페이지
+ * 전체를 I2C로 flush하는 render_screen()이 태스크 입장에서 공짜가 아니라서,
+ * 너무 자주 갱신하면(예: 부드러움을 위해 50~100ms 주기) 불필요한 부담이
+ * 된다. 1px/400ms(~2.5px/s)면 갱신 빈도는 낮게 유지하면서도 눈에는 "천천히
+ * 흐른다"는 게 충분히 보인다.
+ */
+#define STATUS_SCROLL_INTERVAL_MS 400
+#define STATUS_SCROLL_STEP_PX     1
+/* 텍스트가 한 바퀴 돌고 다시 이어질 때 붙지 않도록 두는 여백(px). */
+#define STATUS_SCROLL_GAP_PX      16
 
 static const char *const s_menu_labels[DISPLAY_UI_MENU_COUNT] = { "COMM", "IDLE", "OTA" };
 
@@ -356,10 +374,38 @@ static const char *const s_menu_labels[DISPLAY_UI_MENU_COUNT] = { "COMM", "IDLE"
  * 마지막으로 그렸던 메뉴 선택/커서가 화면에 계속 유지된다. */
 static display_ui_menu_item_t s_last_selected = DISPLAY_UI_MENU_COMM;
 static display_ui_menu_item_t s_last_hovered = DISPLAY_UI_MENU_COMM;
-static char s_status_base[STATUS_MAX_CHARS + 1];
+static char s_status_base[STATUS_TEXT_MAX_LEN + 1];
 static char s_status_text[STATUS_TEXT_BUF_LEN];
 static int s_status_dot_count;
 static esp_timer_handle_t s_status_timer;
+
+/* 상태 줄에 지금 어떤 효과가 돌고 있는지. 하나의 esp_timer(s_status_timer)를
+ * 공유하고, 틱 콜백(status_anim_tick)이 이 값을 보고 동작을 분기한다. */
+typedef enum {
+    STATUS_ANIM_NONE = 0, /* 정적 텍스트, 타이머 없음 */
+    STATUS_ANIM_DOTS,     /* base + 마침표 0~3개 */
+    STATUS_ANIM_SCROLL,   /* 왼쪽으로 흐르는 마퀴 */
+} status_anim_mode_t;
+static status_anim_mode_t s_status_anim_mode = STATUS_ANIM_NONE;
+static int s_status_scroll_offset;
+
+/* box(x,y,w,h) 안에 text를 왼쪽으로 흐르는 마퀴(marquee)로 그린다. offset_px가
+ * 커질수록 텍스트가 왼쪽으로 밀려나고, (텍스트 폭 + 여백)만큼 밀리면 다시 같은
+ * 텍스트가 오른쪽에서 이어져 보이도록(끊김 없는 루프) 필요한 만큼 반복해서
+ * 그린다 — 텍스트가 박스보다 짧아도(예: "STANDBY") 계속 흐르게 하기 위함. */
+static void draw_text_scroll(int x, int y, int w, int h, const char *text, int scale, int offset_px)
+{
+    int text_w = scale * 8 * (int)strlen(text);
+    if (text_w <= 0) {
+        return;
+    }
+    int loop_w = text_w + STATUS_SCROLL_GAP_PX;
+    int ly = y + (h - scale * 8) / 2;
+    int start = x - (offset_px % loop_w);
+    for (int lx = start; lx < x + w; lx += loop_w) {
+        draw_text(lx, ly, text, scale, false);
+    }
+}
 
 static void render_screen(void)
 {
@@ -390,32 +436,48 @@ static void render_screen(void)
     draw_hline(RULE_X, STATUS_RULE_Y, RULE_W, true);
 
     if (s_status_text[0] != '\0') {
-        draw_text_centered(0, STATUS_Y, DISPLAY_UI_HEIGHT, STATUS_H,
-                            s_status_text, STATUS_TEXT_SCALE, false);
+        if (s_status_anim_mode == STATUS_ANIM_SCROLL) {
+            draw_text_scroll(0, STATUS_Y, DISPLAY_UI_HEIGHT, STATUS_H,
+                              s_status_text, STATUS_TEXT_SCALE, s_status_scroll_offset);
+        } else {
+            draw_text_centered(0, STATUS_Y, DISPLAY_UI_HEIGHT, STATUS_H,
+                                s_status_text, STATUS_TEXT_SCALE, false);
+        }
     }
 
     flush_all_pages("render_screen");
 }
 
-/* 애니메이션 타이머가 도는 중이면 멈춘다. NULL(한 번도 애니메이션을 시작한
- * 적 없음)이면 아무 것도 안 함 — esp_timer_stop(NULL) 크래시 방지. */
+/* 애니메이션 타이머가 도는 중이면 멈추고 모드를 NONE으로 되돌린다. NULL(한
+ * 번도 애니메이션을 시작한 적 없음)이면 타이머 정지만 건너뜀 —
+ * esp_timer_stop(NULL) 크래시 방지. */
 static void stop_status_animation(void)
 {
     if (s_status_timer != NULL) {
         esp_timer_stop(s_status_timer); /* 이미 멈춰있어도 안전(에러 무시) */
     }
+    s_status_anim_mode = STATUS_ANIM_NONE;
 }
 
-/* esp_timer 콜백은 esp_timer 전용 태스크 컨텍스트에서 250ms마다 불린다.
- * fsm_task/rotary_encoder_task도 각자 display_ui_draw_menu()/set_status*()를
- * 부를 수 있어 s_framebuf 등 공유 상태에 뮤텍스 없이 여러 태스크가 접근하는
- * 구조인데, 이건 이 컴포넌트가 원래(회전 그리기 도입 때부터) 갖고 있던
- * 패턴을 그대로 따른 것 — 갱신이 드물고(사람이 보는 UI) 한 프레임 정도
- * 밀려도 다음 tick에서 바로 정정되니 지금은 문제되지 않는다. */
+/* esp_timer 콜백은 esp_timer 전용 태스크 컨텍스트에서 (모드에 따라 250ms 또는
+ * 400ms마다) 불린다. fsm_task/rotary_encoder_task도 각자
+ * display_ui_draw_menu()/set_status*()를 부를 수 있어 s_framebuf 등 공유
+ * 상태에 뮤텍스 없이 여러 태스크가 접근하는 구조인데, 이건 이 컴포넌트가
+ * 원래(회전 그리기 도입 때부터) 갖고 있던 패턴을 그대로 따른 것 — 갱신이
+ * 드물고(사람이 보는 UI) 한 프레임 정도 밀려도 다음 tick에서 바로 정정되니
+ * 지금은 문제되지 않는다. */
 static void status_anim_tick(void *arg)
 {
-    s_status_dot_count = (s_status_dot_count + 1) % (STATUS_DOT_MAX + 1);
-    snprintf(s_status_text, sizeof(s_status_text), "%s%.*s", s_status_base, s_status_dot_count, "...");
+    if (s_status_anim_mode == STATUS_ANIM_SCROLL) {
+        int text_w = STATUS_TEXT_SCALE * 8 * (int)strlen(s_status_text);
+        int loop_w = text_w + STATUS_SCROLL_GAP_PX;
+        if (loop_w > 0) {
+            s_status_scroll_offset = (s_status_scroll_offset + STATUS_SCROLL_STEP_PX) % loop_w;
+        }
+    } else if (s_status_anim_mode == STATUS_ANIM_DOTS) {
+        s_status_dot_count = (s_status_dot_count + 1) % (STATUS_DOT_MAX + 1);
+        snprintf(s_status_text, sizeof(s_status_text), "%s%.*s", s_status_base, s_status_dot_count, "...");
+    }
     render_screen();
 }
 
@@ -433,12 +495,10 @@ void display_ui_set_status(const char *text)
     render_screen();
 }
 
-void display_ui_set_status_animated(const char *base)
+/* 타이머가 없으면 만들고, 있으면 재시작 전 정지한다(이미 돌고 있었을 수
+ * 있음) — set_status_animated()/set_status_scroll()이 공유. 실패 시 false. */
+static bool ensure_status_timer_running(uint32_t interval_ms)
 {
-    snprintf(s_status_base, sizeof(s_status_base), "%s", (base != NULL) ? base : "");
-    s_status_dot_count = 0;
-    snprintf(s_status_text, sizeof(s_status_text), "%s", s_status_base);
-
     if (s_status_timer == NULL) {
         const esp_timer_create_args_t timer_args = {
             .callback = status_anim_tick,
@@ -446,14 +506,37 @@ void display_ui_set_status_animated(const char *base)
         };
         if (esp_timer_create(&timer_args, &s_status_timer) != ESP_OK) {
             ESP_LOGW(TAG, "status anim timer create failed");
-            render_screen();
-            return;
+            return false;
         }
     } else {
-        esp_timer_stop(s_status_timer); /* 재시작 전 정지(이미 돌고 있었을 수 있음) */
+        esp_timer_stop(s_status_timer);
     }
+    esp_timer_start_periodic(s_status_timer, (uint64_t)interval_ms * 1000);
+    return true;
+}
 
-    esp_timer_start_periodic(s_status_timer, (uint64_t)STATUS_ANIM_INTERVAL_MS * 1000);
+void display_ui_set_status_animated(const char *base)
+{
+    snprintf(s_status_base, sizeof(s_status_base), "%s", (base != NULL) ? base : "");
+    s_status_dot_count = 0;
+    snprintf(s_status_text, sizeof(s_status_text), "%s", s_status_base);
+    s_status_anim_mode = STATUS_ANIM_DOTS;
+
+    if (!ensure_status_timer_running(STATUS_ANIM_INTERVAL_MS)) {
+        s_status_anim_mode = STATUS_ANIM_NONE;
+    }
+    render_screen();
+}
+
+void display_ui_set_status_scroll(const char *text)
+{
+    snprintf(s_status_text, sizeof(s_status_text), "%s", (text != NULL) ? text : "");
+    s_status_scroll_offset = 0;
+    s_status_anim_mode = STATUS_ANIM_SCROLL;
+
+    if (!ensure_status_timer_running(STATUS_SCROLL_INTERVAL_MS)) {
+        s_status_anim_mode = STATUS_ANIM_NONE;
+    }
     render_screen();
 }
 
