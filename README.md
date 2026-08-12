@@ -99,6 +99,7 @@ firmware-esp32/
   - `FSM_EVENT_SYNC_LOST`는 전역 안전장치 이벤트로 유지 — 목적지는 `MENU_COMM`(정상 통신 대기, 뮤트인 `MENU_IDLE` 아님). 무선 계층(`rf_transport`/`fhss_core`)이 홉 추종 실패를 판단하면 이 이벤트로 강제 복귀시키는 용도(팀5의 `fhss_sync_state` 모듈이 판정 로직 후보, 아직 미완성)
   - **알려진 제약**: `rf_transport`가 없어 `TX_AUDIO`에서 캡처한 프레임을 실제로 보낼 곳도, `RX_AUDIO`가 받을 실제 프레임도 없음 — 그래서 이 wiring은 컴파일/개별 컴포넌트 단위 검증까지만 가능하고, `rf_transport` 생기기 전까지 실기기 end-to-end 테스트는 불가
 - [x] `components/ota_client/` — OTA 세션/청크 검증/플래시 기록 컴포넌트 (팀2, 별도 브랜치에서 병합됨) — `rf_transport`(무선 송수신)가 아직 없어 실제 동작은 불가, 역할 분리만 잡혀있는 상태 (자세한 내용은 [components/ota_client/README.md](fhss-ota-radio/components/ota_client/README.md))
+  - **OTA 스캔 ACK 구조 선반영(2026-08-12)**: `ota_discover_packet.h/.c` 추가 — Qt 앱의 `OTA_DISCOVER`(2바이트) 수신 시 `MENU_OTA`이면 `device_id`+펌웨어 버전을 담은 `OTA_DISCOVER_ACK`(6바이트)를 준비(`main/fsm.c`의 `FSM_EVENT_OTA_DISCOVER_RX`, 상태 전이 없음). 실제 RF 송수신은 여전히 TODO
 - [x] `components/status_led/` — 온보드 WS2812 RGB LED(GPIO38, `led_strip` managed component) 상태 표시 (디버그용)
   - `main/fsm.c`의 `on_ptt_event()`에 직접 연결 — FSM 처리 결과를 기다리지 않고 GPIO 디바운스만 통과하면 바로 켜짐/꺼짐 (FSM 전이표 변경과 무관하게 동작)
 - [x] `components/device_id/` — 기기 고유 식별자(eFuse base MAC 뒤 3바이트, `DEVICE_ID_LEN`) — 자세한 배경은 위 "기기 고유 식별자" 섹션 참고

@@ -160,6 +160,15 @@ GDO 인터럽트
 
 ## 패킷 처리
 
+### OTA_DISCOVER (스캔 응답, 2026-08-12 구조 선반영)
+
+`OTA_START` 이전 단계 — Qt 앱이 OTA 대기 중인 기기를 찾으려고 방송하는 스캔 신호에 대한 응답. `include/ota_discover_packet.h`/`source/ota_discover_packet.c`로 인코드/디코드만 정의(값은 미확정, TODO).
+
+- `OTA_DISCOVER`(Qt 앱 → ESP, 2바이트): `version`(패킷 규격 버전) + `type`(DISCOVER 표시) 각 1바이트
+- `OTA_DISCOVER_ACK`(ESP → Qt 앱, `DEVICE_ID_LEN`+3=6바이트): `device_id`(`components/device_id`, MAC 뒤 3바이트) + `firmware_version`(`main/firmware_version.h`, major/minor/patch) — 이 버전은 `OTA_DISCOVER.version`(패킷 규격 버전)과 다른 값
+
+`main/fsm.c`의 `fsm_post_ota_discover_frame()`이 디코드해 `FSM_EVENT_OTA_DISCOVER_RX`를 올리고, `MENU_OTA` 상태일 때만 `handle_ota_discover_ack()`가 ACK를 인코딩까지 해둔다(상태 전이 없음). 실제 RF 송수신은 `rf_transport`가 없어 TODO — 자세한 배경은 [docs/fsm-design.md](../../docs/fsm-design.md) 결정 이력(2026-08-12) 참고.
+
 ### OTA_START
 
 1. 프로토콜 버전을 확인한다.
