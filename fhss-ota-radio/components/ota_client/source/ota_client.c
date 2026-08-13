@@ -151,6 +151,18 @@ esp_err_t ota_client_write_chunk(
     if (sequence >= s_ota_client.total_chunks) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    const uint64_t chunk_offset =
+        (uint64_t)sequence * OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE;
+    const size_t expected_data_size =
+        sequence + 1U == s_ota_client.total_chunks
+            ? (size_t)((uint64_t)s_ota_client.image_size - chunk_offset)
+            : OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE;
+    if (data_size != expected_data_size) {
+        /* 중간 청크는 항상 48B, 이미지의 마지막 청크만 잔여 길이를 허용한다.
+         * 그래야 batch cache를 연속 buffer로 한 번에 Flash에 기록할 수 있다. */
+        return ESP_ERR_INVALID_SIZE;
+    }
     if (sequence < s_ota_client.expected_sequence) {
         /* ACK 유실로 이전 배치 DATA가 재전송된 경우 안전하게 무시한다. */
         return ESP_OK;
@@ -170,7 +182,7 @@ esp_err_t ota_client_write_chunk(
     s_ota_client.last_packet_tick = xTaskGetTickCount();
 
     /* Wire protocol에는 BATCH_CHECK가 없다. 각 DATA는 개별 ACK/NACK 대상이며,
-     * 현재 고정 배치의 모든 DATA가 모인 순간에만 순서대로 Flash에 기록한다. */
+     * 현재 고정 배치가 완성되면 연속된 최대 240B를 Flash에 한 번 기록한다. */
     if (!ota_batch_cache_is_complete(&s_ota_client.batch_cache)) {
         return ESP_OK;
     }

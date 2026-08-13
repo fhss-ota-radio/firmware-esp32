@@ -200,7 +200,8 @@ DATA 5개 수신
   → 각 DATA sequence에 개별 ACK/NACK
 
 5개가 모두 모임
-  → 별도 BATCH_CHECK 없이 sequence 순서로 esp_ota_write()
+  → 중간 청크 48B 및 마지막 청크 잔여 길이 검증
+  → 연속된 최대 240B를 esp_ota_write() 한 번으로 기록
   → 다음 배치로 이동
 ```
 
@@ -208,7 +209,8 @@ ESP32의 `received_mask`는 현재 배치가 완성됐는지 판단하는 내부
 실리지 않는다. Gateway는 5개를 보낸 뒤 개별 ACK를 받지 못한 sequence만 다시
 보낸다. ACK 유실로 이미 처리한 DATA가 다시 들어오면 Flash에 중복 기록하지 않고
 해당 sequence ACK를 다시 보낼 수 있도록 성공으로 처리한다. 별도 `BATCH_CHECK`,
-`BATCH_ACK`, missing bitmap 패킷은 사용하지 않는다.
+`BATCH_ACK`, missing bitmap 패킷은 사용하지 않는다. 일반 배치는 240B, 마지막
+배치는 실제 남은 크기를 한 번의 `esp_ota_write()`로 기록한다.
 
 ### OTA_END
 

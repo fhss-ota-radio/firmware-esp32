@@ -211,6 +211,7 @@ static bool run_queue_capacity_test(void)
 typedef struct {
     uint8_t data[OTA_CLIENT_BATCH_SIZE * OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE];
     size_t length;
+    uint32_t call_count;
 } batch_write_capture_t;
 
 static esp_err_t capture_batch_write(
@@ -226,10 +227,29 @@ static esp_err_t capture_batch_write(
     }
 
     memcpy(&capture->data[capture->length], data, data_size);
-    ESP_LOGI(TAG, "ORDERED WRITE CALLBACK: seq=%u, length=%u",
-             data[0], (unsigned)data_size);
+    capture->call_count++;
+    ESP_LOGI(TAG, "BATCH WRITE CALLBACK: call=%u, length=%u",
+             (unsigned)capture->call_count, (unsigned)data_size);
     capture->length += data_size;
     return ESP_OK;
+}
+
+static bool store_test_chunk_sized(
+    ota_batch_cache_t *cache,
+    uint32_t sequence,
+    uint8_t value,
+    size_t data_size
+)
+{
+    uint8_t chunk[OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE];
+    memset(chunk, value, sizeof(chunk));
+    return ota_batch_cache_store(
+        cache,
+        sequence,
+        chunk,
+        data_size,
+        NULL
+    ) == ESP_OK;
 }
 
 static bool store_test_chunk(
@@ -238,14 +258,9 @@ static bool store_test_chunk(
     uint8_t value
 )
 {
-    const uint8_t chunk[2] = {value, (uint8_t)(value + 0x40U)};
-    return ota_batch_cache_store(
-        cache,
-        sequence,
-        chunk,
-        sizeof(chunk),
-        NULL
-    ) == ESP_OK;
+    return store_test_chunk_sized(
+        cache, sequence, value, OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE
+    );
 }
 
 static bool run_batch_retransmission_test(void)
@@ -278,7 +293,8 @@ static bool run_batch_retransmission_test(void)
     }
 
     bool duplicate = false;
-    const uint8_t duplicate_chunk[2] = {0xEEU, 0xEEU};
+    uint8_t duplicate_chunk[OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE];
+    memset(duplicate_chunk, 0xEE, sizeof(duplicate_chunk));
     if (ota_batch_cache_store(
             &cache, 2U, duplicate_chunk, sizeof(duplicate_chunk), &duplicate
         ) != ESP_OK || !duplicate) {
@@ -306,19 +322,25 @@ static bool run_batch_retransmission_test(void)
     size_t written_size = 0U;
     if (ota_batch_cache_commit(
             &cache, capture_batch_write, &capture, &written_size
-        ) != ESP_OK || written_size != 10U || capture.length != 10U) {
+        ) != ESP_OK ||
+        written_size != OTA_CLIENT_BATCH_SIZE * OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE ||
+        capture.length != written_size ||
+        capture.call_count != 1U) {
         ESP_LOGE(TAG, "batch commit failed");
         return false;
     }
 
     for (uint8_t sequence = 0U; sequence < OTA_CLIENT_BATCH_SIZE; ++sequence) {
-        const size_t offset = (size_t)sequence * 2U;
+        const size_t offset =
+            (size_t)sequence * OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE;
         if (capture.data[offset] != sequence ||
-            capture.data[offset + 1U] != (uint8_t)(sequence + 0x40U)) {
+            capture.data[offset + OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE - 1U] !=
+                sequence) {
             ESP_LOGE(TAG, "flash write order mismatch at seq %u", sequence);
             return false;
         }
     }
+    ESP_LOGI(TAG, "BATCH FLASH WRITE: 240 bytes in one writer call");
     ESP_LOGI(TAG, "BATCH ADVANCE: next_sequence=5 (no BATCH_ACK packet)");
 
     /* 마지막 배치는 total_chunks=8이므로 seq 5~7 세 개만 요구한다. */
@@ -327,7 +349,7 @@ static bool run_batch_retransmission_test(void)
     ESP_LOGI(TAG, "RX DATA: seq=7");
     ESP_LOGI(TAG, "RX DATA: seq=5");
     if (cache.chunk_count != 3U ||
-        !store_test_chunk(&cache, 7U, 7U) ||
+        !store_test_chunk_sized(&cache, 7U, 7U, 17U) ||
         !store_test_chunk(&cache, 5U, 5U) ||
         ota_batch_cache_missing_mask(&cache) != 0x02U) {
         ESP_LOGE(TAG, "partial final batch handling failed");
@@ -345,10 +367,24 @@ static bool run_batch_retransmission_test(void)
     ESP_LOGI(TAG, "TX ACK: seq=6");
     ESP_LOGI(TAG, "FINAL BATCH COMPLETE: received_mask=0x%02X",
              cache.received_mask);
+
+    memset(&capture, 0, sizeof(capture));
+    written_size = 0U;
+    if (ota_batch_cache_commit(
+            &cache, capture_batch_write, &capture, &written_size
+        ) != ESP_OK ||
+        written_size != (2U * OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE + 17U) ||
+        capture.length != written_size ||
+        capture.call_count != 1U) {
+        ESP_LOGE(TAG, "partial final batch single-write failed");
+        return false;
+    }
+    ESP_LOGI(TAG, "FINAL BATCH FLASH WRITE: %u bytes in one writer call",
+             (unsigned)written_size);
     ESP_LOGI(TAG, "BATCH ADVANCE: next_sequence=8 (no BATCH_ACK packet)");
 
     ESP_LOGI(TAG, "5-chunk individual-ACK/retransmission test PASS");
-    ESP_LOGI(TAG, "ordered batch write-callback test PASS");
+    ESP_LOGI(TAG, "single-call batch write test PASS");
     ESP_LOGI(TAG, "partial final batch test PASS");
     return true;
 }
@@ -543,6 +579,28 @@ static bool run_consumer_session_test(void)
         return false;
     }
     ESP_LOGI(TAG, "SESSION TEST: START ACK PASS");
+
+    packet_length = ota_protocol_encode_data(
+        packet,
+        sizeof(packet),
+        session_id,
+        0U,
+        image,
+        OTA_MAX_PAYLOAD_SIZE - 1U
+    );
+    if (!submit_and_expect_ack(
+            packet,
+            packet_length,
+            OTA_PKT_NACK,
+            session_id,
+            OTA_PKT_DATA,
+            0U,
+            OTA_RESULT_INVALID_SIZE
+        )) {
+        ESP_LOGE(TAG, "short non-final DATA was not rejected");
+        return false;
+    }
+    ESP_LOGI(TAG, "SESSION TEST: short non-final DATA size NACK PASS");
 
     const uint8_t first_sequences[] = {0U, 2U, 4U};
     for (size_t i = 0U; i < sizeof(first_sequences); ++i) {

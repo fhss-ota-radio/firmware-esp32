@@ -23,14 +23,15 @@ I OTA_QUEUE_TEST: ota-protocol v0.2 DATA payload 48-byte limit test PASS
 I OTA_QUEUE_TEST: START image_size/total_chunks validation test PASS
 I OTA_QUEUE_TEST: versionless DISCOVER/DISCOVER_ACK wire format test PASS
 I OTA_QUEUE_TEST: 5-chunk individual-ACK/retransmission test PASS
-I OTA_QUEUE_TEST: ordered batch write-callback test PASS
+I OTA_QUEUE_TEST: single-call batch write test PASS
 I OTA_QUEUE_TEST: partial final batch test PASS
 I OTA_QUEUE_TEST: ALL TESTS PASS
 ```
 
 배치 테스트 중에는 `RX DATA`, seq별 `TX ACK`, Gateway의 ACK tracker,
 `RETRY RX DATA`, 자동 배치 완료와 `ORDERED WRITE CALLBACK` 순서도 함께 출력된다.
-배치 cache 단위 테스트의 콜백은 RAM에 기록 순서를 캡처하는 테스트 대역이다.
+배치 cache 단위 테스트의 콜백은 RAM의 5개 청크가 최대 240바이트의 연속
+buffer로 합쳐져 writer가 배치당 한 번만 호출되는지 확인하는 테스트 대역이다.
 별도의 consumer session 테스트는 실행 중인 정상 앱의 앞 240바이트를 읽어
 비활성 OTA 파티션에 실제로 기록한다. END에서는 의도적으로 잘린 이미지의 검증
 실패와 NACK을 확인하므로 부팅 파티션은 바뀌지 않는다.

@@ -333,9 +333,11 @@ static void ota_consumer_handle_data(
             header.sequence,
             err == ESP_ERR_INVALID_STATE
                 ? OTA_RESULT_BUSY
+                : (err == ESP_ERR_INVALID_SIZE
+                    ? OTA_RESULT_INVALID_SIZE
                 : (err == ESP_ERR_INVALID_ARG
                     ? OTA_RESULT_INVALID_SEQUENCE
-                    : OTA_RESULT_WRITE_FAILED)
+                    : OTA_RESULT_WRITE_FAILED))
         );
         return;
     }

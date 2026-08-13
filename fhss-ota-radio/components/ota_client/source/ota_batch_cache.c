@@ -101,19 +101,30 @@ esp_err_t ota_batch_cache_commit(
         return ESP_ERR_INVALID_STATE;
     }
 
-    size_t written_size = 0U;
+    size_t batch_size = 0U;
     for (uint8_t i = 0U; i < cache->chunk_count; ++i) {
-        const esp_err_t err = write_callback(
-            cache->data[i],
-            cache->lengths[i],
-            context
-        );
-        if (err != ESP_OK) {
-            return err;
+        /* data[5][48]을 하나의 연속 buffer로 전달하려면 마지막 slot을 제외한
+         * 모든 slot이 정확히 48B여야 한다. 제품 경로에서는 write_chunk가
+         * 이미지 크기를 기준으로 이 조건을 먼저 검증한다. */
+        if (cache->lengths[i] == 0U ||
+            (i + 1U < cache->chunk_count &&
+             cache->lengths[i] != OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE)) {
+            return ESP_ERR_INVALID_SIZE;
         }
-        written_size += cache->lengths[i];
+        batch_size += cache->lengths[i];
     }
 
-    *out_written_size = written_size;
+    /* 5×48B 배열은 메모리상 연속이다. 완성된 배치를 한 번의 writer 호출로
+     * 넘겨 esp_ota_write()도 배치당 정확히 한 번만 실행되게 한다. */
+    const esp_err_t err = write_callback(
+        &cache->data[0][0],
+        batch_size,
+        context
+    );
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    *out_written_size = batch_size;
     return ESP_OK;
 }
