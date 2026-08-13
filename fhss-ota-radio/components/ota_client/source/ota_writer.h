@@ -29,7 +29,8 @@ esp_err_t ota_writer_write(
 );
 
 esp_err_t ota_writer_finish(
-    ota_writer_t *writer
+    ota_writer_t *writer,
+    const uint8_t expected_sha256[32]
 );
 
 esp_err_t ota_writer_abort(
