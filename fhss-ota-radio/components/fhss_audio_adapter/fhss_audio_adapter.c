@@ -31,6 +31,8 @@ typedef struct {
     size_t frame_count;
     uint16_t tx_sequence;
     uint16_t expected_rx_sequence;
+    uint32_t tx_packet_count;
+    uint32_t rx_packet_count;
     bool have_rx_sequence;
     bool initialized;
     bool tx_active;
@@ -88,6 +90,17 @@ static void on_service_data(
     }
     s_adapter.expected_rx_sequence = (uint16_t)(packet.sequence + 1U);
     s_adapter.have_rx_sequence = true;
+    s_adapter.rx_packet_count++;
+
+    if ((s_adapter.rx_packet_count % 25U) == 0U) {
+        ESP_LOGI(TAG,
+                 "AUDIO_RX packet=%lu sequence=%u frames=%u bytes=%u flags=0x%02X",
+                 (unsigned long)s_adapter.rx_packet_count,
+                 packet.sequence,
+                 (unsigned)packet.frame_count,
+                 (unsigned)length,
+                 packet.flags);
+    }
 
     for (size_t i = 0U; i < packet.frame_count; ++i) {
         if (s_adapter.config.rx_frame_callback == NULL ||
@@ -129,6 +142,16 @@ static bool send_buffered_frames(uint8_t flags)
     if (!fhss_service_send_data(&s_adapter.service, packet, packet_length)) {
         ESP_LOGW(TAG, "audio TX queue full: sequence=%u", s_adapter.tx_sequence);
         return false;
+    }
+    s_adapter.tx_packet_count++;
+    if ((s_adapter.tx_packet_count % 25U) == 0U) {
+        ESP_LOGI(TAG,
+                 "AUDIO_TX packet=%lu sequence=%u frames=%u bytes=%u flags=0x%02X",
+                 (unsigned long)s_adapter.tx_packet_count,
+                 s_adapter.tx_sequence,
+                 (unsigned)s_adapter.frame_count,
+                 (unsigned)packet_length,
+                 flags);
     }
     s_adapter.tx_sequence++;
     s_adapter.frame_count = 0U;
@@ -187,6 +210,7 @@ bool fhss_audio_adapter_begin_tx(void)
     }
     s_adapter.frame_count = 0U;
     s_adapter.tx_sequence = 0U;
+    s_adapter.tx_packet_count = 0U;
     if (!fhss_service_set_role(&s_adapter.service, FHSS_SERVICE_ROLE_TX)) {
         return false;
     }
@@ -231,6 +255,7 @@ bool fhss_audio_adapter_end_tx(void)
     }
     s_adapter.tx_active = false;
     s_adapter.have_rx_sequence = false;
-    ESP_LOGI(TAG, "TX session ended; RX standby resumed");
+    ESP_LOGI(TAG, "TX session ended: packets=%lu; RX standby resumed",
+             (unsigned long)s_adapter.tx_packet_count);
     return ok;
 }

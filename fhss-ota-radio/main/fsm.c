@@ -12,11 +12,16 @@
 #include "audio_io.h"
 #include "display_ui.h"
 #include "fhss_audio_adapter.h"
+#include "fhss_audio_pcm_test.h"
 #include "ptt_button.h"
 #include "rotary_encoder.h"
 #include "status_led.h"
 
 static const char *TAG = "fsm";
+
+/* 마이크 없이 codec -> FHSS -> CC1101 -> codec -> speaker 경로를 확인하는
+ * 임시 실기기 모드다. 0으로 바꾸면 기존 INMP441 캡처 경로를 그대로 사용한다. */
+#define FHSS_AUDIO_PCM_TEST_ENABLED 1
 
 static QueueHandle_t s_event_queue;
 static fsm_state_t s_state = FSM_STATE_BOOT_INIT;
@@ -262,6 +267,12 @@ static TaskHandle_t s_tx_audio_task;
 
 static void tx_audio_task(void *arg)
 {
+#if FHSS_AUDIO_PCM_TEST_ENABLED
+    /* 이 함수 안에서 160-sample PCM을 정확히 20 ms 간격으로 생성하고 실제
+     * audio_codec_encode()와 fhss_audio_adapter를 호출한다. 태스크 수명은
+     * 기존 Mic 캡처 태스크와 동일하게 PTT PRESS~RELEASE로 제한된다. */
+    fhss_audio_pcm_test_run();
+#else
     uint8_t frame[AUDIO_CODEC_MAX_ENCODED_BYTES];
 
     for (;;) {
@@ -274,6 +285,7 @@ static void tx_audio_task(void *arg)
             }
         }
     }
+#endif
 }
 
 /*
@@ -348,8 +360,24 @@ static void on_enter_boot_init(void)
 static void on_enter_menu_comm(void)
 {
     if (s_tx_audio_task != NULL) {
+        /* Stop the producer before taking its final counters so 64-bit timing
+         * fields cannot change while the FSM task is copying/logging them. */
         vTaskDelete(s_tx_audio_task);
         s_tx_audio_task = NULL;
+#if FHSS_AUDIO_PCM_TEST_ENABLED
+        fhss_audio_pcm_test_stats_t stats = {0};
+        fhss_audio_pcm_test_get_stats(&stats);
+        ESP_LOGI(TAG,
+                 "PCM TEST STOP generated=%lu encoded=%lu submitted=%lu "
+                 "encode_fail=%lu submit_fail=%lu interval_us[min/max]=%lld/%lld",
+                 (unsigned long)stats.generated_frames,
+                 (unsigned long)stats.encoded_frames,
+                 (unsigned long)stats.submitted_frames,
+                 (unsigned long)stats.encode_failures,
+                 (unsigned long)stats.submit_failures,
+                 (long long)stats.minimum_interval_us,
+                 (long long)stats.maximum_interval_us);
+#endif
     }
     /* PTT_RELEASE로 TX_AUDIO를 빠져올 때 남은 한 frame까지 전송 완료한 뒤
      * CC1101을 RX 대기로 되돌린다. 부팅/RX 종료 경로에서는 안전한 no-op이다. */
@@ -390,6 +418,11 @@ static void on_enter_tx_audio(void)
         fsm_post_event(FSM_EVENT_ERROR);
         return;
     }
+
+#if FHSS_AUDIO_PCM_TEST_ENABLED
+    ESP_LOGW(TAG,
+             "PCM TEST MODE: microphone bypassed; real Speex/FHSS/RF path active");
+#endif
 
     /* 스택 8192 — audio_io_capture_encode() -> audio_codec_encode() ->
      * speex_encode_int()(LPC 분석/코드북 탐색) 호출 체인이 4096으론 빠듯해서
