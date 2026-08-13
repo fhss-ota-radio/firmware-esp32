@@ -12,6 +12,16 @@ static ptt_button_cb_t s_cb;
 static void *s_cb_ctx;
 static volatile bool s_pressed;
 
+static TickType_t poll_delay_ticks(void)
+{
+    const TickType_t ticks = pdMS_TO_TICKS(PTT_BUTTON_POLL_MS);
+    /* CONFIG_FREERTOS_HZ=100에서는 1 tick이 10 ms라서 요청한 5 ms가
+     * 0 tick으로 잘린다. vTaskDelay(0)는 CPU를 확실히 양보하지 않아 이
+     * 폴링 태스크가 IDLE task를 굶기고 Task Watchdog을 발생시켰다.
+     * 최소 1 tick을 보장해 입력 폴링 사이에 반드시 스케줄링 기회를 준다. */
+    return ticks > 0U ? ticks : 1U;
+}
+
 static inline bool raw_level_pressed(void)
 {
     int level = gpio_get_level(PTT_BUTTON_GPIO);
@@ -28,6 +38,7 @@ static inline bool raw_level_pressed(void)
  */
 static void ptt_button_task(void *arg)
 {
+    const TickType_t delay_ticks = poll_delay_ticks();
     bool candidate = raw_level_pressed();
     int stable_count = PTT_BUTTON_DEBOUNCE_COUNT;
     s_pressed = candidate;
@@ -52,7 +63,7 @@ static void ptt_button_task(void *arg)
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(PTT_BUTTON_POLL_MS));
+        vTaskDelay(delay_ticks);
     }
 }
 
@@ -75,10 +86,13 @@ void ptt_button_init(void)
     xTaskCreate(ptt_button_task, "ptt_button", PTT_BUTTON_TASK_STACK, NULL,
                 PTT_BUTTON_TASK_PRIORITY, NULL);
 
-    ESP_LOGI(TAG, "ready (gpio=%d, active_%s, debounce=%dms)",
+    ESP_LOGI(TAG,
+             "ready (gpio=%d, active_%s, poll=%lums, debounce=%lums)",
              PTT_BUTTON_GPIO,
              PTT_BUTTON_ACTIVE_LOW ? "low" : "high",
-             PTT_BUTTON_POLL_MS * PTT_BUTTON_DEBOUNCE_COUNT);
+             (unsigned long)(poll_delay_ticks() * portTICK_PERIOD_MS),
+             (unsigned long)(poll_delay_ticks() * portTICK_PERIOD_MS *
+                             PTT_BUTTON_DEBOUNCE_COUNT));
 }
 
 void ptt_button_set_callback(ptt_button_cb_t cb, void *ctx)

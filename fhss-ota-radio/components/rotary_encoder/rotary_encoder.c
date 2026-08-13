@@ -19,6 +19,16 @@ static void *s_select_ctx;
 
 static volatile rotary_encoder_menu_t s_cursor = ROTARY_ENCODER_MENU_COMM;
 
+static TickType_t poll_delay_ticks(void)
+{
+    const TickType_t ticks = pdMS_TO_TICKS(ROTARY_ENCODER_POLL_MS);
+    /* CONFIG_FREERTOS_HZ=100에서는 요청한 2 ms가 0 tick으로 변환된다.
+     * vTaskDelay(0) 반복은 IDLE task가 실행될 시간을 보장하지 않아 PTT
+     * 폴링 태스크와 함께 CPU를 점유하고 Task Watchdog을 발생시켰다.
+     * 최소 1 tick을 사용해 매 폴링마다 CPU를 확실히 양보한다. */
+    return ticks > 0U ? ticks : 1U;
+}
+
 /*
  * raw AB(2bit, bit0=A, bit1=B) -> gray code 순번(0~3).
  * 한 방향 회전 시 raw 값은 00->01->11->10->00 순서로 매 스텝 1비트씩만 바뀐다
@@ -62,6 +72,7 @@ static void move_cursor(int delta_detents)
 
 static void rotary_encoder_task(void *arg)
 {
+    const TickType_t delay_ticks = poll_delay_ticks();
     uint8_t prev_ab = read_ab();
     int accum = 0;
 
@@ -122,7 +133,7 @@ static void rotary_encoder_task(void *arg)
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(ROTARY_ENCODER_POLL_MS));
+        vTaskDelay(delay_ticks);
     }
 }
 
@@ -154,8 +165,11 @@ void rotary_encoder_init(void)
     xTaskCreate(rotary_encoder_task, "rotary_encoder", ROTARY_ENCODER_TASK_STACK, NULL,
                 ROTARY_ENCODER_TASK_PRIORITY, NULL);
 
-    ESP_LOGI(TAG, "ready (A=%d, B=%d, SW=%d)",
-             ROTARY_ENCODER_GPIO_A, ROTARY_ENCODER_GPIO_B, ROTARY_ENCODER_GPIO_SW);
+    ESP_LOGI(TAG, "ready (A=%d, B=%d, SW=%d, poll=%lums)",
+             ROTARY_ENCODER_GPIO_A,
+             ROTARY_ENCODER_GPIO_B,
+             ROTARY_ENCODER_GPIO_SW,
+             (unsigned long)(poll_delay_ticks() * portTICK_PERIOD_MS));
 }
 
 void rotary_encoder_set_cursor_callback(rotary_encoder_cursor_cb_t cb, void *ctx)
