@@ -57,7 +57,7 @@ firmware-esp32/
 └── docs/
 ```
 
-## 현재 구현 현황 (`feature/device-id`)
+## 현재 구현 현황 (`feature/fsm-error-state`)
 
 **2026-08-10: 실기기 첫 검증 성공** — OLED/PTT/LED/마이크 캡처가 실제 ESP32-S3 보드에서 정상 동작 확인됨 (PTT 누르면 FSM이 `TX_AUDIO`로 실제 전이, LED 점등, 크래시 없음). 앰프(MAX98357A) GAIN/SD GPIO 제어 + PTT 삐빅음 테스트 진행 중.
 
@@ -77,6 +77,7 @@ firmware-esp32/
   - 공개 API(레거시, 물리/가로 좌표): `display_ui_init()`, `display_ui_clear()`, `oled_update_text(row, text)`, `oled_update_text_fmt(row, fmt, ...)`
   - **회전 메뉴 화면(2026-08-11)**: `display_ui_draw_menu(selected, hovered)` 신규 API — 배선(SDA/SCL) 그대로 두고 화면 내용만 좌측 90도 회전(세로, 논리 64x128)해서 COMM/IDLE/OTA 3항목 메뉴를 그림. SSD1306엔 진짜 90도 회전 명령이 없어(A0/A1·C0/C8은 0/180도 반전만 지원) 프레임버퍼에 좌표 변환(`px=ly, py=HEIGHT-1-lx`, 실기기로 방향 확인 후 확정)으로 직접 그린 뒤 8페이지 전체 flush. 텍스트는 기존 8x8 폰트를 2배 확대(픽셀 더블링)해서 크고 굵게 — 새 폰트 에셋 없이 구현. `selected` 항목은 배경/글자색 반전, `hovered` 항목은 흰색(반전과 겹치면 검은색) 테두리
   - **상태 메시지 한 줄(2026-08-12)**: 메뉴 아래에 `display_ui_set_status()`/`display_ui_set_status_animated()`(250ms 마침표 애니메이션, 내부 esp_timer) 추가 — 지금 이 모드가 뭘 하는 중인지 표시(HOLD PTT / TX... / RX... / MUTED·PTT:TEST / WAIT...). 여유 공간 확보 위해 메뉴 항목을 28px→24px로 살짝 축소. 자세한 내용은 [components/display_ui/README.md](fhss-ota-radio/components/display_ui/README.md)
+  - **비주얼 다듬기(2026-08-12)**: 항목 배경/테두리를 둥근 사각형으로(`MENU_ITEM_RADIUS`), 헤더·상태 영역 경계에 얇은 구분선 추가 — 딱딱했던 사각 블록 느낌 완화
 - [x] `components/ptt_button/` — PTT 버튼 디바운스 컴포넌트
   - `ptt_button_config.h` — 핀(GPIO1, 2026-08-11 브레드보드 재구성 배선)/active level/디바운스 파라미터
   - `ptt_button.h` / `ptt_button.c` — 폴링 기반 디바운스(ISR 미사용), 콜백/폴링 API 제공
@@ -108,6 +109,7 @@ firmware-esp32/
   - **OTA 스캔 ACK 구조 선반영(2026-08-12)**: `ota_discover_packet.h/.c` 추가 — Qt 앱의 `OTA_DISCOVER`(2바이트) 수신 시 `MENU_OTA`이면 `device_id`+펌웨어 버전을 담은 `OTA_DISCOVER_ACK`(6바이트)를 준비(`main/fsm.c`의 `FSM_EVENT_OTA_DISCOVER_RX`, 상태 전이 없음). 실제 RF 송수신은 여전히 TODO
 - [x] `components/status_led/` — 온보드 WS2812 RGB LED(GPIO38, `led_strip` managed component) 상태 표시 (디버그용)
   - `main/fsm.c`의 `on_ptt_event()`에 직접 연결 — FSM 처리 결과를 기다리지 않고 GPIO 디바운스만 통과하면 바로 켜짐/꺼짐 (FSM 전이표 변경과 무관하게 동작)
+  - **ERROR 상태 빨간 점멸(2026-08-12)**: `status_led_start_error_blink()`(`esp_timer` 기반, PTT 흰색과 구분) 추가, `on_enter_error()`에서 시작·`on_enter_boot_init()`(`EV_RETRY` 복귀)에서 정지
 - [x] `components/device_id/` — 기기 고유 식별자(eFuse base MAC 뒤 3바이트, `DEVICE_ID_LEN`) — 자세한 배경은 위 "기기 고유 식별자" 섹션 참고
   - `on_enter_boot_init()`에서 `device_id_get_hex()`로 부팅 시 로그 한 번 찍음 — OTA ACK 등 실제 사용처는 `rf_transport` 생기면 연결 예정
 - [x] `components/fhss_core/` — `fhss_sync_packet.c/h`(동기 패킷 encode/decode, big-endian 13바이트 와이어 포맷) 구현됨 (팀5, 별도 브랜치에서 병합됨)

@@ -63,12 +63,24 @@ void display_ui_set_status(const char *text);
  * base 뒤에 마침표(.)가 0~3개, 250ms마다 하나씩 늘었다가 다시 0개로
  * 돌아가는 로딩 애니메이션을 시작한다(내부 esp_timer 주기 타이머로 자체
  * 갱신 — 호출자가 계속 다시 부를 필요 없음). base는 마침표 3개를 더해도
- * 8자를 넘지 않게 5자 이하로 줄 것(예: "TX", "WAIT"). display_ui_set_status()
- * 또는 display_ui_clear_status() 호출 시 자동으로 멈춘다.
+ * 8자를 넘지 않게 5자 이하로 줄 것(예: "TX", "RX"). display_ui_set_status(),
+ * display_ui_set_status_scroll() 또는 display_ui_clear_status() 호출 시
+ * 자동으로 멈춘다.
  */
 void display_ui_set_status_animated(const char *base);
 
-/* 상태 메시지 영역을 비운다(애니메이션 중이었으면 멈춤). */
+/*
+ * text를 왼쪽으로 천천히 흐르는 문구(marquee)로 표시한다(내부 esp_timer로
+ * 자체 갱신). display_ui_set_status()와 달리 8자 제한이 없어 더 긴 안내
+ * 문구를 담을 수 있고(버퍼 한도 STATUS_TEXT_MAX_LEN, display_ui.c 참고),
+ * 화면 폭보다 짧아도(예: "STANDBY") 끊김 없이 계속 흐른다 — 짧은 문구를
+ * "동작 중" 표시로도 쓸 수 있게 하기 위함. 갱신 주기는 일부러 느리게(400ms)
+ * 잡혀 있다 — 너무 자주 다시 그리면 esp_timer/I2C flush 부담이 늘어서다.
+ * display_ui_set_status() 또는 display_ui_clear_status() 호출 시 멈춘다.
+ */
+void display_ui_set_status_scroll(const char *text);
+
+/* 상태 메시지 영역을 비운다(애니메이션/스크롤 중이었으면 멈춤). */
 void display_ui_clear_status(void);
 
 #ifdef __cplusplus
