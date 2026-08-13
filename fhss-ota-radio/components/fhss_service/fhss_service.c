@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 
 static const char *TAG = "fhss_service";
 
@@ -16,7 +17,42 @@ typedef enum {
     RECEIVE_RESULT_CRC_FAIL,
     RECEIVE_RESULT_RADIO_ERROR,
     RECEIVE_RESULT_SYNC_ERROR,
+    RECEIVE_RESULT_DATA,
 } receive_result_t;
+
+#define FHSS_SERVICE_TX_QUEUE_DEPTH 8U
+
+typedef struct {
+    uint8_t data[RF_TRANSPORT_MAX_PACKET_LENGTH];
+    uint8_t length;
+} fhss_service_tx_item_t;
+
+static bool reset_controller(fhss_service_t *service)
+{
+    const fhss_sync_controller_config_t controller_config = {
+        .core = {
+            .channels = service->config.channels,
+            .channel_count = service->config.channel_count,
+            .timing = {
+                .early_margin_us = service->config.channel_switch_guard_us,
+                .late_margin_us = service->config.channel_switch_guard_us,
+            },
+            .sync = {
+                .acquire_count = service->config.acquire_count,
+                .loss_count = service->config.loss_count,
+            },
+        },
+        .scheduler = {
+            .slot_duration_us = service->config.slot_duration_us,
+            .channel_switch_guard_us =
+                service->config.channel_switch_guard_us,
+        },
+        .sync_offset_us = service->config.sync_offset_us,
+    };
+    return fhss_sync_controller_init(
+               &service->controller,
+               &controller_config) == FHSS_CONTROLLER_STATUS_OK;
+}
 
 static void diagnostics_lock(fhss_service_t *service)
 {
@@ -154,6 +190,42 @@ static bool send_sync(fhss_service_t *service, uint32_t slot, uint16_t sequence)
         RF_TRANSPORT_STATUS_OK;
 }
 
+static void drain_tx_data_until(fhss_service_t *service, int64_t deadline_us)
+{
+    fhss_service_tx_item_t item;
+    while (esp_timer_get_time() < deadline_us) {
+        const int64_t remaining_us = deadline_us - esp_timer_get_time();
+        TickType_t wait_ticks = pdMS_TO_TICKS(
+            remaining_us > 20000 ? 20U : (uint32_t)(remaining_us / 1000));
+        if (wait_ticks == 0U) {
+            wait_ticks = 1U;
+        }
+        if (xQueueReceive(
+                (QueueHandle_t)service->tx_queue,
+                &item,
+                wait_ticks) != pdTRUE) {
+            continue;
+        }
+        if (esp_timer_get_time() >= deadline_us) {
+            (void)xQueueSendToFront(
+                (QueueHandle_t)service->tx_queue, &item, 0U);
+            return;
+        }
+        service->tx_in_flight = true;
+        if (rf_transport_send_packet(&service->radio, item.data, item.length) !=
+            RF_TRANSPORT_STATUS_OK) {
+            service->tx_in_flight = false;
+            ESP_LOGW(TAG, "audio/data TX failed: length=%u", item.length);
+            report_event(service, FHSS_SERVICE_EVENT_ERROR);
+            continue;
+        }
+        int64_t ignored_timestamp_us = 0;
+        (void)rf_transport_wait_rx_timestamp(
+            &service->radio, 20U, &ignored_timestamp_us);
+        service->tx_in_flight = false;
+    }
+}
+
 static void tx_task(fhss_service_t *service)
 {
     uint32_t slot = 0U;
@@ -194,6 +266,15 @@ static void tx_task(fhss_service_t *service)
             &service->radio, 20U, &tx_timestamp_us);
         ESP_LOGI(TAG, "SYNC TX: slot=%lu seq=%u timestamp=%lld",
                  (unsigned long)slot, sequence, (long long)tx_timestamp_us);
+        int64_t next_start_us = 0;
+        if (fhss_slot_scheduler_get_slot_start_time(
+                &service->controller.scheduler,
+                slot + 1U,
+                &next_start_us) == FHSS_SLOT_STATUS_OK) {
+            drain_tx_data_until(
+                service,
+                next_start_us - service->config.channel_switch_guard_us);
+        }
         slot++;
         sequence++;
     }
@@ -227,6 +308,18 @@ static receive_result_t receive_one(
     }
     if (!packet.crc_ok) {
         return RECEIVE_RESULT_CRC_FAIL;
+    }
+
+    if (!fhss_sync_packet_has_valid_magic(packet.payload, packet.length)) {
+        if (service->fsm.state != FHSS_FSM_STATE_SEARCHING &&
+            service->config.data_callback != NULL) {
+            service->config.data_callback(
+                packet.payload,
+                packet.length,
+                service->config.event_context);
+        }
+        *out_rx_timestamp_us = rx_timestamp_us;
+        return RECEIVE_RESULT_DATA;
     }
 
     if (fhss_sync_controller_process_rx(
@@ -346,6 +439,8 @@ static void rx_task(fhss_service_t *service)
                 service, receive_result, &result, rx_timestamp_us);
             if (receive_result == RECEIVE_RESULT_OK) {
                 handle_sync_result(service, &result);
+            } else if (receive_result == RECEIVE_RESULT_DATA) {
+                /* Ignore data until a SYNC reference has been acquired. */
             } else if (receive_result == RECEIVE_RESULT_RADIO_ERROR ||
                        receive_result == RECEIVE_RESULT_SYNC_ERROR) {
                 ESP_LOGW(TAG, "RX processing error: result=%d channel=%u",
@@ -385,6 +480,8 @@ static void rx_task(fhss_service_t *service)
             service, receive_result, &result, rx_timestamp_us);
         if (receive_result == RECEIVE_RESULT_OK) {
             handle_sync_result(service, &result);
+        } else if (receive_result == RECEIVE_RESULT_DATA) {
+            /* Data packets do not advance the sync miss counter. */
         } else if (receive_result == RECEIVE_RESULT_TIMEOUT ||
                    receive_result == RECEIVE_RESULT_CRC_FAIL) {
             handle_miss(service);
@@ -436,33 +533,17 @@ bool fhss_service_init(
         return false;
     }
 
-    const fhss_sync_controller_config_t controller_config = {
-        .core = {
-            .channels = config->channels,
-            .channel_count = config->channel_count,
-            .timing = {
-                .early_margin_us = config->channel_switch_guard_us,
-                .late_margin_us = config->channel_switch_guard_us,
-            },
-            .sync = {
-                .acquire_count = config->acquire_count,
-                .loss_count = config->loss_count,
-            },
-        },
-        .scheduler = {
-            .slot_duration_us = config->slot_duration_us,
-            .channel_switch_guard_us = config->channel_switch_guard_us,
-        },
-        .sync_offset_us = config->sync_offset_us,
-    };
-    if (fhss_sync_controller_init(
-            &service->controller,
-            &controller_config) != FHSS_CONTROLLER_STATUS_OK) {
+    if (!reset_controller(service)) {
         return false;
     }
 
     service->diagnostics_mutex = xSemaphoreCreateMutex();
     if (service->diagnostics_mutex == NULL) {
+        return false;
+    }
+    service->tx_queue = xQueueCreate(
+        FHSS_SERVICE_TX_QUEUE_DEPTH, sizeof(fhss_service_tx_item_t));
+    if (service->tx_queue == NULL) {
         return false;
     }
 
@@ -496,6 +577,77 @@ bool fhss_service_start(fhss_service_t *service)
     }
     service->task_handle = task;
     return true;
+}
+
+bool fhss_service_set_role(
+    fhss_service_t *service,
+    fhss_service_role_t role
+)
+{
+    if (service == NULL || !service->initialized ||
+        (role != FHSS_SERVICE_ROLE_TX && role != FHSS_SERVICE_ROLE_RX)) {
+        return false;
+    }
+    if (service->config.role == role && service->task_handle != NULL) {
+        return true;
+    }
+
+    if (service->task_handle != NULL) {
+        vTaskDelete((TaskHandle_t)service->task_handle);
+        service->task_handle = NULL;
+    }
+    fhss_fsm_init(&service->fsm);
+    if (!reset_controller(service)) {
+        return false;
+    }
+    service->config.role = role;
+    service->tx_in_flight = false;
+    if (role == FHSS_SERVICE_ROLE_RX) {
+        xQueueReset((QueueHandle_t)service->tx_queue);
+    }
+    return fhss_service_start(service);
+}
+
+bool fhss_service_send_data(
+    fhss_service_t *service,
+    const uint8_t *data,
+    size_t length
+)
+{
+    if (service == NULL || data == NULL || length == 0U ||
+        length > RF_TRANSPORT_MAX_PACKET_LENGTH ||
+        service->config.role != FHSS_SERVICE_ROLE_TX ||
+        service->tx_queue == NULL) {
+        return false;
+    }
+    fhss_service_tx_item_t item = { .length = (uint8_t)length };
+    memcpy(item.data, data, length);
+    return xQueueSend((QueueHandle_t)service->tx_queue, &item, 0U) == pdTRUE;
+}
+
+bool fhss_service_wait_tx_idle(
+    fhss_service_t *service,
+    uint32_t timeout_ms
+)
+{
+    if (service == NULL || !service->initialized ||
+        service->config.role != FHSS_SERVICE_ROLE_TX ||
+        service->tx_queue == NULL) {
+        return false;
+    }
+
+    const TickType_t start_ticks = xTaskGetTickCount();
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+    do {
+        if (uxQueueMessagesWaiting((QueueHandle_t)service->tx_queue) == 0U &&
+            !service->tx_in_flight) {
+            return true;
+        }
+        vTaskDelay(1U);
+    } while ((xTaskGetTickCount() - start_ticks) < timeout_ticks);
+
+    return uxQueueMessagesWaiting((QueueHandle_t)service->tx_queue) == 0U &&
+           !service->tx_in_flight;
 }
 
 fhss_fsm_state_t fhss_service_get_state(const fhss_service_t *service)

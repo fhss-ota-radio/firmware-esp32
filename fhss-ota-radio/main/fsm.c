@@ -11,6 +11,7 @@
 #include "audio_codec.h"
 #include "audio_io.h"
 #include "display_ui.h"
+#include "fhss_audio_adapter.h"
 #include "ptt_button.h"
 #include "rotary_encoder.h"
 #include "status_led.h"
@@ -39,6 +40,32 @@ typedef struct {
 } fsm_rx_audio_frame_t;
 
 static QueueHandle_t s_rx_audio_queue;
+
+/* RF 수신 콜백은 fhss_service 태스크 문맥에서 호출된다. Speex decode/I2S 재생을
+ * 그 태스크에서 직접 실행하면 다음 홉 수신이 늦어질 수 있으므로, 기존 FSM의
+ * 오디오 큐로 복사해 RX_AUDIO 태스크가 재생하도록 연결한다. */
+static bool on_fhss_rx_audio_frame(
+    const uint8_t *frame,
+    size_t length,
+    void *context
+)
+{
+    (void)context;
+    return fsm_post_rx_audio_frame(frame, length);
+}
+
+/* FHSS 내부의 정상적인 동기 보정은 Main FSM이 알 필요가 없다. 완전히 추종을
+ * 놓친 경우와 복구 불가능한 RF 오류만 전역 FSM 안전장치 이벤트로 변환한다. */
+static void on_fhss_audio_event(
+    fhss_audio_adapter_event_t event,
+    void *context
+)
+{
+    (void)context;
+    fsm_post_event(event == FHSS_AUDIO_ADAPTER_EVENT_SYNC_LOST
+        ? FSM_EVENT_SYNC_LOST
+        : FSM_EVENT_ERROR);
+}
 
 /* 상태별 이름/이벤트별 이름: 로그 및 OLED 표시용 */
 static const char *s_state_names[FSM_STATE_COUNT] = {
@@ -240,7 +267,11 @@ static void tx_audio_task(void *arg)
     for (;;) {
         int n = audio_io_capture_encode(frame, sizeof(frame));
         if (n > 0) {
-            /* TODO(팀5): frame[0..n)을 rf_transport로 FHSS 채널 송신 */
+            /* audio_io는 한 번에 20 ms Speex frame 하나를 만든다. Adapter가
+             * 두 frame을 60-byte 이하 RF packet 하나로 묶고 FHSS TX 큐에 넣는다. */
+            if (!fhss_audio_adapter_submit_encoded_frame(frame, (size_t)n)) {
+                ESP_LOGW(TAG, "encoded audio frame dropped: length=%d", n);
+            }
         }
     }
 }
@@ -297,7 +328,18 @@ static void on_enter_boot_init(void)
     audio_codec_init();
     audio_io_init();
 
-    /* TODO(팀2): SPI(rf_transport/CC1101) 초기화 — 해당 컴포넌트 생기면 추가 */
+    /* Main은 무선 레지스터나 홉 시간을 직접 다루지 않는다. 이 adapter 초기화가
+     * CC1101/FHSS 서비스를 RX 대기 상태로 시작하고, 수신 Speex frame과 전역
+     * SYNC_LOST/ERROR만 FSM API로 되돌려 주는 경계 역할을 한다. */
+    const fhss_audio_adapter_config_t fhss_audio_config = {
+        .rx_frame_callback = on_fhss_rx_audio_frame,
+        .event_callback = on_fhss_audio_event,
+        .callback_context = NULL,
+    };
+    if (!fhss_audio_adapter_init(&fhss_audio_config)) {
+        ESP_LOGE(TAG, "FHSS audio adapter initialization failed");
+        fsm_post_event(FSM_EVENT_ERROR);
+    }
 }
 /* MENU_COMM: 통신 대기(기본 메뉴). TX_AUDIO/RX_AUDIO는 여기서만 나가고
  * 여기로만 돌아오니, 오디오 태스크 정리는 전부 여기서 한다(이전엔
@@ -308,6 +350,11 @@ static void on_enter_menu_comm(void)
     if (s_tx_audio_task != NULL) {
         vTaskDelete(s_tx_audio_task);
         s_tx_audio_task = NULL;
+    }
+    /* PTT_RELEASE로 TX_AUDIO를 빠져올 때 남은 한 frame까지 전송 완료한 뒤
+     * CC1101을 RX 대기로 되돌린다. 부팅/RX 종료 경로에서는 안전한 no-op이다. */
+    if (!fhss_audio_adapter_end_tx()) {
+        ESP_LOGW(TAG, "failed to finish FHSS audio TX session cleanly");
     }
     if (s_rx_audio_task != NULL) {
         vTaskDelete(s_rx_audio_task);
@@ -335,6 +382,14 @@ static void on_enter_tx_audio(void)
     audio_io_speaker_enable();
     audio_io_play_beep();
     audio_io_speaker_disable();
+
+    /* PTT가 눌린 세션 동안만 CC1101을 TX 역할로 전환한다. 이 호출을 캡처
+     * 태스크보다 먼저 해야 첫 Speex frame이 RX 역할의 서비스에 유실되지 않는다. */
+    if (!fhss_audio_adapter_begin_tx()) {
+        ESP_LOGE(TAG, "failed to start FHSS audio TX session");
+        fsm_post_event(FSM_EVENT_ERROR);
+        return;
+    }
 
     /* 스택 8192 — audio_io_capture_encode() -> audio_codec_encode() ->
      * speex_encode_int()(LPC 분석/코드북 탐색) 호출 체인이 4096으론 빠듯해서
