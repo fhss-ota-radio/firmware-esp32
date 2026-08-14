@@ -48,7 +48,7 @@ audio_io_speaker_disable();
 ## 하드웨어 배선 확정 시 수정할 것 (`audio_io_config.h`)
 
 - `AUDIO_IO_MIC_*_GPIO` (WS/BCLK/SD) — INMP441, 현재 GPIO4/5/6 (2026-08-11 재배정)
-- `AUDIO_IO_SPK_*_GPIO` (BCLK/WS(LRC)/DOUT(DIN)/GAIN/SD) — MAX98357A, 현재 GPIO3/46/8/18/17 (2026-08-11 재배정, GPIO9~14를 CC1101 SPI+GDO0+GDO2용으로 통째로 비워두기 위함). GDO0은 GPIO10으로 팀 합의되어 GPIO18(GAIN) 충돌 없음
+- `AUDIO_IO_SPK_*_GPIO` (BCLK/WS(LRC)/DOUT(DIN)/GAIN/SD) — MAX98357A, 현재 GPIO15/7/16/17/18(2026-08-14 재배선, CC1101과 간섭 있어 LRC/BCLK/DIN 재이동. 최초 재배정은 2026-08-11 — GPIO9~14를 CC1101 SPI+GDO0+GDO2용으로 통째로 비워두기 위함). CC1101 핀 블록(SCLK12/MOSI11/MISO13/CS14/GDO0 10)과 안 겹침
 - INMP441의 L/R 핀은 3V3 고정(우채널) 배선 — `audio_io.c`에서 `I2S_STD_SLOT_RIGHT`로 수신. 다르게 배선하면 `I2S_STD_SLOT_LEFT`로 변경
 - MAX98357A의 SD/GAIN 핀은 이제 GPIO 직결 — VDD/GND 직결 배선이면 안 됨(GPIO가 직접 제어함). GAIN을 다른 값으로 바꾸려면 `spk_channel_init()`의 `gpio_set_level(AUDIO_IO_SPK_GAIN_GPIO, ...)` 수정
 

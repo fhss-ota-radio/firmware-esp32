@@ -24,14 +24,14 @@
  * GAIN: 항상 HIGH(VDD) 고정 = 6dB — GPIO로 가능한 3가지(GND=12dB, 미연결=9dB, VDD=6dB) 중
  *       가장 낮은 볼륨. 저항 없이 GND/VDD/미연결로만 3, 6, 9, 12, 15dB 중 조합 가능(데이터시트 참고). */
 /* 재배정(2026-08-11): GPIO9~14를 CC1101(SPI 4핀 + GDO0 + GDO2)용으로 통째로
- * 비우기 위해 앰프를 이동. LRC/BCLK/DIN/GAIN/SD = GPIO46/3/8/18/17.
- * GPIO46/3은 스트래핑 핀이지만 부팅 후엔 일반 GPIO로 동작(46은 출력도 가능,
- * 3은 JTAG 미사용 시 무관) — 외부에서 부팅 중 강제로 레벨을 당기지 않는
- * 수동 소자(앰프)라 문제없음. */
+ * 비우기 위해 앰프를 이동.
+ * 재배정(2026-08-14): 그런데도 CC1101과 간섭이 있어 LRC/BCLK/DIN을 다시
+ * GPIO7/15/16으로 이동(GAIN/SD는 17/18 그대로 유지). GPIO7/15/16은 CC1101
+ * 핀 블록(9~14)과도, GAIN/SD(17/18)와도 안 겹침. */
 #define AUDIO_IO_SPK_I2S_PORT  I2S_NUM_1
-#define AUDIO_IO_SPK_BCLK_GPIO GPIO_NUM_3  /* SCK */
-#define AUDIO_IO_SPK_WS_GPIO   GPIO_NUM_8 /* WS / LRC */
-#define AUDIO_IO_SPK_DOUT_GPIO GPIO_NUM_46  /* ESP 출력 -> MAX98357A DIN */
+#define AUDIO_IO_SPK_BCLK_GPIO GPIO_NUM_15 /* SCK */
+#define AUDIO_IO_SPK_WS_GPIO   GPIO_NUM_7  /* WS / LRC */
+#define AUDIO_IO_SPK_DOUT_GPIO GPIO_NUM_16 /* ESP 출력 -> MAX98357A DIN */
 #define AUDIO_IO_SPK_GAIN_GPIO GPIO_NUM_17
 #define AUDIO_IO_SPK_SD_GPIO   GPIO_NUM_18
 
