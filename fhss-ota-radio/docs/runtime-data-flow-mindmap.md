@@ -15,6 +15,7 @@
 ## A. 전체 아키텍처 마인드맵
 
 ```mermaid
+%%{init: {"theme": "base", "themeVariables": {"primaryColor": "#1e3a5f", "primaryTextColor": "#ffffff", "primaryBorderColor": "#93c5fd", "secondaryColor": "#334155", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#a5b4fc", "tertiaryColor": "#475569", "tertiaryTextColor": "#ffffff", "tertiaryBorderColor": "#cbd5e1", "lineColor": "#cbd5e1", "textColor": "#ffffff"}}}%%
 mindmap
   root((FHSS OTA Radio<br/>ESP32-S3))
     제품 실행 🟢

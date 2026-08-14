@@ -23,6 +23,12 @@
 # Build artifacts and directories
 **/build/
 build/
+# ESP-IDF alternate build directories created with `idf.py -B ...`.
+# Examples: build-ota-rf, build-batch, build-protocol-v02, build.stale-s3.
+build-*/
+build.*/
+**/build-*/
+**/build.*/
 *.o
 *.a
 *.out
