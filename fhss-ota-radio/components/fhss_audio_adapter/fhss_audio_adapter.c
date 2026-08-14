@@ -12,13 +12,19 @@
 #include "fhss_service.h"
 #include "audio_codec.h"
 
+/* 재배선(2026-08-14): 앰프(audio_io)와 간섭이 있어 CC1101 핀을 재배정.
+ * GPIO14는 이전엔 CS였는데, 보드 하드웨어 배치상 GND와 물리적으로 묶일
+ * 수밖에 없는 자리라 이제 어떤 용도로도(CS든 다른 GPIO든) 절대 쓰면 안
+ * 된다 — 출력으로 잡고 HIGH를 내보내면 GND와 직결 쇼트난다. CS는 GPIO10으로
+ * 옮겨서 회피했다. */
 #define CC1101_SCLK_GPIO GPIO_NUM_12
-#define CC1101_MOSI_GPIO GPIO_NUM_11
-#define CC1101_MISO_GPIO GPIO_NUM_13
-#define CC1101_CS_GPIO   GPIO_NUM_14
-/* 팀 확정 배선: GPIO10은 GDO0 timestamp 입력, GPIO9는 GDO2/확장용으로
- * 비워 둔다. 실제 배선과 다르면 SYNC edge가 들어오지 않아 RX timeout이 난다. */
-#define CC1101_GDO0_GPIO GPIO_NUM_10
+#define CC1101_MOSI_GPIO GPIO_NUM_9
+#define CC1101_MISO_GPIO GPIO_NUM_11
+#define CC1101_CS_GPIO   GPIO_NUM_10
+/* 팀 확정 배선: GDO0(SYNC/RX 타임스탬프 입력)은 GPIO13. 실제 배선과 다르면
+ * SYNC edge가 들어오지 않아 RX timeout이 난다. GDO2는 여전히 미사용(코드
+ * 어디서도 안 읽음, rf_transport_config_t에 필드조차 없음). */
+#define CC1101_GDO0_GPIO GPIO_NUM_13
 
 #define FHSS_AUDIO_TX_DRAIN_TIMEOUT_MS 600U
 

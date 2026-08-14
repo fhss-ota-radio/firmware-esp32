@@ -18,10 +18,14 @@
 #define CC1101_STANDALONE_DIAGNOSTIC 1
 
 #if CC1101_STANDALONE_DIAGNOSTIC
+/* 재배선(2026-08-14): 앰프와의 간섭으로 CC1101도 이동. 특히 GPIO14는 기존
+ * CS 자리였는데 보드 하드웨어 배치상 GND와 물리적으로 묶일 수밖에 없어서,
+ * 여기서 CS로도, 다른 어떤 GPIO 용도로도 절대 쓰면 안 된다(출력으로 잡고
+ * HIGH를 내보내면 GND와 직결 쇼트) — CS는 GPIO10으로 옮겨서 회피. */
 #define CC1101_DIAG_SCLK_GPIO GPIO_NUM_12
-#define CC1101_DIAG_MOSI_GPIO GPIO_NUM_11
-#define CC1101_DIAG_MISO_GPIO GPIO_NUM_13
-#define CC1101_DIAG_CS_GPIO   GPIO_NUM_14
+#define CC1101_DIAG_MOSI_GPIO GPIO_NUM_9
+#define CC1101_DIAG_MISO_GPIO GPIO_NUM_11
+#define CC1101_DIAG_CS_GPIO   GPIO_NUM_10
 
 static void cc1101_standalone_diagnostic(void)
 {
