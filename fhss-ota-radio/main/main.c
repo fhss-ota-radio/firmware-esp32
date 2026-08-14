@@ -37,7 +37,11 @@ static void cc1101_standalone_diagnostic(void)
         .miso_gpio = CC1101_DIAG_MISO_GPIO,
         .cs_gpio = CC1101_DIAG_CS_GPIO,
         .gdo0_gpio = GPIO_NUM_NC,
-        .spi_clock_hz = 1000000,
+        /* 재확인(2026-08-14): 1MHz에서는 GPIO9~12 인접 배선 간 크로스토크로
+         * 통신이 계속 실패했고, 10kHz로 낮추니 정상 동작 확인됨(원인/진단
+         * 과정은 로컬 troubleshoot/cc1101_spi_1mhz_crosstalk_readback_fail.md
+         * 참고, git 비추적). 안전한 최대 클럭값은 아직 미탐색 — 다음 과제. */
+        .spi_clock_hz = 10000,
         /* 칩 식별/read-back에는 GDO0가 필요하지 않아 ISR 영향을 배제한다. */
         .enable_gdo0_interrupt = false,
     };
