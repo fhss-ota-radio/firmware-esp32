@@ -147,52 +147,91 @@ sequenceDiagram
 
 ## 5. 상태 다이어그램
 
-`fsm.c`에 실제 구현된 최상위 상태만 평면으로 그린 뷰. FHSS 홉 추종 병행 프로세스는 상태가 아니므로 여기 나타나지 않는다 (§1.1 참고).
+아래 그림은 현재 `main/fsm.c`의 `s_transitions[]`, 전역 이벤트 처리,
+`fsm_ota_event_callback()`을 기준으로 한 **실제 구현 상태도**다. FHSS 내부의
+`SEARCHING`/`TRACKING`과 radio mode는 제품 FSM과 별도 계층이므로 나타내지
+않는다(§1.1 참고).
 
 ```mermaid
 stateDiagram-v2
     [*] --> BOOT_INIT
-    BOOT_INIT --> MENU_COMM : EV_INIT_DONE
+    BOOT_INIT --> MENU_COMM : FSM_EVENT_INIT_DONE
 
-    MENU_COMM --> TX_AUDIO : EV_PTT_PRESS
-    MENU_COMM --> RX_AUDIO : EV_RX_FRAME
-    MENU_COMM --> MENU_IDLE : EV_MENU_SELECT_IDLE
-    MENU_COMM --> MENU_OTA : EV_MENU_SELECT_OTA
+    MENU_COMM --> TX_AUDIO : FSM_EVENT_PTT_PRESS
+    MENU_COMM --> RX_AUDIO : FSM_EVENT_RX_FRAME
+    MENU_COMM --> MENU_IDLE : FSM_EVENT_MENU_SELECT_IDLE
+    MENU_COMM --> MENU_OTA : FSM_EVENT_MENU_SELECT_OTA
 
-    MENU_IDLE --> MENU_COMM : EV_MENU_SELECT_COMM
-    MENU_IDLE --> MENU_OTA : EV_MENU_SELECT_OTA
+    MENU_IDLE --> MENU_COMM : FSM_EVENT_MENU_SELECT_COMM
+    MENU_IDLE --> MENU_OTA : FSM_EVENT_MENU_SELECT_OTA
 
-    MENU_OTA --> MENU_COMM : EV_MENU_SELECT_COMM
-    MENU_OTA --> MENU_IDLE : EV_MENU_SELECT_IDLE
-    MENU_OTA --> OTA_RECEIVING : EV_OTA_START
+    MENU_OTA --> MENU_COMM : FSM_EVENT_MENU_SELECT_COMM
+    MENU_OTA --> MENU_IDLE : FSM_EVENT_MENU_SELECT_IDLE
+    MENU_OTA --> OTA_RECEIVING : OTA_CLIENT_EVENT_STARTED<br/>→ FSM_EVENT_OTA_START
 
-    TX_AUDIO --> MENU_COMM : EV_PTT_RELEASE
-    RX_AUDIO --> MENU_COMM : EV_RX_DONE
+    TX_AUDIO --> MENU_COMM : FSM_EVENT_PTT_RELEASE
+    RX_AUDIO --> MENU_COMM : FSM_EVENT_RX_DONE
 
-    OTA_RECEIVING --> OTA_RECEIVING : EV_OTA_CHUNK
-    OTA_RECEIVING --> OTA_APPLYING : EV_OTA_COMPLETE
+    OTA_RECEIVING --> OTA_RECEIVING : FSM_EVENT_OTA_CHUNK<br/>(현재 producer 없음)
+    OTA_RECEIVING --> OTA_APPLYING : OTA_CLIENT_EVENT_APPLYING<br/>→ FSM_EVENT_OTA_COMPLETE
 
-    OTA_APPLYING --> BOOT_INIT : EV_OTA_VERIFY_OK
-    OTA_APPLYING --> MENU_OTA : EV_OTA_VERIFY_FAIL
+    OTA_APPLYING --> BOOT_INIT : OTA_CLIENT_EVENT_COMPLETED<br/>→ FSM_EVENT_OTA_VERIFY_OK
+    OTA_APPLYING --> MENU_OTA : OTA_CLIENT_EVENT_FAILED<br/>→ FSM_EVENT_OTA_VERIFY_FAIL
 
-    ERROR --> BOOT_INIT : EV_RETRY
+    ERROR --> BOOT_INIT : FSM_EVENT_RETRY
 
-    BOOT_INIT --> ERROR : EV_ERROR
-    MENU_COMM --> ERROR : EV_ERROR
-    MENU_IDLE --> ERROR : EV_ERROR
-    MENU_OTA --> ERROR : EV_ERROR
-    TX_AUDIO --> ERROR : EV_ERROR
-    RX_AUDIO --> ERROR : EV_ERROR
-    OTA_RECEIVING --> ERROR : EV_ERROR
-    OTA_APPLYING --> ERROR : EV_ERROR
+    BOOT_INIT --> ERROR : FSM_EVENT_ERROR
+    MENU_COMM --> ERROR : FSM_EVENT_ERROR
+    MENU_IDLE --> ERROR : FSM_EVENT_ERROR
+    MENU_OTA --> ERROR : FSM_EVENT_ERROR
+    TX_AUDIO --> ERROR : FSM_EVENT_ERROR
+    RX_AUDIO --> ERROR : FSM_EVENT_ERROR
+    OTA_RECEIVING --> ERROR : FSM_EVENT_ERROR
+    OTA_APPLYING --> ERROR : FSM_EVENT_ERROR
 
-    MENU_IDLE --> MENU_COMM : EV_SYNC_LOST
-    MENU_OTA --> MENU_COMM : EV_SYNC_LOST
-    TX_AUDIO --> MENU_COMM : EV_SYNC_LOST
-    RX_AUDIO --> MENU_COMM : EV_SYNC_LOST
-    OTA_RECEIVING --> MENU_COMM : EV_SYNC_LOST
-    OTA_APPLYING --> MENU_COMM : EV_SYNC_LOST
+    MENU_IDLE --> MENU_COMM : FSM_EVENT_SYNC_LOST
+    MENU_OTA --> MENU_COMM : FSM_EVENT_SYNC_LOST
+    TX_AUDIO --> MENU_COMM : FSM_EVENT_SYNC_LOST
+    RX_AUDIO --> MENU_COMM : FSM_EVENT_SYNC_LOST
+    OTA_RECEIVING --> MENU_COMM : FSM_EVENT_SYNC_LOST
+    OTA_APPLYING --> MENU_COMM : FSM_EVENT_SYNC_LOST
+
+    note right of MENU_OTA
+      DISCOVER는 상태 전이 없음
+      fsm_ota_mode_callback()은
+      이 상태에서만 true
+    end note
+
+    note right of OTA_RECEIVING
+      OTA_CLIENT_EVENT_PROGRESS는
+      진행률 로그만 출력하며
+      FSM 이벤트를 post하지 않음
+    end note
+
+    note left of BOOT_INIT
+      최초 부팅의 INIT_DONE은
+      app_main()이 한 번만 post
+    end note
 ```
+
+현재 구현을 해석할 때 다음 제약을 함께 봐야 한다.
+
+- `ota_client`의 FSM adapter는 구현됐지만 제품 `BOOT_INIT`에서
+  `ota_client_init()`/`ota_client_start_consumer()`를 호출하지 않으므로 OTA
+  전이는 아직 제품 실행 중 발생하지 않는다.
+- `OTA_CLIENT_EVENT_PROGRESS`는 진행률만 로그로 남긴다. 전이표에
+  `FSM_EVENT_OTA_CHUNK` self-loop가 있지만 현재 이 이벤트를 post하는 코드는
+  없다.
+- `OTA_CLIENT_EVENT_ABORTED`도 경고 로그만 출력하며 상태 전이는 만들지 않는다.
+- `OTA_CLIENT_EVENT_FAILED`는 현재 상태가 `OTA_APPLYING`이면
+  `FSM_EVENT_OTA_VERIFY_FAIL`로 `MENU_OTA`에 복귀하고, 그 외 상태에서는
+  `FSM_EVENT_ERROR`로 `ERROR`에 진입한다.
+- `OTA_VERIFY_OK → BOOT_INIT`과 `ERROR → RETRY → BOOT_INIT` 이후에는
+  `FSM_EVENT_INIT_DONE`을 다시 post하는 코드가 없다. 현재 코드 그대로면 재진입
+  후 `BOOT_INIT`에 머문다. OTA 성공 경로를 `END ACK 송신 완료 → esp_restart()`로
+  끝낼지, BOOT_INIT 재진입 시 초기화 완료 이벤트를 다시 발생시킬지 결정해야 한다.
+- 성공 시 `esp_restart()`, 새 앱 valid 확정, rollback은 아직 이 FSM에 연결되지
+  않았다.
 
 ## 6. 구현 매핑
 
