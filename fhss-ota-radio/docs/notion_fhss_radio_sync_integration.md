@@ -71,8 +71,8 @@ rx_timestamp_us 저장
 | MOSI | GPIO11 |
 | MISO | GPIO13 |
 | CS | GPIO14 |
-| GDO0 | GPIO9 |
-| GDO2 | GPIO10 (미사용, 향후 확장용) |
+| GDO0 | GPIO10 |
+| GDO2 | GPIO9 (미사용, 향후 확장용) |
 | GND | GND |
 
 두 보드 모두 같은 방식으로 연결해야 한다.
@@ -235,7 +235,7 @@ TRACKING slot=8 channel=20
 
 확인 순서:
 
-1. CC1101 GDO0와 ESP32 GPIO9 연결 확인
+1. CC1101 GDO0와 ESP32 GPIO10 연결 확인
 2. GND 공통 연결 확인
 3. `IOCFG0=0x06` 설정 확인
 4. 채널 변경 후 `rf_transport_start_receive()`가 호출되는지 확인

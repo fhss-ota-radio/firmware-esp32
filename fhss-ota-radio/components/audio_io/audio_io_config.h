@@ -30,10 +30,10 @@
  * 수동 소자(앰프)라 문제없음. */
 #define AUDIO_IO_SPK_I2S_PORT  I2S_NUM_1
 #define AUDIO_IO_SPK_BCLK_GPIO GPIO_NUM_3  /* SCK */
-#define AUDIO_IO_SPK_WS_GPIO   GPIO_NUM_46 /* WS / LRC */
-#define AUDIO_IO_SPK_DOUT_GPIO GPIO_NUM_8  /* ESP 출력 -> MAX98357A DIN */
-#define AUDIO_IO_SPK_GAIN_GPIO GPIO_NUM_18
-#define AUDIO_IO_SPK_SD_GPIO   GPIO_NUM_17
+#define AUDIO_IO_SPK_WS_GPIO   GPIO_NUM_8 /* WS / LRC */
+#define AUDIO_IO_SPK_DOUT_GPIO GPIO_NUM_46  /* ESP 출력 -> MAX98357A DIN */
+#define AUDIO_IO_SPK_GAIN_GPIO GPIO_NUM_17
+#define AUDIO_IO_SPK_SD_GPIO   GPIO_NUM_18
 
 /* PTT 눌렀을 때 "말하기 시작" 알림 삐빅 소리. 볼륨은 GAIN(6dB, 위 참고)에
  * 더해 여기 진폭도 작게(풀스케일 32767의 약 1.5%) 잡아서 이중으로 낮춤 —

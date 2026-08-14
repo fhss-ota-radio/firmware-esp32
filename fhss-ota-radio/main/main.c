@@ -1,11 +1,66 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
+#include "esp_err.h"
 #include "esp_log.h"
+#include "driver/gpio.h"
+#include "driver/spi_master.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "fsm.h"
+#include "rf_transport.h"
+
+/* TEMP(CC1101 단독 진단): 통합 초기화에서 OLED/I2C, 오디오, FSM이 함께
+ * 시작되는 영향을 배제하고 과거 smoke test와 같은 최소 SPI 경로만 실행한다.
+ * CC1101 통신 원인이 확인되면 0으로 바꿔 기존 app_main 경로를 복원한다. */
+#define CC1101_STANDALONE_DIAGNOSTIC 1
+
+#if CC1101_STANDALONE_DIAGNOSTIC
+#define CC1101_DIAG_SCLK_GPIO GPIO_NUM_12
+#define CC1101_DIAG_MOSI_GPIO GPIO_NUM_11
+#define CC1101_DIAG_MISO_GPIO GPIO_NUM_13
+#define CC1101_DIAG_CS_GPIO   GPIO_NUM_14
+
+static void cc1101_standalone_diagnostic(void)
+{
+    static rf_transport_t transport;
+    const rf_transport_config_t config = {
+        .spi_host = SPI2_HOST,
+        .sclk_gpio = CC1101_DIAG_SCLK_GPIO,
+        .mosi_gpio = CC1101_DIAG_MOSI_GPIO,
+        .miso_gpio = CC1101_DIAG_MISO_GPIO,
+        .cs_gpio = CC1101_DIAG_CS_GPIO,
+        .gdo0_gpio = GPIO_NUM_NC,
+        .spi_clock_hz = 1000000,
+        /* 칩 식별/read-back에는 GDO0가 필요하지 않아 ISR 영향을 배제한다. */
+        .enable_gdo0_interrupt = false,
+    };
+
+    ESP_LOGW("cc1101_diag",
+             "CC1101 mode: SCLK=%d MOSI=%d MISO=%d CS=%d; FSM/OLED/audio skipped",
+             config.sclk_gpio, config.mosi_gpio,
+             config.miso_gpio, config.cs_gpio);
+
+    rf_transport_status_t status = rf_transport_init(&transport, &config);
+    ESP_LOGI("cc1101_diag", "init status=%d", status);
+    if (status != RF_TRANSPORT_STATUS_OK) {
+        return;
+    }
+
+    rf_transport_chip_info_t info = {0};
+    status = rf_transport_read_chip_info(&transport, &info);
+    ESP_LOGI("cc1101_diag",
+             "pre-config status=%d PARTNUM=0x%02X VERSION=0x%02X MISO_LEVEL=%d",
+             status, info.partnum, info.version,
+             gpio_get_level(CC1101_DIAG_MISO_GPIO));
+
+    status = rf_transport_configure_433mhz(&transport);
+    ESP_LOGI("cc1101_diag", "configure/read-back status=%d MISO_LEVEL=%d",
+             status, gpio_get_level(CC1101_DIAG_MISO_GPIO));
+}
+#endif
 
 /*
  * TEMP(진단용, 원인 확인 끝나면 이 블록 전부 제거): task_wdt가 "IDLE1이 5초
@@ -54,6 +109,12 @@ static void task_stats_task(void *arg)
 
 void app_main(void)
 {
+#if CC1101_STANDALONE_DIAGNOSTIC
+    cc1101_standalone_diagnostic();
+    /* 진단 중에는 기존 FSM을 시작하지 않는다. 다른 장치 초기화 로그가 섞이면
+     * CC1101 단독 결과를 판별할 수 없기 때문이다. */
+    return;
+#else
     fsm_init();
 
 #if defined(TASK_STATS_LOG_ENABLE) && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
@@ -66,4 +127,5 @@ void app_main(void)
 
     /* TODO: 실제 주변장치 초기화(I2S/OLED/SPI/GPIO)가 끝난 뒤 아래 이벤트를 발생시킨다. */
     fsm_post_event(FSM_EVENT_INIT_DONE);
+#endif
 }

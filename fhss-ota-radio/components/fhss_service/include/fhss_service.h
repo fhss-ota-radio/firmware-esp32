@@ -25,6 +25,12 @@ typedef void (*fhss_service_event_callback_t)(
     void *context
 );
 
+typedef void (*fhss_service_data_callback_t)(
+    const uint8_t *data,
+    size_t length,
+    void *context
+);
+
 typedef struct {
     fhss_service_role_t role;
     rf_transport_config_t radio;
@@ -39,6 +45,7 @@ typedef struct {
     uint32_t loss_count;
     uint32_t diagnostics_interval_ms;
     fhss_service_event_callback_t event_callback;
+    fhss_service_data_callback_t data_callback;
     void *event_context;
 } fhss_service_config_t;
 
@@ -49,8 +56,10 @@ typedef struct {
     fhss_fsm_t fsm;
     fhss_diagnostics_t diagnostics;
     void *diagnostics_mutex;
+    void *tx_queue;
     void *task_handle;
     uint8_t current_channel;
+    volatile bool tx_in_flight;
     bool initialized;
 } fhss_service_t;
 
@@ -60,6 +69,19 @@ bool fhss_service_init(
 );
 
 bool fhss_service_start(fhss_service_t *service);
+bool fhss_service_set_role(
+    fhss_service_t *service,
+    fhss_service_role_t role
+);
+bool fhss_service_send_data(
+    fhss_service_t *service,
+    const uint8_t *data,
+    size_t length
+);
+bool fhss_service_wait_tx_idle(
+    fhss_service_t *service,
+    uint32_t timeout_ms
+);
 fhss_fsm_state_t fhss_service_get_state(const fhss_service_t *service);
 bool fhss_service_get_diagnostics(
     fhss_service_t *service,

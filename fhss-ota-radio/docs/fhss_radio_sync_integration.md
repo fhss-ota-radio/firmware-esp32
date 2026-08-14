@@ -21,8 +21,8 @@ CC1101 GDO0 인터럽트의 수신 시각과 SYNC 패킷의 슬롯 번호를 결
 | MOSI | GPIO11 |
 | MISO | GPIO13 |
 | CS | GPIO14 |
-| GDO0 | GPIO9 |
-| GDO2 | GPIO10 (미사용, 향후 확장용) |
+| GDO0 | GPIO10 |
+| GDO2 | GPIO9 (미사용, 향후 확장용) |
 | GND | GND |
 
 GDO0는 CC1101 `IOCFG0=0x06` 설정을 사용한다. sync word가 송신 또는 검출될 때 상승하고 패킷 종료 시 하강한다. 상승 에지에서 `esp_timer_get_time()`을 기록한다.

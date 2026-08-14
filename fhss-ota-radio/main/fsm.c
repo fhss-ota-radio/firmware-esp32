@@ -14,12 +14,18 @@
 #include "device_id.h"
 #include "display_ui.h"
 #include "firmware_version.h"
+#include "fhss_audio_adapter.h"
+#include "fhss_audio_pcm_test.h"
 #include "ota_discover_packet.h"
 #include "ptt_button.h"
 #include "rotary_encoder.h"
 #include "status_led.h"
 
 static const char *TAG = "fsm";
+
+/* 마이크가 없어도 codec -> FHSS -> CC1101 -> codec -> speaker 전체 경로를
+ * 실기기에서 확인하기 위한 임시 모드다. 0이면 기존 마이크 캡처를 사용한다. */
+#define FHSS_AUDIO_PCM_TEST_ENABLED 1
 
 static QueueHandle_t s_event_queue;
 static fsm_state_t s_state = FSM_STATE_BOOT_INIT;
@@ -43,6 +49,24 @@ typedef struct {
 } fsm_rx_audio_frame_t;
 
 static QueueHandle_t s_rx_audio_queue;
+
+/* RF 태스크에서 Speex decode/I2S 재생까지 실행하면 다음 홉 수신이 늦어진다.
+ * 따라서 수신 frame은 팀 FSM이 이미 소유한 오디오 큐로 넘겨 RX 태스크가 재생한다. */
+static bool on_fhss_rx_audio_frame(const uint8_t *frame, size_t length, void *context)
+{
+    (void)context;
+    return fsm_post_rx_audio_frame(frame, length);
+}
+
+/* 정상적인 슬롯 보정은 FHSS 내부에서 처리하고, 완전히 추종을 놓치거나 RF 계층이
+ * 복구 불가능할 때만 팀 FSM의 전역 안전장치 이벤트로 변환한다. */
+static void on_fhss_audio_event(fhss_audio_adapter_event_t event, void *context)
+{
+    (void)context;
+    fsm_post_event(event == FHSS_AUDIO_ADAPTER_EVENT_SYNC_LOST
+        ? FSM_EVENT_SYNC_LOST
+        : FSM_EVENT_ERROR);
+}
 
 /* 상태별 이름/이벤트별 이름: 로그 및 OLED 표시용 */
 static const char *s_state_names[FSM_STATE_COUNT] = {
@@ -127,6 +151,9 @@ static const fsm_transition_t s_transitions[] = {
 
     { FSM_STATE_TX_AUDIO,      FSM_EVENT_PTT_RELEASE,    FSM_STATE_MENU_COMM },
 
+    /* RF packet 하나의 두 Speex frame이 연속 도착해도 두 번째 RX_FRAME이
+     * 현재 RX 태스크를 재시작하지 않고 정상적으로 큐에 누적되게 한다. */
+    { FSM_STATE_RX_AUDIO,      FSM_EVENT_RX_FRAME,       FSM_STATE_RX_AUDIO },
     { FSM_STATE_RX_AUDIO,      FSM_EVENT_RX_DONE,        FSM_STATE_MENU_COMM },
 
     { FSM_STATE_OTA_RECEIVING, FSM_EVENT_OTA_CHUNK,      FSM_STATE_OTA_RECEIVING },
@@ -309,14 +336,23 @@ static TaskHandle_t s_tx_audio_task;
 
 static void tx_audio_task(void *arg)
 {
+#if FHSS_AUDIO_PCM_TEST_ENABLED
+    /* 160-sample PCM을 20 ms cadence로 생성해 실제 codec/RF 경로에 공급한다.
+     * 태스크 수명은 마이크 경로와 동일하게 PTT PRESS~RELEASE로 제한된다. */
+    fhss_audio_pcm_test_run();
+#else
     uint8_t frame[AUDIO_CODEC_MAX_ENCODED_BYTES];
 
     for (;;) {
         int n = audio_io_capture_encode(frame, sizeof(frame));
         if (n > 0) {
-            /* TODO(팀5): frame[0..n)을 rf_transport로 FHSS 채널 송신 */
+            /* 20 ms Speex frame 두 개를 adapter가 RF packet 하나로 묶는다. */
+            if (!fhss_audio_adapter_submit_encoded_frame(frame, (size_t)n)) {
+                ESP_LOGW(TAG, "encoded audio frame dropped: length=%d", n);
+            }
         }
     }
+#endif
 }
 
 /*
@@ -394,7 +430,17 @@ static void on_enter_boot_init(void)
         audio_codec_init();
         audio_io_init();
 
-        /* TODO(팀2): SPI(rf_transport/CC1101) 초기화 — 해당 컴포넌트 생기면 추가 */
+        /* Main이 무선 레지스터/홉 시간을 직접 소유하지 않도록 adapter 경계에서
+         * CC1101/FHSS 서비스를 시작하고 수신 frame 및 전역 오류만 FSM에 전달한다. */
+        const fhss_audio_adapter_config_t fhss_audio_config = {
+            .rx_frame_callback = on_fhss_rx_audio_frame,
+            .event_callback = on_fhss_audio_event,
+            .callback_context = NULL,
+        };
+        if (!fhss_audio_adapter_init(&fhss_audio_config)) {
+            ESP_LOGE(TAG, "FHSS audio adapter initialization failed");
+            fsm_post_event(FSM_EVENT_ERROR);
+        }
 
         s_boot_init_done = true;
     }
@@ -408,6 +454,24 @@ static void on_enter_menu_comm(void)
     if (s_tx_audio_task != NULL) {
         vTaskDelete(s_tx_audio_task);
         s_tx_audio_task = NULL;
+#if FHSS_AUDIO_PCM_TEST_ENABLED
+        fhss_audio_pcm_test_stats_t stats = {0};
+        fhss_audio_pcm_test_get_stats(&stats);
+        ESP_LOGI(TAG,
+                 "PCM TEST STOP generated=%lu encoded=%lu submitted=%lu "
+                 "encode_fail=%lu submit_fail=%lu interval_us[min/max]=%lld/%lld",
+                 (unsigned long)stats.generated_frames,
+                 (unsigned long)stats.encoded_frames,
+                 (unsigned long)stats.submitted_frames,
+                 (unsigned long)stats.encode_failures,
+                 (unsigned long)stats.submit_failures,
+                 (long long)stats.minimum_interval_us,
+                 (long long)stats.maximum_interval_us);
+#endif
+    }
+    /* PTT RELEASE 뒤 남은 frame을 마무리하고 CC1101을 시작 채널 RX로 복귀시킨다. */
+    if (!fhss_audio_adapter_end_tx()) {
+        ESP_LOGW(TAG, "failed to finish FHSS audio TX session cleanly");
     }
     if (s_rx_audio_task != NULL) {
         vTaskDelete(s_rx_audio_task);
@@ -448,6 +512,18 @@ static void on_enter_tx_audio(void)
     audio_io_play_beep();
     audio_io_speaker_disable();
 
+    /* 첫 Speex frame이 RX 역할 서비스로 들어가 유실되지 않도록 캡처 태스크보다
+     * 먼저 CC1101/FHSS 서비스를 TX 세션으로 전환한다. */
+    if (!fhss_audio_adapter_begin_tx()) {
+        ESP_LOGE(TAG, "failed to start FHSS audio TX session");
+        fsm_post_event(FSM_EVENT_ERROR);
+        return;
+    }
+
+#if FHSS_AUDIO_PCM_TEST_ENABLED
+    ESP_LOGW(TAG, "PCM TEST MODE: microphone bypassed; real Speex/FHSS/RF path active");
+#endif
+
     /* 스택 8192 — audio_io_capture_encode() -> audio_codec_encode() ->
      * speex_encode_int()(LPC 분석/코드북 탐색) 호출 체인이 4096으론 빠듯해서
      * 여유 있게 늘림. (실기기에서 겪은 재부팅 크래시의 실제 원인은 이게
@@ -480,6 +556,11 @@ static void on_enter_error(void)
     if (s_tx_audio_task != NULL) {
         vTaskDelete(s_tx_audio_task);
         s_tx_audio_task = NULL;
+    }
+    /* ERROR에서도 RF TX 세션을 반드시 닫아 producer가 멈춘 뒤 큐가 차며
+     * SUBMIT_FAIL이 반복되는 현상을 막고, 상대 수신 가능한 시작 상태로 복귀한다. */
+    if (!fhss_audio_adapter_end_tx()) {
+        ESP_LOGW(TAG, "failed to stop FHSS audio TX while entering ERROR");
     }
     if (s_rx_audio_task != NULL) {
         vTaskDelete(s_rx_audio_task);

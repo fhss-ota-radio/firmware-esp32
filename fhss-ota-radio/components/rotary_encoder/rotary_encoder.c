@@ -62,6 +62,11 @@ static void move_cursor(int delta_detents)
 
 static void rotary_encoder_task(void *arg)
 {
+    /* 100 Hz FreeRTOS tick에서 2 ms는 0 tick이 될 수 있으므로 최소 1 tick을
+     * 보장한다. 그렇지 않으면 입력 polling이 RF/오디오 태스크를 굶긴다. */
+    const TickType_t poll_ticks = pdMS_TO_TICKS(ROTARY_ENCODER_POLL_MS) > 0U
+        ? pdMS_TO_TICKS(ROTARY_ENCODER_POLL_MS)
+        : 1U;
     uint8_t prev_ab = read_ab();
     int accum = 0;
 
@@ -122,7 +127,7 @@ static void rotary_encoder_task(void *arg)
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(ROTARY_ENCODER_POLL_MS));
+        vTaskDelay(poll_ticks);
     }
 }
 

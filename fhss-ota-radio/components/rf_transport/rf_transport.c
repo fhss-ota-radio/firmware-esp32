@@ -4,6 +4,8 @@
 #include <string.h>
 
 #include "esp_err.h"
+#include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -14,6 +16,7 @@
 #define CC1101_READ_BURST         0xC0U
 #define CC1101_READY_TIMEOUT_US   10000LL
 #define CC1101_PACKET_TIMEOUT_US  100000LL
+#define CC1101_RESET_DELAY_US     40U
 
 #define CC1101_WRITE_BURST        0x40U
 #define CC1101_READ_SINGLE        0x80U
@@ -35,6 +38,22 @@
 #define CC1101_MARCSTATE_RX       0x0DU
 #define CC1101_MARCSTATE_MASK     0x1FU
 #define CC1101_FIFO_ERROR_MASK    0x80U
+
+static const char *TAG = "rf_transport";
+
+/* 송신 실패는 상위 계층에서 단순 ERROR로 합쳐지므로, 실제 CC1101 단계와
+ * 상태 레지스터 값은 하드웨어 경계인 이 파일에서 오류가 날 때만 기록한다. */
+static const char *status_name(rf_transport_status_t status)
+{
+    switch (status) {
+    case RF_TRANSPORT_STATUS_OK: return "OK";
+    case RF_TRANSPORT_STATUS_INVALID_ARG: return "INVALID_ARG";
+    case RF_TRANSPORT_STATUS_NOT_INITIALIZED: return "NOT_INITIALIZED";
+    case RF_TRANSPORT_STATUS_SPI_ERROR: return "SPI_ERROR";
+    case RF_TRANSPORT_STATUS_TIMEOUT: return "TIMEOUT";
+    default: return "UNKNOWN";
+    }
+}
 
 typedef struct {
     uint8_t address;
@@ -135,6 +154,54 @@ static rf_transport_status_t command_strobe(
     return spi_transfer(transport, &command, NULL, 1U);
 }
 
+static rf_transport_status_t reset_radio(
+    const rf_transport_t *transport
+)
+{
+    if (transport == NULL || !transport->initialized) {
+        return transport == NULL
+            ? RF_TRANSPORT_STATUS_INVALID_ARG
+            : RF_TRANSPORT_STATUS_NOT_INITIALIZED;
+    }
+
+    /* CC1101 데이터시트의 수동 power-on reset 순서를 그대로 수행한다.
+     * 첫 CS LOW에서 SO가 LOW가 된 것을 확인한 뒤 CS를 다시 HIGH로 올리고
+     * 40 us 기다려야 SPI 상태기가 다음 SRES를 확실히 command로 인식한다. */
+    gpio_set_level(transport->cs_gpio, 1);
+    esp_rom_delay_us(CC1101_RESET_DELAY_US);
+
+    gpio_set_level(transport->cs_gpio, 0);
+    rf_transport_status_t status = wait_until_ready(transport);
+    gpio_set_level(transport->cs_gpio, 1);
+    if (status != RF_TRANSPORT_STATUS_OK) {
+        return status;
+    }
+
+    esp_rom_delay_us(CC1101_RESET_DELAY_US);
+    gpio_set_level(transport->cs_gpio, 0);
+    status = wait_until_ready(transport);
+    if (status != RF_TRANSPORT_STATUS_OK) {
+        gpio_set_level(transport->cs_gpio, 1);
+        return status;
+    }
+
+    const uint8_t command = CC1101_SRES;
+    spi_transaction_t transaction = {
+        .length = 8U,
+        .tx_buffer = &command,
+    };
+    status = spi_device_polling_transmit(
+                 transport->spi_device,
+                 &transaction) == ESP_OK
+        ? RF_TRANSPORT_STATUS_OK
+        : RF_TRANSPORT_STATUS_SPI_ERROR;
+    if (status == RF_TRANSPORT_STATUS_OK) {
+        status = wait_until_ready(transport);
+    }
+    gpio_set_level(transport->cs_gpio, 1);
+    return status;
+}
+
 static rf_transport_status_t write_register(
     const rf_transport_t *transport,
     uint8_t address,
@@ -214,6 +281,29 @@ static rf_transport_status_t read_status_register(
 
     *out_value = rx_data[1];
     return RF_TRANSPORT_STATUS_OK;
+}
+
+static rf_transport_status_t read_config_register(
+    const rf_transport_t *transport,
+    uint8_t address,
+    uint8_t *out_value
+)
+{
+    if (transport == NULL || out_value == NULL) {
+        return RF_TRANSPORT_STATUS_INVALID_ARG;
+    }
+
+    const uint8_t tx_data[2] = {
+        (uint8_t)(CC1101_READ_SINGLE | address),
+        0U,
+    };
+    uint8_t rx_data[2] = {0};
+    const rf_transport_status_t status =
+        spi_transfer(transport, tx_data, rx_data, sizeof(tx_data));
+    if (status == RF_TRANSPORT_STATUS_OK) {
+        *out_value = rx_data[1];
+    }
+    return status;
 }
 
 rf_transport_status_t rf_transport_init(
@@ -403,7 +493,7 @@ rf_transport_status_t rf_transport_configure_433mhz(
         return RF_TRANSPORT_STATUS_NOT_INITIALIZED;
     }
 
-    rf_transport_status_t status = command_strobe(transport, CC1101_SRES);
+    rf_transport_status_t status = reset_radio(transport);
     if (status != RF_TRANSPORT_STATUS_OK) {
         return status;
     }
@@ -418,6 +508,23 @@ rf_transport_status_t rf_transport_configure_433mhz(
             return status;
         }
     }
+
+    /* VERSION 값만으로 정품/호환 CC1101을 판정하지 않는다. IOCFG2는 방금
+     * 0x29를 기록한 설정 레지스터이므로 이를 다시 읽어야 MOSI와 MISO 양쪽이
+     * 실제로 동작했음을 확인할 수 있다. MISO가 LOW에 고정되면 0x00이 읽혀
+     * 여기에서 명확하게 실패한다. */
+    uint8_t iocfg2_readback = 0U;
+    status = read_config_register(transport, 0x00U, &iocfg2_readback);
+    if (status != RF_TRANSPORT_STATUS_OK || iocfg2_readback != 0x29U) {
+        ESP_LOGE(TAG,
+                 "CC1101 register read-back failed: IOCFG2 expected=0x29 actual=0x%02X status=%s(%d)",
+                 iocfg2_readback, status_name(status), status);
+        return status == RF_TRANSPORT_STATUS_OK
+            ? RF_TRANSPORT_STATUS_SPI_ERROR
+            : status;
+    }
+    ESP_LOGI(TAG, "CC1101 register read-back OK: IOCFG2=0x%02X",
+             iocfg2_readback);
 
     /* Minimum output power for the first close-range test (about -30 dBm). */
     const uint8_t pa_table = 0x12U;
@@ -434,6 +541,28 @@ rf_transport_status_t rf_transport_configure_433mhz(
         status = command_strobe(transport, CC1101_SFTX);
     }
     return status;
+}
+
+rf_transport_status_t rf_transport_recover_433mhz(
+    const rf_transport_t *transport
+)
+{
+    if (transport == NULL) {
+        return RF_TRANSPORT_STATUS_INVALID_ARG;
+    }
+    if (!transport->initialized) {
+        return RF_TRANSPORT_STATUS_NOT_INITIALIZED;
+    }
+
+    /* 역할 전환은 다른 core에서 SPI 중인 service task를 종료할 수 있다. 그
+     * 순간 CS가 LOW였다면 다음 strobe가 새 command로 인식되지 않으므로 먼저
+     * CS를 확실히 해제하고 한 tick 뒤 CC1101 설정을 처음부터 다시 적용한다. */
+    gpio_set_level(transport->cs_gpio, 1);
+    vTaskDelay(1U);
+    if (transport->rx_timestamp_queue != NULL) {
+        xQueueReset((QueueHandle_t)transport->rx_timestamp_queue);
+    }
+    return rf_transport_configure_433mhz(transport);
 }
 
 rf_transport_status_t rf_transport_set_channel(
@@ -493,6 +622,8 @@ rf_transport_status_t rf_transport_send_packet(
         status = command_strobe(transport, CC1101_SFTX);
     }
     if (status != RF_TRANSPORT_STATUS_OK) {
+        ESP_LOGE(TAG, "TX prepare failed: status=%s(%d)",
+                 status_name(status), status);
         return status;
     }
 
@@ -502,11 +633,15 @@ rf_transport_status_t rf_transport_send_packet(
 
     status = write_burst(transport, CC1101_FIFO_ADDR, fifo_data, length + 1U);
     if (status != RF_TRANSPORT_STATUS_OK) {
+        ESP_LOGE(TAG, "TX FIFO write failed: status=%s(%d) length=%u",
+                 status_name(status), status, length);
         return status;
     }
 
     status = command_strobe(transport, CC1101_STX);
     if (status != RF_TRANSPORT_STATUS_OK) {
+        ESP_LOGE(TAG, "STX strobe failed: status=%s(%d)",
+                 status_name(status), status);
         return status;
     }
 
@@ -521,17 +656,33 @@ rf_transport_status_t rf_transport_send_packet(
             uint8_t tx_bytes = 0U;
             status = read_status_register(transport, CC1101_TXBYTES_ADDR, &tx_bytes);
             if (status != RF_TRANSPORT_STATUS_OK) {
+                ESP_LOGE(TAG, "TXBYTES read failed: status=%s(%d)",
+                         status_name(status), status);
                 return status;
             }
-            return (tx_bytes & CC1101_FIFO_ERROR_MASK) == 0U
-                ? RF_TRANSPORT_STATUS_OK
-                : RF_TRANSPORT_STATUS_SPI_ERROR;
+            if ((tx_bytes & CC1101_FIFO_ERROR_MASK) != 0U) {
+                ESP_LOGE(TAG, "TX FIFO underflow: MARCSTATE=0x%02X TXBYTES=0x%02X",
+                         marc_state, tx_bytes);
+                return RF_TRANSPORT_STATUS_SPI_ERROR;
+            }
+            return RF_TRANSPORT_STATUS_OK;
         }
         vTaskDelay(1U);
     }
 
-    command_strobe(transport, CC1101_SIDLE);
-    command_strobe(transport, CC1101_SFTX);
+    uint8_t final_marc_state = 0xFFU;
+    uint8_t final_tx_bytes = 0xFFU;
+    const rf_transport_status_t marc_status = read_status_register(
+        transport, CC1101_MARCSTATE_ADDR, &final_marc_state);
+    const rf_transport_status_t bytes_status = read_status_register(
+        transport, CC1101_TXBYTES_ADDR, &final_tx_bytes);
+    ESP_LOGE(TAG,
+             "TX timeout: length=%u MARCSTATE=0x%02X(%s) TXBYTES=0x%02X(%s)",
+             length,
+             final_marc_state, status_name(marc_status),
+             final_tx_bytes, status_name(bytes_status));
+    (void)command_strobe(transport, CC1101_SIDLE);
+    (void)command_strobe(transport, CC1101_SFTX);
     return RF_TRANSPORT_STATUS_TIMEOUT;
 }
 

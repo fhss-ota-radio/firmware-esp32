@@ -28,6 +28,11 @@ static inline bool raw_level_pressed(void)
  */
 static void ptt_button_task(void *arg)
 {
+    /* 100 Hz FreeRTOS tick에서 5 ms는 0 tick이 될 수 있다. 최소 1 tick을
+     * 보장해야 polling 태스크가 CPU를 독점하지 않아 RF/오디오가 실행된다. */
+    const TickType_t poll_ticks = pdMS_TO_TICKS(PTT_BUTTON_POLL_MS) > 0U
+        ? pdMS_TO_TICKS(PTT_BUTTON_POLL_MS)
+        : 1U;
     bool candidate = raw_level_pressed();
     int stable_count = PTT_BUTTON_DEBOUNCE_COUNT;
     s_pressed = candidate;
@@ -52,7 +57,7 @@ static void ptt_button_task(void *arg)
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(PTT_BUTTON_POLL_MS));
+        vTaskDelay(poll_ticks);
     }
 }
 

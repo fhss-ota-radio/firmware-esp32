@@ -96,8 +96,8 @@ SEARCHING + SYNC_LOST
 |---|---|
 | TX 보드 | COM3 |
 | RX 보드 | COM5 |
-| GDO0 연결 | CC1101 GDO0 → ESP32-S3 GPIO9 |
-| GDO2 연결 | GPIO10 확보, 현재 미사용 |
+| GDO0 연결 | CC1101 GDO0 → ESP32-S3 GPIO10 |
+| GDO2 연결 | GPIO9 확보, 현재 미사용 |
 | 슬롯 길이 | 300,000 us |
 | 채널 전환 guard | 5,000 us |
 | 홉 채널 | `CHANNR {0, 10, 20}` |
@@ -168,7 +168,7 @@ SYNC RX: state=TRACKING slot=8 channel=20
 - [ ] SYNCHRONIZING 중 MISS 발생 시 SEARCHING으로 안전하게 복귀하는가?
 - [ ] ACQUIRED가 FHSS 내부에만 머물러 `fsm-design.md` 정책과 일치하는가?
 - [ ] 고정 역할 테스트가 제품 `main`과 완전히 분리됐는가?
-- [ ] GPIO9가 다른 실제 보드 기능과 충돌하지 않는가?
+- [ ] GPIO10이 다른 실제 보드 기능과 충돌하지 않는가?
 
 ## 영향 범위와 의존성
 

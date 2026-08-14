@@ -101,6 +101,12 @@ rf_transport_status_t rf_transport_configure_433mhz(
     const rf_transport_t *transport
 );
 
+/* Recovers the SPI framing after a service task is stopped during an RF
+ * operation, then resets and reapplies the 433 MHz CC1101 configuration. */
+rf_transport_status_t rf_transport_recover_433mhz(
+    const rf_transport_t *transport
+);
+
 /* Selects a CC1101 CHANNR value. The radio is returned to IDLE first. */
 rf_transport_status_t rf_transport_set_channel(
     const rf_transport_t *transport,
