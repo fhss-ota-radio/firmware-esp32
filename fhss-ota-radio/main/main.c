@@ -15,7 +15,7 @@
 /* TEMP(CC1101 단독 진단): 통합 초기화에서 OLED/I2C, 오디오, FSM이 함께
  * 시작되는 영향을 배제하고 과거 smoke test와 같은 최소 SPI 경로만 실행한다.
  * CC1101 통신 원인이 확인되면 0으로 바꿔 기존 app_main 경로를 복원한다. */
-#define CC1101_STANDALONE_DIAGNOSTIC 1
+#define CC1101_STANDALONE_DIAGNOSTIC 0
 
 #if CC1101_STANDALONE_DIAGNOSTIC
 /* 재배선(2026-08-14): 앰프와의 간섭으로 CC1101도 이동. 특히 GPIO14는 기존

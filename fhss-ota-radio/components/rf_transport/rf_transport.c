@@ -587,6 +587,14 @@ rf_transport_status_t rf_transport_set_channel(
     if (status == RF_TRANSPORT_STATUS_OK) {
         status = command_strobe(transport, CC1101_SFTX);
     }
+    if (status == RF_TRANSPORT_STATUS_OK &&
+        transport->rx_timestamp_queue != NULL) {
+        /* A slot may contain SYNC followed by audio packets. Discard the
+         * previous channel's last GDO0 edge together with its flushed RX FIFO;
+         * otherwise that stale timestamp can be paired with the next slot's
+         * SYNC packet and appear almost one slot early. */
+        xQueueReset((QueueHandle_t)transport->rx_timestamp_queue);
+    }
     return status;
 }
 

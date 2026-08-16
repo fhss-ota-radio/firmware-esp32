@@ -26,6 +26,12 @@
  * 어디서도 안 읽음, rf_transport_config_t에 필드조차 없음). */
 #define CC1101_GDO0_GPIO GPIO_NUM_13
 
+/* Integration test note (2026-08-15): this board reads CC1101 registers
+ * correctly at 10 kHz but returns 0x00 at the previous 1 MHz setting.
+ * Start at 100 kHz to retain useful audio throughput while determining the
+ * highest reliable SPI clock for the current GPIO9~13 wiring. */
+#define CC1101_SPI_CLOCK_HZ 100000
+
 #define FHSS_AUDIO_TX_DRAIN_TIMEOUT_MS 600U
 
 static const char *TAG = "fhss_audio_adapter";
@@ -184,7 +190,7 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
             .miso_gpio = CC1101_MISO_GPIO,
             .cs_gpio = CC1101_CS_GPIO,
             .gdo0_gpio = CC1101_GDO0_GPIO,
-            .spi_clock_hz = 1000000,
+            .spi_clock_hz = CC1101_SPI_CLOCK_HZ,
             .enable_gdo0_interrupt = true,
         },
         .channels = s_hop_channels,
