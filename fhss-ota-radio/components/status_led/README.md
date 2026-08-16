@@ -32,7 +32,7 @@ status_led_stop_error_blink();  // 점멸 멈추고 끄기
 
 ## 연결 현황
 
-- `main/fsm.c`의 `on_ptt_event()` → PTT 눌림/뗌에 흰색 고정 점등/꺼짐(FSM 처리 결과 안 기다리고 원시 입력 그대로 반영)
+- `main/fsm.c`의 `on_ptt_event()` → 실제로 수음(마이크 캡처)으로 이어지는 PTT일 때만 흰색 켬(2026-08-16 수정, 이전엔 상태 무관하게 원시 입력을 그대로 반영해 MENU_OTA 등 캡처 없는 상태에서도 켜지는 문제가 있었음): `MENU_COMM`에서 누르면 켜짐(전이표상 `TX_AUDIO`로 이어짐), `LOOPBACK_ENABLE` 켜져있으면 `MENU_IDLE`의 마이크 loopback 녹음 중에도 켜짐. 뗄 때는 상태 무관하게 항상 꺼서 `EV_ERROR`/`EV_SYNC_LOST` 등으로 도중에 상태가 바뀌어도 켜진 채로 안 남게 함
 - `main/fsm.c`의 `on_enter_error()` → `EV_ERROR`로 `ERROR` 상태 진입 시 빨간 점멸 시작, `EV_RETRY`로 빠져나갈 때(`on_enter_boot_init()`) 정지
 
 ## 제약 / TODO
