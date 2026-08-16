@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <inttypes.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -473,8 +474,23 @@ static void on_enter_rx_audio(void)
     audio_io_speaker_enable();
     xTaskCreate(rx_audio_task, "rx_audio", 8192, NULL, tskIDLE_PRIORITY + 3, &s_rx_audio_task);
 }
-static void on_enter_ota_receiving(void) { /* TODO(팀2): OTA 수신 버퍼 초기화, 음성 태스크 일시 중단 */ }
-static void on_enter_ota_applying(void)  { /* TODO(팀2): 이미지 검증 및 OTA 파티션 기록 */ }
+/* OTA_START 수신(OTA_CLIENT_EVENT_STARTED -> FSM_EVENT_OTA_START)으로 여기
+ * 진입하는 순간 STANDBY 스크롤 문구를 진행 표시로 바꾼다. 이 시점엔 아직
+ * 첫 청크가 안 왔으니 0%로 시작 — 실제 값 갱신은 fsm_ota_event_callback()의
+ * OTA_CLIENT_EVENT_PROGRESS 케이스에서. */
+static void on_enter_ota_receiving(void)
+{
+    display_ui_set_status_scroll("RX 0%");
+    /* TODO(팀2): OTA 수신 버퍼 초기화, 음성 태스크 일시 중단 */
+}
+
+/* OTA_COMPLETE(모든 청크 수신 완료)로 여기 진입 — 실제 이미지 검증/파티션
+ * 기록은 팀2 TODO로 남겨두고, 지금은 진행 중임을 영어로 표시만 한다. */
+static void on_enter_ota_applying(void)
+{
+    display_ui_set_status_scroll("APPLY PENDING");
+    /* TODO(팀2): 이미지 검증 및 OTA 파티션 기록 */
+}
 /*
  * EV_ERROR는 전역 전이라(fsm_task() 참고) 어느 상태에서든 여기로 곧장 올 수
  * 있다 — TX_AUDIO/RX_AUDIO 도중이었을 수도 있어서, on_enter_menu_comm()과
@@ -633,9 +649,17 @@ void fsm_ota_event_callback(
         case OTA_CLIENT_EVENT_STARTED:
             fsm_post_event(FSM_EVENT_OTA_START);
             break;
-        case OTA_CLIENT_EVENT_PROGRESS:
+        case OTA_CLIENT_EVENT_PROGRESS: {
             ESP_LOGI(TAG, "OTA progress: %" PRIu32 "%%", progress_percent);
+            /* 실제 청크 개수(n/N)를 표시하려면 ota_client가 progress_percent
+             * 말고 총/수신 청크 수도 넘겨줘야 하는데, 지금 콜백 시그니처엔
+             * 없어서(팀2 컴포넌트라 임의로 API를 안 늘림) percent로만 표시.
+             * 화면 폭 제약도 없어서 진행바 대신 텍스트로 충분(사용자 확인). */
+            char status_buf[16];
+            snprintf(status_buf, sizeof(status_buf), "RX %" PRIu32 "%%", progress_percent);
+            display_ui_set_status_scroll(status_buf);
             break;
+        }
         case OTA_CLIENT_EVENT_APPLYING:
             fsm_post_event(FSM_EVENT_OTA_COMPLETE);
             break;
@@ -645,6 +669,17 @@ void fsm_ota_event_callback(
         case OTA_CLIENT_EVENT_FAILED:
             ESP_LOGE(TAG, "OTA failed: %s", esp_err_to_name(error));
             if (fsm_get_state() == FSM_STATE_OTA_APPLYING) {
+                /* MENU_OTA로 조용히 돌아가기 전에 실패했다는 걸 3초간
+                 * 보여준다. FSM_EVENT_OTA_VERIFY_FAIL을 먼저 올려버리면
+                 * on_enter_menu_ota()가 곧바로 STANDBY로 덮어써서 실패
+                 * 사실이 화면에 전혀 안 남으므로, 메시지를 다 보여준 뒤에
+                 * 이벤트를 올리는 순서로 함. 여기서 블로킹되는 건 이
+                 * 콜백을 부른 ota_client 컨슈머 태스크지 fsm_task가
+                 * 아니라서(다른 이벤트 처리와는 무관), 3초 정도는
+                 * 문제없다고 판단(on_enter_tx_audio()의 삐빅음 블로킹과
+                 * 같은 이유로 "메시지 다 보여준 뒤 다음 전이"를 보장). */
+                display_ui_set_status_scroll("OTA FAILED");
+                vTaskDelay(pdMS_TO_TICKS(3000));
                 fsm_post_event(FSM_EVENT_OTA_VERIFY_FAIL);
             } else {
                 fsm_post_event(FSM_EVENT_ERROR);
