@@ -410,22 +410,51 @@ static void stop_tx_audio_task(void)
  * 타임아웃이 의미를 가진다.
  */
 static TaskHandle_t s_rx_audio_task;
+/* I2S write 또는 queue wait 도중 RX 태스크를 외부에서 강제 삭제하지 않는다.
+ * 정상 timeout이 아닌 상태 전이에서 stop_rx_audio_task()가 이 플래그를 세우면
+ * RX 태스크가 현재 작업을 마친 뒤 speaker channel까지 직접 정리한다. */
+static volatile bool s_rx_audio_should_stop;
 
 static void rx_audio_task(void *arg)
 {
     fsm_rx_audio_frame_t frame;
 
-    for (;;) {
+    bool timed_out = false;
+
+    while (!s_rx_audio_should_stop) {
         if (xQueueReceive(s_rx_audio_queue, &frame, pdMS_TO_TICKS(FSM_RX_AUDIO_IDLE_TIMEOUT_MS)) == pdTRUE) {
             audio_io_decode_play(frame.data, frame.len);
         } else {
+            timed_out = true;
             break;
         }
     }
 
+    /* speaker를 enable한 RX 태스크가 disable까지 책임진다. 핸들을 먼저 NULL로
+     * 만들면 MENU_COMM 진입 코드가 정리를 건너뛰어 다음 RX에서 이미 실행 중인
+     * I2S channel을 다시 enable하는 ESP_ERR_INVALID_STATE가 발생한다. */
+    audio_io_speaker_disable();
     s_rx_audio_task = NULL;
-    fsm_post_event(FSM_EVENT_RX_DONE);
+    if (timed_out && !s_rx_audio_should_stop) {
+        fsm_post_event(FSM_EVENT_RX_DONE);
+    }
     vTaskDelete(NULL);
+}
+
+/* SYNC_LOST/ERROR처럼 RX_AUDIO를 외부 이벤트로 벗어날 때도 I2S write 중인
+ * 태스크를 vTaskDelete()로 끊지 않는다. 최대 queue timeout(1초) 뒤 태스크가
+ * speaker를 정상 disable하고 스스로 종료할 때까지 기다린다. */
+static void stop_rx_audio_task(void)
+{
+    if (s_rx_audio_task == NULL) {
+        return;
+    }
+
+    s_rx_audio_should_stop = true;
+    while (s_rx_audio_task != NULL) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    s_rx_audio_should_stop = false;
 }
 
 /* BOOT_INIT은 최초 부팅뿐 아니라 ERROR 상태의 EV_RETRY로도 재진입한다
@@ -509,11 +538,7 @@ static void on_enter_menu_comm(void)
     if (!fhss_audio_adapter_end_tx()) {
         ESP_LOGW(TAG, "failed to finish FHSS audio TX session cleanly");
     }
-    if (s_rx_audio_task != NULL) {
-        vTaskDelete(s_rx_audio_task);
-        s_rx_audio_task = NULL;
-        audio_io_speaker_disable();
-    }
+    stop_rx_audio_task();
     display_ui_draw_menu(DISPLAY_UI_MENU_COMM, menu_item_from_rotary(rotary_encoder_get_cursor()));
     display_ui_set_status_scroll("HOLD PTT TO SPEAK");
 }
@@ -573,7 +598,13 @@ static void on_enter_rx_audio(void)
 
     /* audio_codec_decode()도 같은 호출 체인 무게라 tx와 동일하게 8192로. */
     audio_io_speaker_enable();
-    xTaskCreate(rx_audio_task, "rx_audio", 8192, NULL, tskIDLE_PRIORITY + 3, &s_rx_audio_task);
+    if (xTaskCreate(rx_audio_task, "rx_audio", 8192, NULL,
+                    tskIDLE_PRIORITY + 3, &s_rx_audio_task) != pdPASS) {
+        audio_io_speaker_disable();
+        s_rx_audio_task = NULL;
+        ESP_LOGE(TAG, "failed to create RX audio task");
+        fsm_post_event(FSM_EVENT_ERROR);
+    }
 }
 static void on_enter_ota_receiving(void) { /* TODO(팀2): OTA 수신 버퍼 초기화, 음성 태스크 일시 중단 */ }
 static void on_enter_ota_applying(void)  { /* TODO(팀2): 이미지 검증 및 OTA 파티션 기록 */ }
@@ -595,11 +626,7 @@ static void on_enter_error(void)
     if (!fhss_audio_adapter_end_tx()) {
         ESP_LOGW(TAG, "failed to stop FHSS audio TX while entering ERROR");
     }
-    if (s_rx_audio_task != NULL) {
-        vTaskDelete(s_rx_audio_task);
-        s_rx_audio_task = NULL;
-        audio_io_speaker_disable();
-    }
+    stop_rx_audio_task();
 
     status_led_start_error_blink();
     display_ui_set_status("ERROR");
