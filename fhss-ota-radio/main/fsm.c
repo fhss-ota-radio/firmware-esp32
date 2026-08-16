@@ -669,6 +669,17 @@ void fsm_ota_event_callback(
         case OTA_CLIENT_EVENT_FAILED:
             ESP_LOGE(TAG, "OTA failed: %s", esp_err_to_name(error));
             if (fsm_get_state() == FSM_STATE_OTA_APPLYING) {
+                /* MENU_OTA로 조용히 돌아가기 전에 실패했다는 걸 3초간
+                 * 보여준다. FSM_EVENT_OTA_VERIFY_FAIL을 먼저 올려버리면
+                 * on_enter_menu_ota()가 곧바로 STANDBY로 덮어써서 실패
+                 * 사실이 화면에 전혀 안 남으므로, 메시지를 다 보여준 뒤에
+                 * 이벤트를 올리는 순서로 함. 여기서 블로킹되는 건 이
+                 * 콜백을 부른 ota_client 컨슈머 태스크지 fsm_task가
+                 * 아니라서(다른 이벤트 처리와는 무관), 3초 정도는
+                 * 문제없다고 판단(on_enter_tx_audio()의 삐빅음 블로킹과
+                 * 같은 이유로 "메시지 다 보여준 뒤 다음 전이"를 보장). */
+                display_ui_set_status_scroll("OTA FAILED");
+                vTaskDelay(pdMS_TO_TICKS(3000));
                 fsm_post_event(FSM_EVENT_OTA_VERIFY_FAIL);
             } else {
                 fsm_post_event(FSM_EVENT_ERROR);
