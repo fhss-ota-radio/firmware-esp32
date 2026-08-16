@@ -25,7 +25,7 @@ static const char *TAG = "fsm";
 
 /* 마이크가 없어도 codec -> FHSS -> CC1101 -> codec -> speaker 전체 경로를
  * 실기기에서 확인하기 위한 임시 모드다. 0이면 기존 마이크 캡처를 사용한다. */
-#define FHSS_AUDIO_PCM_TEST_ENABLED 1
+#define FHSS_AUDIO_PCM_TEST_ENABLED 0
 
 static QueueHandle_t s_event_queue;
 static fsm_state_t s_state = FSM_STATE_BOOT_INIT;
