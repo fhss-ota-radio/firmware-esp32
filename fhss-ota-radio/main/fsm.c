@@ -421,6 +421,7 @@ static void on_enter_menu_comm(void)
         vTaskDelete(s_rx_audio_task);
         s_rx_audio_task = NULL;
         audio_io_speaker_disable();
+        status_led_off();
     }
     display_ui_draw_menu(DISPLAY_UI_MENU_COMM, menu_item_from_rotary(rotary_encoder_get_cursor()));
     display_ui_set_status_scroll("HOLD PTT TO SPEAK");
@@ -466,6 +467,7 @@ static void on_enter_tx_audio(void)
 static void on_enter_rx_audio(void)
 {
     display_ui_set_status_animated("RX");
+    status_led_set_sky_blue_dim();
 
     /* audio_codec_decode()도 같은 호출 체인 무게라 tx와 동일하게 8192로. */
     audio_io_speaker_enable();

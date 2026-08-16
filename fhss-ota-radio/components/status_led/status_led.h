@@ -12,6 +12,10 @@ void status_led_init(void);
 /* 흰색을 STATUS_LED_DIM_BRIGHTNESS 밝기로 켠다. */
 void status_led_set_white_dim(void);
 
+/* 하늘색을 STATUS_LED_DIM_BRIGHTNESS 밝기로 켠다. RX_AUDIO(수신 재생) 표시용
+ * — PTT의 흰색 고정 점등과 색으로 구분된다(TX=흰색, RX=하늘색). */
+void status_led_set_sky_blue_dim(void);
+
 /* LED를 끈다. */
 void status_led_off(void);
 
