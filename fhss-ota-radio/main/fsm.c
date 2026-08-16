@@ -333,6 +333,9 @@ static void on_menu_cursor(rotary_encoder_menu_t cursor, void *ctx)
  * 뒤에야 다음 이벤트(PTT_RELEASE)를 처리하게 만들어서 이 경쟁 상태를 없앴다.
  */
 static TaskHandle_t s_tx_audio_task;
+/* TEMP였던 vTaskDelete(s_tx_audio_task) 강제 종료를 없애기 위한 협조적
+ * 종료 플래그 — stop_tx_audio_task() 참고. */
+static volatile bool s_tx_audio_should_stop;
 
 static void tx_audio_task(void *arg)
 {
@@ -343,7 +346,7 @@ static void tx_audio_task(void *arg)
 #else
     uint8_t frame[AUDIO_CODEC_MAX_ENCODED_BYTES];
 
-    for (;;) {
+    while (!s_tx_audio_should_stop) {
         int n = audio_io_capture_encode(frame, sizeof(frame));
         if (n > 0) {
             /* 20 ms Speex frame 두 개를 adapter가 RF packet 하나로 묶는다. */
@@ -353,6 +356,40 @@ static void tx_audio_task(void *arg)
         }
     }
 #endif
+
+    s_tx_audio_task = NULL;
+    vTaskDelete(NULL);
+}
+
+/*
+ * PTT_RELEASE/EV_ERROR/EV_SYNC_LOST로 TX_AUDIO를 벗어날 때 이 함수로
+ * s_tx_audio_task를 정리한다. 예전엔 vTaskDelete(s_tx_audio_task)로 그
+ * 자리에서 바로 죽였는데, `#else`(실제 마이크) 경로는 거의 항상
+ * audio_io_capture_encode() -> i2s_channel_read(mic 채널) 안에 블로킹돼
+ * 있어서, 하필 그 순간 강제 종료되면 I2S 드라이버가 그 채널을 "읽는 중"
+ * 상태로 표시해둔 채 못 풀려서 이후 그 채널로의 모든 read가
+ * ESP_ERR_INVALID_STATE(259)로 실패하는 버그가 있었다(마이크 loopback
+ * 테스트에서 "mic read failed (err=259)"로 재현됨 — 스피커/삐빅음 쪽의
+ * 동일 계열 버그를 고쳤던 troubleshoot/on_enter_tx_audio-beep_fix.md와
+ * 같은 원인, 이쪽(캡처 루프 본체)은 그때 안 고쳐져 있었음).
+ * `rx_audio_task`가 이미 쓰고 있는 "태스크가 스스로 끝낸다" 패턴을 여기도
+ * 적용 — 큐 대기(rx_audio_task)와 달리 I2S read는 강제 종료해도 안전한
+ * 자원이 아니라서, 플래그만 세우고 태스크가 다음 루프에서 스스로
+ * vTaskDelete(NULL)하도록 기다린다. 정상 상황(마이크에서 데이터가 계속
+ * 들어옴)이면 다음 20ms 프레임 주기 안에 곧바로 끝나고, 데이터가 전혀 안
+ * 들어와도 i2s_channel_read()의 자체 타임아웃(AUDIO_IO_I2S_TIMEOUT_MS,
+ * 1초)이 상한이라 무한 대기는 아니다.
+ */
+static void stop_tx_audio_task(void)
+{
+    if (s_tx_audio_task == NULL) {
+        return;
+    }
+    s_tx_audio_should_stop = true;
+    while (s_tx_audio_task != NULL) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    s_tx_audio_should_stop = false;
 }
 
 /*
@@ -452,8 +489,7 @@ static void on_enter_boot_init(void)
 static void on_enter_menu_comm(void)
 {
     if (s_tx_audio_task != NULL) {
-        vTaskDelete(s_tx_audio_task);
-        s_tx_audio_task = NULL;
+        stop_tx_audio_task();
 #if FHSS_AUDIO_PCM_TEST_ENABLED
         fhss_audio_pcm_test_stats_t stats = {0};
         fhss_audio_pcm_test_get_stats(&stats);
@@ -553,10 +589,7 @@ static void on_enter_error(void)
 {
     ESP_LOGE(TAG, "entering ERROR state");
 
-    if (s_tx_audio_task != NULL) {
-        vTaskDelete(s_tx_audio_task);
-        s_tx_audio_task = NULL;
-    }
+    stop_tx_audio_task();
     /* ERROR에서도 RF TX 세션을 반드시 닫아 producer가 멈춘 뒤 큐가 차며
      * SUBMIT_FAIL이 반복되는 현상을 막고, 상대 수신 가능한 시작 상태로 복귀한다. */
     if (!fhss_audio_adapter_end_tx()) {
