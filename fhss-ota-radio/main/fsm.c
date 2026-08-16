@@ -208,30 +208,40 @@ static void mic_test_task(void *arg)
 
 static void on_ptt_event(bool pressed, void *ctx)
 {
-    /* status_led는 FSM 처리 결과를 기다리지 않고 PTT 원시 입력을 그대로
-     * 반영한다 — GPIO 디바운스만 통과하면 바로 켜지는 테스트용 표시라,
-     * FSM 전이표가 어떻게 바뀌든(지금은 MENU_COMM에서 TX_AUDIO로 실제 전이됨)
-     * 영향받지 않는다. */
-    if (pressed) {
-        status_led_set_white_dim();
-    } else {
-        status_led_off();
-    }
+    fsm_state_t state = fsm_get_state();
 
 #ifdef LOOPBACK_ENABLE
-    /* TEMP: MENU_IDLE에서는 정식 FSM 이벤트 대신 마이크 loopback 테스트로 라우팅 */
-    if (fsm_get_state() == FSM_STATE_MENU_IDLE) {
+    /* TEMP: MENU_IDLE에서는 정식 FSM 이벤트 대신 마이크 loopback 테스트로 라우팅.
+     * 이것도 실제로 마이크를 캡처하는 "수음"이라 흰색 LED를 그대로 켠다. */
+    if (state == FSM_STATE_MENU_IDLE) {
         if (pressed) {
+            status_led_set_white_dim();
             if (s_mic_test_task == NULL) {
                 s_mic_test_recording = true;
                 xTaskCreate(mic_test_task, "mic_test", 8192, NULL, tskIDLE_PRIORITY + 3, &s_mic_test_task);
             }
         } else {
+            status_led_off();
             s_mic_test_recording = false;
         }
         return;
     }
 #endif /* LOOPBACK_ENABLE */
+
+    /* status_led 흰색은 실제로 수음(TX_AUDIO 캡처)으로 이어지는 PTT일 때만
+     * 켠다 — 전이표상 MENU_COMM에서 누른 PTT만 TX_AUDIO로 이어지고, 다른
+     * 상태(예: MENU_OTA)에서 누르면 FSM이 그냥 무시하니 LED도 안 켜야
+     * 맞다(이전엔 PTT 원시 입력을 상태와 무관하게 그대로 반영해서, 아무
+     * 효과도 없는 상태에서 눌러도 흰색이 켜지는 문제가 있었음). 끌 때는
+     * 반대로 상태와 무관하게 항상 꺼서, EV_ERROR/EV_SYNC_LOST 같은 전역
+     * 전이로 도중에 TX_AUDIO를 벗어나도 흰색이 켜진 채로 안 남게 한다. */
+    if (pressed) {
+        if (state == FSM_STATE_MENU_COMM) {
+            status_led_set_white_dim();
+        }
+    } else {
+        status_led_off();
+    }
 
     fsm_post_event(pressed ? FSM_EVENT_PTT_PRESS : FSM_EVENT_PTT_RELEASE);
 }
@@ -411,6 +421,7 @@ static void on_enter_menu_comm(void)
         vTaskDelete(s_rx_audio_task);
         s_rx_audio_task = NULL;
         audio_io_speaker_disable();
+        status_led_off();
     }
     display_ui_draw_menu(DISPLAY_UI_MENU_COMM, menu_item_from_rotary(rotary_encoder_get_cursor()));
     display_ui_set_status_scroll("HOLD PTT TO SPEAK");
@@ -456,6 +467,7 @@ static void on_enter_tx_audio(void)
 static void on_enter_rx_audio(void)
 {
     display_ui_set_status_animated("RX");
+    status_led_set_sky_blue_dim();
 
     /* audio_codec_decode()도 같은 호출 체인 무게라 tx와 동일하게 8192로. */
     audio_io_speaker_enable();
