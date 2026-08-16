@@ -293,6 +293,7 @@ static void tx_task(fhss_service_t *service)
 static receive_result_t receive_one(
     fhss_service_t *service,
     uint32_t timestamp_timeout_ms,
+    uint32_t packet_timeout_ms,
     fhss_core_rx_result_t *out_result,
     int64_t *out_rx_timestamp_us
 )
@@ -312,7 +313,7 @@ static receive_result_t receive_one(
     rf_transport_rx_packet_t packet = {0};
     if (rf_transport_receive_packet(
             &service->radio,
-            service->config.receive_timeout_ms,
+            packet_timeout_ms,
             &packet) != RF_TRANSPORT_STATUS_OK) {
         return RECEIVE_RESULT_RADIO_ERROR;
     }
@@ -426,6 +427,57 @@ static void handle_miss(fhss_service_t *service)
     }
 }
 
+static void drain_rx_data_until(
+    fhss_service_t *service,
+    int64_t switch_time_us
+)
+{
+    /* SYNC is sent at the slot boundary and audio packets follow on the same
+     * channel. Keep receiving those DATA packets until the channel-switch
+     * guard instead of sleeping through the usable part of the slot. */
+    for (;;) {
+        const int64_t remaining_us = switch_time_us - esp_timer_get_time();
+        if (remaining_us <= 1000) {
+            return;
+        }
+
+        uint32_t timeout_ms = (uint32_t)((remaining_us + 999) / 1000);
+        if (timeout_ms > 20U) {
+            timeout_ms = 20U;
+        }
+
+        fhss_core_rx_result_t result = {0};
+        int64_t rx_timestamp_us = 0;
+        const receive_result_t receive_result = receive_one(
+            service,
+            timeout_ms,
+            timeout_ms,
+            &result,
+            &rx_timestamp_us);
+        record_receive_result(
+            service, receive_result, &result, rx_timestamp_us);
+
+        if (receive_result == RECEIVE_RESULT_DATA) {
+            continue;
+        }
+        if (receive_result == RECEIVE_RESULT_OK) {
+            /* Tolerate a repeated SYNC while draining without losing the
+             * opportunity to refresh the scheduler reference. */
+            handle_sync_result(service, &result);
+            continue;
+        }
+        if (receive_result == RECEIVE_RESULT_TIMEOUT ||
+            receive_result == RECEIVE_RESULT_CRC_FAIL) {
+            /* Optional DATA absence is not a missed synchronization slot. */
+            continue;
+        }
+
+        ESP_LOGW(TAG, "RX data drain stopped: result=%d channel=%u",
+                 receive_result, service->current_channel);
+        return;
+    }
+}
+
 static void rx_task(fhss_service_t *service)
 {
     uint32_t scan_slot = 0U;
@@ -443,6 +495,7 @@ static void rx_task(fhss_service_t *service)
             const receive_result_t receive_result = receive_one(
                 service,
                 service->config.search_dwell_ms,
+                service->config.receive_timeout_ms,
                 &result,
                 &rx_timestamp_us);
             record_receive_result(
@@ -473,6 +526,7 @@ static void rx_task(fhss_service_t *service)
             continue;
         }
 
+        drain_rx_data_until(service, switch_time_us);
         delay_until_us(switch_time_us);
         if (!select_channel(service, next_slot)) {
             report_event(service, FHSS_SERVICE_EVENT_ERROR);
@@ -483,6 +537,7 @@ static void rx_task(fhss_service_t *service)
         int64_t rx_timestamp_us = 0;
         const receive_result_t receive_result = receive_one(
             service,
+            service->config.receive_timeout_ms,
             service->config.receive_timeout_ms,
             &result,
             &rx_timestamp_us);
