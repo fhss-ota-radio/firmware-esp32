@@ -446,8 +446,7 @@ static void on_enter_menu_ota(void)
     /* 글자 수는 화면 폭(8자)에 다 들어가지만, "대기 중"임을 시각적으로
      * 드러내려고 일부러 흐르는 문구로 표시(display_ui_set_status_scroll()). */
     display_ui_set_status_scroll("STANDBY");
-    /* TODO(팀2): CC1101 OTA 채널 리스닝 준비. OTA_RECEIVING 진행률 표시는
-     * 상태 영역에 여유(STATUS_H, display_ui.c 참고)를 남겨뒀으니 그때 추가. */
+    /* TODO(팀2): CC1101 OTA 채널 리스닝 준비. */
 }
 static void on_enter_tx_audio(void)
 {
