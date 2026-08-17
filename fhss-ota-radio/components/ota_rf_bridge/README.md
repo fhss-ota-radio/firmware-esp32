@@ -14,5 +14,5 @@
 음성 FHSS와 OTA가 같은 CC1101을 공유하므로 최상위 FSM/FHSS 서비스가 사용권을
 전환한 뒤 이미 초기화된 `rf_transport_t`를 넘겨야 한다.
 
-OTA 패킷의 START/DATA/END 디코딩과 ACK/NACK 처리는 `ota-protocol` 공용 헤더가
-확정된 뒤 `ota_client` 큐 소비 태스크에 연결한다.
+OTA 패킷의 DISCOVER/START/DATA/END 디코딩과 ACK/NACK 처리는
+`ota_client`의 `ota_consumer` 태스크가 공용 `ota_protocol.h`로 수행한다.

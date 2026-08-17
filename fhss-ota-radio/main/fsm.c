@@ -1,6 +1,8 @@
 #include "fsm.h"
 
 #include <stdbool.h>
+#include <inttypes.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,10 +15,8 @@
 #include "audio_io.h"
 #include "device_id.h"
 #include "display_ui.h"
-#include "firmware_version.h"
 #include "fhss_audio_adapter.h"
 #include "fhss_audio_pcm_test.h"
-#include "ota_discover_packet.h"
 #include "ptt_button.h"
 #include "rotary_encoder.h"
 #include "status_led.h"
@@ -98,7 +98,6 @@ static const char *s_event_names[FSM_EVENT_COUNT] = {
     [FSM_EVENT_PTT_RELEASE]    = "PTT_RELEASE",
     [FSM_EVENT_RX_FRAME]       = "RX_FRAME",
     [FSM_EVENT_RX_DONE]        = "RX_DONE",
-    [FSM_EVENT_OTA_DISCOVER_RX] = "OTA_DISCOVER_RX",
     [FSM_EVENT_OTA_START]      = "OTA_START",
     [FSM_EVENT_OTA_CHUNK]      = "OTA_CHUNK",
     [FSM_EVENT_OTA_COMPLETE]   = "OTA_COMPLETE",
@@ -244,30 +243,40 @@ static void mic_test_task(void *arg)
 
 static void on_ptt_event(bool pressed, void *ctx)
 {
-    /* status_led는 FSM 처리 결과를 기다리지 않고 PTT 원시 입력을 그대로
-     * 반영한다 — GPIO 디바운스만 통과하면 바로 켜지는 테스트용 표시라,
-     * FSM 전이표가 어떻게 바뀌든(지금은 MENU_COMM에서 TX_AUDIO로 실제 전이됨)
-     * 영향받지 않는다. */
-    if (pressed) {
-        status_led_set_white_dim();
-    } else {
-        status_led_off();
-    }
+    fsm_state_t state = fsm_get_state();
 
 #ifdef LOOPBACK_ENABLE
-    /* TEMP: MENU_IDLE에서는 정식 FSM 이벤트 대신 마이크 loopback 테스트로 라우팅 */
-    if (fsm_get_state() == FSM_STATE_MENU_IDLE) {
+    /* TEMP: MENU_IDLE에서는 정식 FSM 이벤트 대신 마이크 loopback 테스트로 라우팅.
+     * 이것도 실제로 마이크를 캡처하는 "수음"이라 흰색 LED를 그대로 켠다. */
+    if (state == FSM_STATE_MENU_IDLE) {
         if (pressed) {
+            status_led_set_white_dim();
             if (s_mic_test_task == NULL) {
                 s_mic_test_recording = true;
                 xTaskCreate(mic_test_task, "mic_test", 8192, NULL, tskIDLE_PRIORITY + 3, &s_mic_test_task);
             }
         } else {
+            status_led_off();
             s_mic_test_recording = false;
         }
         return;
     }
 #endif /* LOOPBACK_ENABLE */
+
+    /* status_led 흰색은 실제로 수음(TX_AUDIO 캡처)으로 이어지는 PTT일 때만
+     * 켠다 — 전이표상 MENU_COMM에서 누른 PTT만 TX_AUDIO로 이어지고, 다른
+     * 상태(예: MENU_OTA)에서 누르면 FSM이 그냥 무시하니 LED도 안 켜야
+     * 맞다(이전엔 PTT 원시 입력을 상태와 무관하게 그대로 반영해서, 아무
+     * 효과도 없는 상태에서 눌러도 흰색이 켜지는 문제가 있었음). 끌 때는
+     * 반대로 상태와 무관하게 항상 꺼서, EV_ERROR/EV_SYNC_LOST 같은 전역
+     * 전이로 도중에 TX_AUDIO를 벗어나도 흰색이 켜진 채로 안 남게 한다. */
+    if (pressed) {
+        if (state == FSM_STATE_MENU_COMM) {
+            status_led_set_white_dim();
+        }
+    } else {
+        status_led_off();
+    }
 
     fsm_post_event(pressed ? FSM_EVENT_PTT_PRESS : FSM_EVENT_PTT_RELEASE);
 }
@@ -559,6 +568,12 @@ static void on_enter_menu_comm(void)
     if (!fhss_audio_adapter_end_tx()) {
         ESP_LOGW(TAG, "failed to finish FHSS audio TX session cleanly");
     }
+    /* on_enter_rx_audio()에서 켠 sky-blue RX 표시등을 여기서 끈다 — 실제
+     * 정리(speaker disable 등)는 stop_rx_audio_task()의 협조적 종료가
+     * 담당하므로 LED만 별도로 끈다. */
+    if (s_rx_audio_task != NULL) {
+        status_led_off();
+    }
     stop_rx_audio_task();
     display_ui_draw_menu(DISPLAY_UI_MENU_COMM, menu_item_from_rotary(rotary_encoder_get_cursor()));
     display_ui_set_status_scroll("HOLD PTT TO SPEAK");
@@ -582,8 +597,7 @@ static void on_enter_menu_ota(void)
     /* 글자 수는 화면 폭(8자)에 다 들어가지만, "대기 중"임을 시각적으로
      * 드러내려고 일부러 흐르는 문구로 표시(display_ui_set_status_scroll()). */
     display_ui_set_status_scroll("STANDBY");
-    /* TODO(팀2): CC1101 OTA 채널 리스닝 준비. OTA_RECEIVING 진행률 표시는
-     * 상태 영역에 여유(STATUS_H, display_ui.c 참고)를 남겨뒀으니 그때 추가. */
+    /* TODO(팀2): CC1101 OTA 채널 리스닝 준비. */
 }
 static void on_enter_tx_audio(void)
 {
@@ -616,6 +630,7 @@ static void on_enter_tx_audio(void)
 static void on_enter_rx_audio(void)
 {
     display_ui_set_status_animated("RX");
+    status_led_set_sky_blue_dim();
 
     /* audio_codec_decode()도 같은 호출 체인 무게라 tx와 동일하게 8192로. */
     audio_io_speaker_enable();
@@ -627,8 +642,23 @@ static void on_enter_rx_audio(void)
         fsm_post_event(FSM_EVENT_ERROR);
     }
 }
-static void on_enter_ota_receiving(void) { /* TODO(팀2): OTA 수신 버퍼 초기화, 음성 태스크 일시 중단 */ }
-static void on_enter_ota_applying(void)  { /* TODO(팀2): 이미지 검증 및 OTA 파티션 기록 */ }
+/* OTA_START 수신(OTA_CLIENT_EVENT_STARTED -> FSM_EVENT_OTA_START)으로 여기
+ * 진입하는 순간 STANDBY 스크롤 문구를 진행 표시로 바꾼다. 이 시점엔 아직
+ * 첫 청크가 안 왔으니 0%로 시작 — 실제 값 갱신은 fsm_ota_event_callback()의
+ * OTA_CLIENT_EVENT_PROGRESS 케이스에서. */
+static void on_enter_ota_receiving(void)
+{
+    display_ui_set_status_scroll("RX 0%");
+    /* TODO(팀2): OTA 수신 버퍼 초기화, 음성 태스크 일시 중단 */
+}
+
+/* OTA_COMPLETE(모든 청크 수신 완료)로 여기 진입 — 실제 이미지 검증/파티션
+ * 기록은 팀2 TODO로 남겨두고, 지금은 진행 중임을 영어로 표시만 한다. */
+static void on_enter_ota_applying(void)
+{
+    display_ui_set_status_scroll("APPLY PENDING");
+    /* TODO(팀2): 이미지 검증 및 OTA 파티션 기록 */
+}
 /*
  * EV_ERROR는 전역 전이라(fsm_task() 참고) 어느 상태에서든 여기로 곧장 올 수
  * 있다 — TX_AUDIO/RX_AUDIO 도중이었을 수도 있어서, on_enter_menu_comm()과
@@ -651,33 +681,6 @@ static void on_enter_error(void)
 
     status_led_start_error_blink();
     display_ui_set_status("ERROR");
-}
-
-/*
- * MENU_OTA 상태에서 FSM_EVENT_OTA_DISCOVER_RX를 수신했을 때만 fsm_task()가
- * 호출한다(아래 참고). 상태 전이를 일으키지 않는 "같은 상태에서의
- * 부수효과"라 s_transitions[]에는 넣지 않았다 — self-transition을 넣어도
- * fsm_transition_to()가 next_state==s_state를 no-op 처리해서 enter action이
- * 아예 안 불린다(다른 self-loop 항목인 OTA_RECEIVING/OTA_CHUNK도 동일 이유로
- * 실제로는 이 함수와 같은 방식의 별도 처리가 필요함, TODO 팀2).
- */
-static void handle_ota_discover_ack(void)
-{
-    ota_discover_ack_t ack;
-    device_id_get(ack.device_id);
-    ack.firmware_version[0] = FIRMWARE_VERSION_MAJOR;
-    ack.firmware_version[1] = FIRMWARE_VERSION_MINOR;
-    ack.firmware_version[2] = FIRMWARE_VERSION_PATCH;
-
-    uint8_t buf[OTA_DISCOVER_ACK_LENGTH];
-    size_t len = 0;
-    if (ota_discover_ack_encode(&ack, buf, sizeof(buf), &len) != OTA_DISCOVER_STATUS_OK) {
-        ESP_LOGW(TAG, "OTA discover ack encode failed");
-        return;
-    }
-
-    ESP_LOGI(TAG, "OTA discover ack ready (%u bytes)", (unsigned)len);
-    /* TODO(팀2): buf[0..len)을 rf_transport로 OTA 채널에 송신 */
 }
 
 static void (*const s_enter_actions[FSM_STATE_COUNT])(void) = {
@@ -732,13 +735,6 @@ static void fsm_task(void *arg)
             continue;
         }
 
-        /* 상태 전이 없는 부수효과: MENU_OTA에서만 ACK 준비, 그 외 상태면
-         * 전이표에 이 이벤트가 없어 아래에서 unhandled로 조용히 무시된다. */
-        if (event == FSM_EVENT_OTA_DISCOVER_RX && s_state == FSM_STATE_MENU_OTA) {
-            handle_ota_discover_ack();
-            continue;
-        }
-
         /* 상태별 전이표 조회 */
         bool handled = false;
         for (size_t i = 0; i < sizeof(s_transitions) / sizeof(s_transitions[0]); i++) {
@@ -785,17 +781,6 @@ bool fsm_post_rx_audio_frame(const uint8_t *data, size_t len)
     return true;
 }
 
-bool fsm_post_ota_discover_frame(const uint8_t *data, size_t len)
-{
-    ota_discover_packet_t packet;
-    if (ota_discover_packet_decode(data, len, &packet) != OTA_DISCOVER_STATUS_OK) {
-        return false;
-    }
-
-    fsm_post_event(FSM_EVENT_OTA_DISCOVER_RX);
-    return true;
-}
-
 fsm_state_t fsm_get_state(void)
 {
     return s_state;
@@ -809,4 +794,67 @@ const char *fsm_state_name(fsm_state_t state)
 const char *fsm_event_name(fsm_event_t event)
 {
     return (event < FSM_EVENT_COUNT) ? s_event_names[event] : "UNKNOWN";
+}
+
+bool fsm_ota_mode_callback(void *context)
+{
+    (void)context;
+    return fsm_get_state() == FSM_STATE_MENU_OTA;
+}
+
+void fsm_ota_event_callback(
+    ota_client_event_t event,
+    uint32_t progress_percent,
+    esp_err_t error,
+    void *context
+)
+{
+    (void)context;
+
+    switch (event) {
+        case OTA_CLIENT_EVENT_STARTED:
+            fsm_post_event(FSM_EVENT_OTA_START);
+            break;
+        case OTA_CLIENT_EVENT_PROGRESS: {
+            ESP_LOGI(TAG, "OTA progress: %" PRIu32 "%%", progress_percent);
+            /* 실제 청크 개수(n/N)를 표시하려면 ota_client가 progress_percent
+             * 말고 총/수신 청크 수도 넘겨줘야 하는데, 지금 콜백 시그니처엔
+             * 없어서(팀2 컴포넌트라 임의로 API를 안 늘림) percent로만 표시.
+             * 화면 폭 제약도 없어서 진행바 대신 텍스트로 충분(사용자 확인). */
+            char status_buf[16];
+            snprintf(status_buf, sizeof(status_buf), "RX %" PRIu32 "%%", progress_percent);
+            display_ui_set_status_scroll(status_buf);
+            break;
+        }
+        case OTA_CLIENT_EVENT_APPLYING:
+            fsm_post_event(FSM_EVENT_OTA_COMPLETE);
+            break;
+        case OTA_CLIENT_EVENT_COMPLETED:
+            fsm_post_event(FSM_EVENT_OTA_VERIFY_OK);
+            break;
+        case OTA_CLIENT_EVENT_FAILED:
+            ESP_LOGE(TAG, "OTA failed: %s", esp_err_to_name(error));
+            if (fsm_get_state() == FSM_STATE_OTA_APPLYING) {
+                /* MENU_OTA로 조용히 돌아가기 전에 실패했다는 걸 3초간
+                 * 보여준다. FSM_EVENT_OTA_VERIFY_FAIL을 먼저 올려버리면
+                 * on_enter_menu_ota()가 곧바로 STANDBY로 덮어써서 실패
+                 * 사실이 화면에 전혀 안 남으므로, 메시지를 다 보여준 뒤에
+                 * 이벤트를 올리는 순서로 함. 여기서 블로킹되는 건 이
+                 * 콜백을 부른 ota_client 컨슈머 태스크지 fsm_task가
+                 * 아니라서(다른 이벤트 처리와는 무관), 3초 정도는
+                 * 문제없다고 판단(on_enter_tx_audio()의 삐빅음 블로킹과
+                 * 같은 이유로 "메시지 다 보여준 뒤 다음 전이"를 보장). */
+                display_ui_set_status_scroll("OTA FAILED");
+                vTaskDelay(pdMS_TO_TICKS(3000));
+                fsm_post_event(FSM_EVENT_OTA_VERIFY_FAIL);
+            } else {
+                fsm_post_event(FSM_EVENT_ERROR);
+            }
+            break;
+        case OTA_CLIENT_EVENT_ABORTED:
+            ESP_LOGW(TAG, "OTA aborted at %" PRIu32 "%%", progress_percent);
+            break;
+        default:
+            break;
+    }
 }

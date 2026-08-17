@@ -47,6 +47,20 @@ void status_led_set_white_dim(void)
     led_strip_refresh(s_strip);
 }
 
+void status_led_set_sky_blue_dim(void)
+{
+    /* 하늘색(#87CEEB) 비율(R:G:B ≈ 135:206:235)을 STATUS_LED_DIM_BRIGHTNESS
+     * 기준으로 스케일링. STATUS_LED_DIM_BRIGHTNESS가 작은 값(기본 8)이라
+     * 정수 나눗셈으로 R이 0이 되지 않게 최소 1을 보장한다. */
+    uint8_t r = (uint8_t)((STATUS_LED_DIM_BRIGHTNESS * 135) / 235);
+    uint8_t g = (uint8_t)((STATUS_LED_DIM_BRIGHTNESS * 206) / 235);
+    if (STATUS_LED_DIM_BRIGHTNESS > 0 && r == 0) {
+        r = 1;
+    }
+    led_strip_set_pixel(s_strip, 0, r, g, STATUS_LED_DIM_BRIGHTNESS);
+    led_strip_refresh(s_strip);
+}
+
 void status_led_off(void)
 {
     led_strip_clear(s_strip);

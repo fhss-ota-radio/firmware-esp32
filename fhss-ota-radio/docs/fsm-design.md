@@ -32,9 +32,10 @@ ESP32-S3 무선기 단말(`firmware-esp32`)의 최상위 애플리케이션 상�
 | 2026-08-06 | `RX_AUDIO` 무음 타임아웃 **1초**로 확정, `rx_audio_task`가 자체 판정해 `FSM_EVENT_RX_DONE` 발생 | PTT_RELEASE 같은 명시적 종료 신호가 RX 쪽엔 없어서 무음/타임아웃 기반으로 결정. `rf_transport` 없이는 실제 프레임 유입이 없어 이 값이 실측 검증된 건 아님 — 실기기 연동 후 짧은 발화 사이 끊김/긴 침묵 오탐 여부 보고 조정 필요 |
 | 2026-08-10 | 브로드캐스트 방식으로 FHSS 설계 변경: `FSM_STATE_FHSS_SYNC`/`FSM_EVENT_SYNC_ACQUIRED` **제거**, `BOOT_INIT` → 통신 대기 직행 | "동기를 먼저 잡고 운용 시작"하는 별도 획득 대기 상태를 두지 않기로 확정. 8월 11일 메뉴 3-way 개편 후 통신 대기 상태의 최종 이름은 `MENU_COMM`이며 `FSM_EVENT_SYNC_LOST`의 복귀 목적지도 `MENU_COMM`이다. `ACQUIRED`는 FHSS 내부 상태로만 사용한다. |
 | 2026-08-11 | OLED UI를 세로(좌측 90도 회전)로 재설계, 메뉴를 **3-way(COMM/IDLE/OTA)**로 확장 — 기존 `MENU_IDLE`(통신 대기)을 `MENU_COMM`으로 개명하고, `MENU_IDLE`을 완전히 새로운 **뮤트** 상태로 재정의 | 사용자가 제시한 화면 목업(좌상단 "mode" 라벨 + COMM/IDLE/OTA 세 박스, 선택 항목은 배경/글자색 반전, 커서는 흰 테두리) 기준으로 설계. 배선(SDA/SCL)은 그대로 두고 소프트웨어에서 좌표 변환으로 회전(SSD1306엔 90도 회전 명령이 없음). "뮤트" 상태는 PTT/RX_FRAME 전이가 없어 통신도 OTA도 아닌 완전한 대기 상태 — 실수로 무전이 울리는 걸 막고 싶을 때 씀. `rotary_encoder_menu_t`/`display_ui_menu_item_t`도 3-way로 확장(순서: COMM/IDLE/OTA, 화면 표시 순서와 일치) |
-| 2026-08-12 | Qt 앱의 OTA 스캔 응답용 `EV_OTA_DISCOVER_RX` 추가 — **상태 전이 없이** `MENU_OTA`에서만 ACK(`device_id`+펌웨어 버전)를 준비하는 부수효과 이벤트로 설계 | OTA_DISCOVER(2바이트: version/type)를 받으면 기기가 자신의 고유번호로 응답해야 하는데, 이건 "다른 상태로 넘어가는 것"이 아니라 "같은 상태에서 반응만 하는 것"이라 전이표(§4)에 넣지 않고 `fsm_task()`가 `EV_ERROR`/`EV_SYNC_LOST`처럼 전이표 조회 전에 특별 처리(단, 전역이 아니라 `MENU_OTA`로 스코프 한정). ACK 페이로드는 `components/device_id`(MAC 뒤 3바이트)와 `main/firmware_version.h`(major/minor/patch)를 그대로 사용 — 새 버전 개념을 만들지 않음. 실제 RF 송수신은 `rf_transport`가 없어 여전히 TODO, 인터페이스(`fsm_post_ota_discover_frame()`)만 먼저 정의 |
+| 2026-08-12 | OTA wire parsing을 `ota_client` consumer로 이동 | DISCOVER는 상태 전이가 아니므로 제품 FSM 이벤트를 만들지 않는다. `ota_consumer`가 공용 `ota_protocol.h`로 해석하고 `fsm_ota_mode_callback()`이 `MENU_OTA`임을 확인한 경우에만 DISCOVER_ACK를 송신한다. START/완료/검증 결과만 `fsm_ota_event_callback()`을 통해 제품 FSM 이벤트로 변환한다. |
 | 2026-08-12 | `on_enter_error()` 구현 — LED 빨간 점멸(`status_led_start_error_blink()`)+OLED "ERROR" 상태 줄, TX_AUDIO/RX_AUDIO 태스크 정리 | 그동안 빈 스텁이라 `EV_ERROR`가 와도 화면상 아무 반응이 없었음. `EV_ERROR`는 전역 전이라 TX_AUDIO/RX_AUDIO 도중에도 올 수 있어 `on_enter_menu_comm()`과 동일한 오디오 태스크 정리를 넣어야 "안전 상태로 정지"가 실제로 보장됨. `status_led`에 점멸 API(`esp_timer` 기반, `display_ui`의 상태 애니메이션과 동일 패턴)를 새로 추가 |
 | 2026-08-11 | Speex frame 2개를 RF packet 하나에 묶고 `RX_AUDIO + RX_FRAME → RX_AUDIO` 상태 유지 전이 추가 | RF packet을 풀면 20 ms frame 두 개가 연속 enqueue되므로 첫 이벤트는 수신 상태 진입, 두 번째 이벤트는 같은 수신 세션의 연속 데이터다. self-transition으로 처리해 수신 태스크를 유지하면서 unhandled 경고를 방지한다. |
+| 2026-08-16 | `fsm_ota_event_callback()`이 `OTA_CLIENT_EVENT_PROGRESS`/`FAILED`를 OLED에 반영 — 수신 중 "RX NN%" 갱신, 검증 실패 시 "OTA FAILED" 3초 표시 후 `MENU_OTA` 복귀 | `OTA_RECEIVING`/`OTA_APPLYING`이 그동안 화면상 STANDBY만 계속 보여서 실제로 뭘 하고 있는지, 실패했는지 전혀 안 보였음. 정확한 청크 수(n/N)는 `ota_client_event_callback_t` 시그니처에 그 값이 없어(팀2 컴포넌트 API라 임의로 안 늘림) percent로 대체. 실패 메시지는 `FSM_EVENT_OTA_VERIFY_FAIL`을 올리기 *전에* `vTaskDelay(3000ms)`로 보여준 뒤 전이시킴(이 블로킹은 `fsm_task`가 아니라 `ota_client` 컨슈머 태스크 쪽이라 다른 이벤트 처리엔 영향 없음) — 안 그러면 `on_enter_menu_ota()`가 곧바로 STANDBY로 덮어써서 실패 사실이 화면에 안 남음 |
 
 ## 1. 설계 전제
 
@@ -111,7 +112,6 @@ sequenceDiagram
 | `EV_PTT_PRESS` / `EV_PTT_RELEASE` | PTT 버튼 ISR/디바운스 태스크 | 송신 시작/종료 (`MENU_COMM`에서만 유효) |
 | `EV_RX_FRAME` | CC1101/FHSS 수신 어댑터 | 검증된 Speex frame 한 개가 오디오 큐에 저장됨. `MENU_COMM`에서는 `RX_AUDIO` 진입, `RX_AUDIO`에서는 같은 수신 세션 유지 |
 | `EV_RX_DONE` | `rx_audio_task`(`main/fsm.c`) | 수신 무음 타임아웃(1초, `FSM_RX_AUDIO_IDLE_TIMEOUT_MS`)으로 수신 종료 |
-| `EV_OTA_DISCOVER_RX` | CC1101 수신 태스크 (`fsm_post_ota_discover_frame()`) | Qt 앱의 OTA_DISCOVER 스캔 패킷(2바이트) 수신. **상태 전이 없음** — `MENU_OTA`일 때만 `fsm_task()`가 특별 처리해 ACK(`device_id`+펌웨어 버전) 준비, 그 외 상태면 무시 |
 | `EV_OTA_START` | CC1101 수신 태스크 | 게이트웨이 OTA 헤더 패킷 감지 (`MENU_OTA` 상태에서 수신 시) |
 | `EV_OTA_CHUNK` | CC1101 수신 태스크 | OTA 이미지 청크 수신 |
 | `EV_OTA_COMPLETE` | CC1101 수신 태스크 | 마지막 청크 수신, 전체 이미지 확보 |
@@ -144,7 +144,9 @@ sequenceDiagram
 | **모든 상태** | `EV_ERROR` | `ERROR` | 전역 전이 |
 | `ERROR` | `EV_RETRY` | `BOOT_INIT` | |
 
-`EV_OTA_DISCOVER_RX`는 이 표에 없다 — 상태를 바꾸지 않는(같은 상태에서 ACK만 준비하는) 부수효과 이벤트라서, self-transition을 넣어도 `fsm_transition_to()`가 `next_state==s_state`를 no-op 처리해 enter action이 안 불린다. 대신 `fsm_task()`가 `EV_ERROR`/`EV_SYNC_LOST`와 같은 자리(전이표 조회 **전**)에서 `s_state == MENU_OTA`일 때만 특별 처리한다 — 전역이 아니라 `MENU_OTA`로 스코프가 좁다는 점만 다르다. `MENU_OTA`가 아닌 상태에서 들어오면 이 특별 처리에 안 걸리고 전이표 조회로 넘어가는데, 거기에도 해당 항목이 없어 그냥 unhandled로 무시된다(로그만 찍힘).
+`OTA_DISCOVER`는 제품 상태를 바꾸지 않으므로 이 전이표와 FSM 이벤트 큐에
+들어오지 않는다. `ota_consumer`가 공용 wire parser로 처리하고,
+`fsm_ota_mode_callback()`이 `MENU_OTA`일 때만 DISCOVER_ACK를 응답한다.
 
 `TX_AUDIO`/`RX_AUDIO`/`OTA_RECEIVING`/`OTA_APPLYING` 상태에는 `EV_MENU_SELECT_COMM`/`EV_MENU_SELECT_IDLE`/`EV_MENU_SELECT_OTA`에 대한 전이가 **정의되어 있지 않다** — 활동 중 메뉴 변경 이벤트가 들어와도 무시된다는 뜻이며, 이것이 곧 "SW적으로 메뉴 변경 불가" 요구사항의 구현이다. 같은 이유로, 음성 통화 중(`TX_AUDIO`/`RX_AUDIO`)에는 애초에 `MENU_OTA`가 아니므로 `EV_OTA_START`가 발생해도(패킷이 음성으로 오인되거나 무시되므로) `OTA_RECEIVING`으로 끼어들 수 없다 — 이전 설계에 있던 "음성 통화를 OTA가 강제 인터럽트"하는 전이는 폐기됐다.
 
@@ -209,7 +211,11 @@ stateDiagram-v2
     - **연속 frame 처리 반영(2026-08-11)**: `RX_AUDIO + RX_FRAME → RX_AUDIO` 상태 유지 전이를 추가했다. 2-frame RF packet의 두 번째 이벤트가 기존 재생 태스크를 중단하거나 unhandled 경고를 만들지 않는다.
     - **`FSM_EVENT_RX_DONE` 종료 조건 확정(2026-08-06)**: `rx_audio_task`가 큐 대기를 `FSM_RX_AUDIO_IDLE_TIMEOUT_MS`(1초)로 제한한다. 실제 오디오 통화에서 짧은 발화 사이 끊김과 긴 침묵 오탐을 측정해 재검토해야 한다.
   - `rf_transport`가 필요한 `ota_*`는 해당 컴포넌트가 없어 아직 TODO — 지금 채우면 실제 API 없이 추측성 코드가 되므로 의도적으로 비워둠.
-  - **OTA 스캔 ACK 구조 선반영(2026-08-12)**: Qt 앱 -> ESP `OTA_DISCOVER`(2바이트, `components/ota_client/include/ota_discover_packet.h`)를 `fsm_post_ota_discover_frame(data, len)`로 디코드해 성공 시 `FSM_EVENT_OTA_DISCOVER_RX`를 올린다(`fsm_post_rx_audio_frame()`과 동일 패턴 — 실 호출자는 `rf_transport` 생기기 전까지 없음). `fsm_task()`가 이 이벤트를 `MENU_OTA` 상태에서만 특별 처리(`handle_ota_discover_ack()`)해 `components/device_id`(MAC 뒤 3바이트) + `main/firmware_version.h`(major/minor/patch)를 담은 `OTA_DISCOVER_ACK`(6바이트)를 인코딩까지만 해둔다 — 실제 RF 송신은 TODO(팀2).
+  - **OTA 스캔/consumer 연결(2026-08-12)**: `ota_rf_bridge`가 RF body를 OTA
+    Queue로 복사하면 `ota_consumer`가 `ota_protocol.h`로 DISCOVER/START/DATA/END를
+    해석한다. DISCOVER는 `MENU_OTA` 여부만 FSM callback으로 조회해 ACK하고,
+    START/적용/검증 결과만 제품 FSM 이벤트로 올린다. 실제 RF 송신 callback과
+    라디오 소유권 연결은 TODO(팀2).
   - **`FHSS_SYNC` 상태/`SYNC_ACQUIRED` 이벤트 제거(2026-08-10)**: 브로드캐스트 설계로 바뀌면서 별도 동기 획득 대기 상태가 불필요해짐 — `FSM_STATE_FHSS_SYNC` 삭제, `BOOT_INIT`의 `EV_INIT_DONE`이 곧바로 기본 메뉴로 전이. `on_enter_fhss_sync()` 함수도 제거. `FSM_EVENT_SYNC_ACQUIRED`도 더 이상 FSM이 소비하지 않아 `fsm.h`에서 제거. `FSM_EVENT_SYNC_LOST`는 전역 안전장치로 유지.
   - **메뉴 3-way 확장 + OLED 회전(2026-08-11)**: `FSM_STATE_MENU_IDLE`(기존, 통신 대기)을 `FSM_STATE_MENU_COMM`으로 개명하고, `FSM_STATE_MENU_IDLE`을 완전히 새로운 **뮤트** 상태로 재정의(PTT_PRESS/RX_FRAME 전이 없음 — TX_AUDIO/RX_AUDIO로 못 들어감). `on_enter_menu_idle()`(옛 이름)은 `on_enter_menu_comm()`으로 개명, 오디오 태스크 정리 로직 그대로 유지. 새 `on_enter_menu_idle()`은 화면만 다시 그리는 최소 구현(TX_AUDIO/RX_AUDIO로 들어오는 전이가 없어 정리할 태스크가 있을 수 없음). `FSM_EVENT_SYNC_LOST`의 복귀 목적지도 `MENU_IDLE`에서 `MENU_COMM`으로 변경(뮤트가 아니라 정상 통신 대기로 복귀해야 하므로). 화면은 `display_ui_draw_menu(selected, hovered)`로 매 전이/커서 이동마다 다시 그림 — `fsm.c`에 `menu_item_from_fsm_state()`/`menu_item_from_rotary()` 매핑 헬퍼 추가(`display_ui`는 FSM을 모르므로 fsm.c가 변환).
   - **`on_enter_error()` 구현(2026-08-12)**: `EV_ERROR`(전역 전이)로 들어오면 `s_tx_audio_task`/`s_rx_audio_task`가 돌고 있었을 경우(`on_enter_menu_comm()`과 동일한 로직) 정리하고, `status_led_start_error_blink()`(빨간 점멸, `components/status_led`에 새로 추가한 `esp_timer` 기반 API)와 `display_ui_set_status("ERROR")`로 표시. 유일한 탈출구 `EV_RETRY -> BOOT_INIT`에서 `on_enter_boot_init()`이 점멸/상태 텍스트를 정리(`status_led_stop_error_blink()`/`display_ui_clear_status()`, 반드시 `*_init()` 호출 다음에 — 최초 부팅 시 아직 없는 핸들에 접근하면 크래시).

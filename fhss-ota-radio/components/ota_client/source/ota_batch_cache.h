@@ -7,7 +7,8 @@
 #include "esp_err.h"
 
 #define OTA_CLIENT_BATCH_SIZE 5U
-#define OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE 51U
+/* ota-protocol v0.2 (9d2aa2b): RF body 60B - DATA header 12B. */
+#define OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE 48U
 
 typedef struct {
     uint32_t base_sequence;

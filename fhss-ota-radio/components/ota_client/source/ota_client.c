@@ -3,8 +3,15 @@
 #include "ota_client.h"
 #include "ota_client_internal.h"
 #include "freertos/queue.h"
+#include "ota_protocol.h"
 
 static ota_client_context_t s_ota_client;
+
+static uint32_t ota_client_calculate_total_chunks(uint32_t image_size)
+{
+    return (image_size / OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE) +
+           ((image_size % OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE) != 0U ? 1U : 0U);
+}
 
 esp_err_t ota_client_init(const ota_client_config_t *config)
 {
@@ -12,6 +19,9 @@ esp_err_t ota_client_init(const ota_client_config_t *config)
         return ESP_ERR_INVALID_ARG;
     }
     if (config->send_callback == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (config->device_id > OTA_DEVICE_ID_MAX) {
         return ESP_ERR_INVALID_ARG;
     }
     if (config->receive_timeout_ms == 0) {
@@ -47,10 +57,14 @@ ota_client_state_t ota_client_get_state(void)
 esp_err_t ota_client_start_session(
     uint32_t session_id,
     uint32_t image_size,
-    uint32_t total_chunks
+    uint32_t total_chunks,
+    const uint8_t expected_sha256[32]
 ) {
-    if (image_size == 0 || total_chunks == 0) {
+    if (image_size == 0U || total_chunks == 0U || expected_sha256 == NULL) {
         return ESP_ERR_INVALID_ARG;
+    }
+    if (total_chunks != ota_client_calculate_total_chunks(image_size)) {
+        return ESP_ERR_INVALID_SIZE;
     }
 
     if (s_ota_client.state != OTA_CLIENT_STATE_IDLE) {
@@ -79,7 +93,11 @@ esp_err_t ota_client_start_session(
     s_ota_client.received_bytes = 0;
     s_ota_client.total_chunks = total_chunks;
     s_ota_client.expected_sequence = 0;
-    s_ota_client.has_committed_batch = false;
+    memcpy(
+        s_ota_client.expected_sha256,
+        expected_sha256,
+        sizeof(s_ota_client.expected_sha256)
+    );
     ota_batch_cache_prepare(
         &s_ota_client.batch_cache,
         s_ota_client.expected_sequence,
@@ -98,6 +116,15 @@ esp_err_t ota_client_start_session(
     }
 
     return ESP_OK;
+}
+
+static esp_err_t ota_client_batch_write(
+    const uint8_t *data,
+    size_t data_size,
+    void *context
+)
+{
+    return ota_writer_write((ota_writer_t *)context, data, data_size);
 }
 
 // 수신한 packet type : OTA_PACKET_DATA 일 때
@@ -124,87 +151,50 @@ esp_err_t ota_client_write_chunk(
     if (sequence >= s_ota_client.total_chunks) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    const uint64_t chunk_offset =
+        (uint64_t)sequence * OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE;
+    const size_t expected_data_size =
+        sequence + 1U == s_ota_client.total_chunks
+            ? (size_t)((uint64_t)s_ota_client.image_size - chunk_offset)
+            : OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE;
+    if (data_size != expected_data_size) {
+        /* 중간 청크는 항상 48B, 이미지의 마지막 청크만 잔여 길이를 허용한다.
+         * 그래야 batch cache를 연속 buffer로 한 번에 Flash에 기록할 수 있다. */
+        return ESP_ERR_INVALID_SIZE;
+    }
     if (sequence < s_ota_client.expected_sequence) {
         /* ACK 유실로 이전 배치 DATA가 재전송된 경우 안전하게 무시한다. */
         return ESP_OK;
     }
 
-    const esp_err_t err = ota_batch_cache_store(
+    const esp_err_t store_err = ota_batch_cache_store(
         &s_ota_client.batch_cache,
         sequence,
         data,
         data_size,
         NULL
     );
-    if (err != ESP_OK) {
-        return err;
+    if (store_err != ESP_OK) {
+        return store_err;
     }
 
     s_ota_client.last_packet_tick = xTaskGetTickCount();
 
-    return ESP_OK;
-}
-
-static esp_err_t ota_client_batch_write(
-    const uint8_t *data,
-    size_t data_size,
-    void *context
-)
-{
-    return ota_writer_write((ota_writer_t *)context, data, data_size);
-}
-
-esp_err_t ota_client_check_batch(
-    uint32_t session_id,
-    uint32_t batch_base_sequence,
-    ota_client_batch_result_t *out_result
-)
-{
-    if (out_result == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (s_ota_client.state != OTA_CLIENT_STATE_RECEIVING) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (session_id != s_ota_client.session_id) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    memset(out_result, 0, sizeof(*out_result));
-
-    /* 이전 BATCH_ACK 유실 시 동일한 체크 요청에 ACK 정보를 다시 반환한다. */
-    if (s_ota_client.has_committed_batch &&
-        batch_base_sequence == s_ota_client.last_committed_batch_base) {
-        out_result->base_sequence = s_ota_client.last_committed_batch_base;
-        out_result->next_sequence = s_ota_client.expected_sequence;
-        out_result->chunk_count = s_ota_client.last_committed_batch_count;
-        out_result->committed = true;
-        return ESP_OK;
-    }
-    if (batch_base_sequence != s_ota_client.batch_cache.base_sequence ||
-        s_ota_client.batch_cache.chunk_count == 0U) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    out_result->base_sequence = s_ota_client.batch_cache.base_sequence;
-    out_result->next_sequence = s_ota_client.expected_sequence;
-    out_result->chunk_count = s_ota_client.batch_cache.chunk_count;
-    out_result->missing_mask = ota_batch_cache_missing_mask(
-        &s_ota_client.batch_cache
-    );
-
-    if (out_result->missing_mask != 0U) {
+    /* Wire protocol에는 BATCH_CHECK가 없다. 각 DATA는 개별 ACK/NACK 대상이며,
+     * 현재 고정 배치가 완성되면 연속된 최대 240B를 Flash에 한 번 기록한다. */
+    if (!ota_batch_cache_is_complete(&s_ota_client.batch_cache)) {
         return ESP_OK;
     }
 
     size_t batch_bytes = 0U;
-    const esp_err_t err = ota_batch_cache_commit(
+    const esp_err_t write_err = ota_batch_cache_commit(
         &s_ota_client.batch_cache,
         ota_client_batch_write,
         &s_ota_client.writer,
         &batch_bytes
     );
-    if (err != ESP_OK) {
+    if (write_err != ESP_OK) {
         ota_writer_abort(&s_ota_client.writer);
         s_ota_client.state = OTA_CLIENT_STATE_ERROR;
 
@@ -212,22 +202,15 @@ esp_err_t ota_client_check_batch(
             s_ota_client.config.event_callback(
                 OTA_CLIENT_EVENT_FAILED,
                 0,
-                err,
+                write_err,
                 s_ota_client.config.callback_context
             );
         }
-        return err;
+        return write_err;
     }
 
-    s_ota_client.last_committed_batch_base =
-        s_ota_client.batch_cache.base_sequence;
-    s_ota_client.last_committed_batch_count =
-        s_ota_client.batch_cache.chunk_count;
-    s_ota_client.has_committed_batch = true;
     s_ota_client.received_bytes += batch_bytes;
     s_ota_client.expected_sequence += s_ota_client.batch_cache.chunk_count;
-    out_result->committed = true;
-    out_result->next_sequence = s_ota_client.expected_sequence;
 
     ota_batch_cache_prepare(
         &s_ota_client.batch_cache,
@@ -253,7 +236,9 @@ esp_err_t ota_client_check_batch(
 }
 
 esp_err_t ota_client_finish_session(
-    uint32_t session_id
+    uint32_t session_id,
+    uint32_t image_size,
+    uint32_t total_chunks
 )
 {
     if (s_ota_client.state != OTA_CLIENT_STATE_RECEIVING) {
@@ -262,6 +247,10 @@ esp_err_t ota_client_finish_session(
 
     if (session_id != s_ota_client.session_id) {
         return ESP_ERR_INVALID_ARG;
+    }
+    if (image_size != s_ota_client.image_size ||
+        total_chunks != s_ota_client.total_chunks) {
+        return ESP_ERR_INVALID_SIZE;
     }
 
     /*
@@ -275,7 +264,19 @@ esp_err_t ota_client_finish_session(
 
     s_ota_client.state = OTA_CLIENT_STATE_VERIFYING;
 
-    esp_err_t err = ota_writer_finish(&s_ota_client.writer);
+    if (s_ota_client.config.event_callback != NULL) {
+        s_ota_client.config.event_callback(
+            OTA_CLIENT_EVENT_APPLYING,
+            100,
+            ESP_OK,
+            s_ota_client.config.callback_context
+        );
+    }
+
+    esp_err_t err = ota_writer_finish(
+        &s_ota_client.writer,
+        s_ota_client.expected_sha256
+    );
 
     if (err != ESP_OK) {
         s_ota_client.state = OTA_CLIENT_STATE_ERROR;
@@ -316,9 +317,6 @@ static void ota_client_reset_session(void)
     s_ota_client.total_chunks = 0;
     s_ota_client.expected_sequence = 0;
     memset(&s_ota_client.batch_cache, 0, sizeof(s_ota_client.batch_cache));
-    s_ota_client.last_committed_batch_base = 0;
-    s_ota_client.last_committed_batch_count = 0;
-    s_ota_client.has_committed_batch = false;
     memset(
         s_ota_client.expected_sha256,
         0,
@@ -410,4 +408,17 @@ esp_err_t ota_client_receive_packet(
     return xQueueReceive(s_ota_client.rx_queue, out_packet, wait_ticks) == pdTRUE
         ? ESP_OK
         : ESP_ERR_TIMEOUT;
+}
+
+esp_err_t ota_client_start_consumer(void)
+{
+    if (s_ota_client.state == OTA_CLIENT_STATE_UNINITIALIZED ||
+        s_ota_client.rx_queue == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_ota_client.consumer_task != NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    return ota_consumer_start(&s_ota_client);
 }

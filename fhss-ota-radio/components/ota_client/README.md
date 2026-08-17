@@ -23,7 +23,7 @@ ESP-IDF bootloader ota_0/ota_1 선택 및 롤백
 ## 담당 범위
 
 - OTA 세션 시작, 진행, 완료, 중단 상태 관리
-- 프로토콜 버전, 대상 단말, 세션 ID 검증
+- 패킷 type, 대상 단말, 세션 ID 검증
 - 청크 sequence, 길이, CRC 검증
 - 중복 청크 ACK 및 누락 청크 NACK
 - `esp_ota_begin()`, `esp_ota_write()`, `esp_ota_end()` 호출
@@ -51,11 +51,11 @@ OTA 패킷 형식은 별도 `ota-protocol` 저장소의 공용 헤더를 사용�
 components/ota_client/
 ├── CMakeLists.txt
 ├── README.md
-├── include/
-│   └── ota_client.h       외부 공개 API
-├── ota_client.c           세션 및 패킷 처리, 전용 태스크/큐
-├── ota_writer.c           ESP-IDF OTA 파티션 기록과 검증
-└── ota_writer.h           컴포넌트 내부 API
+├── include/ota_client.h   외부 공개 API
+└── source/
+    ├── ota_client.c       세션, 수신 Queue, 배치 cache 연결
+    ├── ota_consumer.c     Queue 소비 Task와 wire protocol parser
+    └── ota_writer.c       ESP-IDF OTA 파티션 기록과 검증
 ```
 
 초기 구현은 위 구조로 시작하고, 재전송 정책이나 세션 관리가 커질 때만 파일을 추가한다.
@@ -104,6 +104,7 @@ typedef struct {
 typedef enum {
     OTA_CLIENT_EVENT_STARTED,
     OTA_CLIENT_EVENT_PROGRESS,
+    OTA_CLIENT_EVENT_APPLYING,
     OTA_CLIENT_EVENT_COMPLETED,
     OTA_CLIENT_EVENT_FAILED,
     OTA_CLIENT_EVENT_ABORTED,
@@ -123,13 +124,16 @@ typedef void (*ota_client_event_callback_t)(
 
 typedef struct {
     uint32_t device_id;
+    uint8_t firmware_version[3];
     uint32_t receive_timeout_ms;
     ota_client_send_callback_t send_callback;
     ota_client_event_callback_t event_callback;
+    ota_client_ota_mode_callback_t ota_mode_callback;
     void *callback_context;
 } ota_client_config_t;
 
 esp_err_t ota_client_init(const ota_client_config_t *config);
+esp_err_t ota_client_start_consumer(void);
 
 esp_err_t ota_client_submit_packet(
     const uint8_t *packet,
@@ -160,18 +164,21 @@ GDO 인터럽트
 
 ## 패킷 처리
 
-### OTA_DISCOVER (스캔 응답, 2026-08-12 구조 선반영)
+### OTA_DISCOVER (스캔 응답)
 
-`OTA_START` 이전 단계 — Qt 앱이 OTA 대기 중인 기기를 찾으려고 방송하는 스캔 신호에 대한 응답. `include/ota_discover_packet.h`/`source/ota_discover_packet.c`로 인코드/디코드만 정의(값은 미확정, TODO).
+`OTA_START` 이전 단계로, Qt 앱이 OTA 대기 중인 기기를 찾으려고 방송하는
+스캔 신호에 대한 응답이다. 포맷은 공용 `ota_protocol.h`를 그대로 사용한다.
 
-- `OTA_DISCOVER`(Qt 앱 → ESP, 2바이트): `version`(패킷 규격 버전) + `type`(DISCOVER 표시) 각 1바이트
-- `OTA_DISCOVER_ACK`(ESP → Qt 앱, `DEVICE_ID_LEN`+3=6바이트): `device_id`(`components/device_id`, MAC 뒤 3바이트) + `firmware_version`(`main/firmware_version.h`, major/minor/patch) — 이 버전은 `OTA_DISCOVER.version`(패킷 규격 버전)과 다른 값
+- `OTA_DISCOVER`(Qt 앱 → ESP, 1바이트): `type=6`
+- `OTA_DISCOVER_ACK`(ESP → Qt 앱, 7바이트): `type=7` + `device_id` 3바이트 Little Endian + `firmware_version` 3바이트(major/minor/patch)
 
-`main/fsm.c`의 `fsm_post_ota_discover_frame()`이 디코드해 `FSM_EVENT_OTA_DISCOVER_RX`를 올리고, `MENU_OTA` 상태일 때만 `handle_ota_discover_ack()`가 ACK를 인코딩까지 해둔다(상태 전이 없음). 실제 RF 송수신은 `rf_transport`가 없어 TODO — 자세한 배경은 [docs/fsm-design.md](../../docs/fsm-design.md) 결정 이력(2026-08-12) 참고.
+`ota_consumer`가 직접 디코드하고, `ota_mode_callback`이 true일 때만
+`DISCOVER_ACK`를 `send_callback`으로 보낸다. DISCOVER는 제품 상태를 바꾸지
+않으므로 FSM 이벤트로 전달하지 않는다.
 
 ### OTA_START
 
-1. 프로토콜 버전을 확인한다.
+1. 패킷 type을 확인한다.
 2. 대상 device ID 또는 브로드캐스트 여부를 확인한다.
 3. 새 session ID인지 확인한다.
 4. 이미지 크기가 업데이트 파티션보다 작거나 같은지 확인한다.
@@ -181,24 +188,29 @@ GDO 인터럽트
 
 ### OTA_DATA
 
-초기 구현은 5청크 고정 배치 방식으로 구성한다. RF 패킷 전체 한도가
-60바이트이고 OTA 헤더가 9바이트이므로 DATA payload는 최대 51바이트다.
+초기 구현은 Selective-Repeat 고정 배치 방식으로 구성한다. RF 패킷 전체 한도가
+60바이트이고 `ota-protocol` v0.2 DATA 헤더가 12바이트이므로 DATA payload는
+최대 48바이트다. 초기 배치 크기는 5다. 공통 `version` 필드는 사용하지 않고,
+OTA 세션 패킷은 `session_id`로 식별한다.
 
 ```text
 DATA 5개 수신
   → 각 payload CRC와 sequence 범위 검증
   → 배치 RAM cache에 저장
+  → 각 DATA sequence에 개별 ACK/NACK
 
-BATCH_CHECK(base_sequence)
-  → 누락 존재: BATCH_NACK(base_sequence, missing_mask)
-  → 누락 없음: sequence 순서로 esp_ota_write()
-  → BATCH_ACK(next_sequence)
+5개가 모두 모임
+  → 중간 청크 48B 및 마지막 청크 잔여 길이 검증
+  → 연속된 최대 240B를 esp_ota_write() 한 번으로 기록
+  → 다음 배치로 이동
 ```
 
-배치 크기는 5개로 고정하며 bitmap은 하위 5bit만 사용한다. 예를 들어
-`base_sequence=10`, `missing_mask=0x0A`이면 seq 11과 13이 누락된 것이다.
-ACK가 유실되어 동일한 `BATCH_CHECK`가 다시 들어오면 직전 완료 배치의 ACK를
-재응답한다. 전체 이미지 bitmap이나 랜덤 플래시 쓰기는 사용하지 않는다.
+ESP32의 `received_mask`는 현재 배치가 완성됐는지 판단하는 내부 상태일 뿐 wire에
+실리지 않는다. Gateway는 5개를 보낸 뒤 개별 ACK를 받지 못한 sequence만 다시
+보낸다. ACK 유실로 이미 처리한 DATA가 다시 들어오면 Flash에 중복 기록하지 않고
+해당 sequence ACK를 다시 보낼 수 있도록 성공으로 처리한다. 별도 `BATCH_CHECK`,
+`BATCH_ACK`, missing bitmap 패킷은 사용하지 않는다. 일반 배치는 240B, 마지막
+배치는 실제 남은 크기를 한 번의 `esp_ota_write()`로 기록한다.
 
 ### OTA_END
 
