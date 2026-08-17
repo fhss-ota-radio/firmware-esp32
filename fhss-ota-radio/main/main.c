@@ -4,6 +4,7 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "freertos/FreeRTOS.h"
@@ -16,6 +17,60 @@
  * 시작되는 영향을 배제하고 과거 smoke test와 같은 최소 SPI 경로만 실행한다.
  * CC1101 통신 원인이 확인되면 0으로 바꿔 기존 app_main 경로를 복원한다. */
 #define CC1101_STANDALONE_DIAGNOSTIC 0
+
+#define OTA_FIRST_BOOT_VERIFY_DELAY_MS 10000U
+
+static const char *MAIN_TAG = "main";
+
+static void ota_first_boot_validation_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(OTA_FIRST_BOOT_VERIFY_DELAY_MS));
+
+    if (fsm_get_state() == FSM_STATE_ERROR) {
+        ESP_LOGE(MAIN_TAG, "OTA first-boot self-test failed; rolling back");
+        esp_ota_mark_app_invalid_rollback_and_reboot();
+        return;
+    }
+
+    const esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    if (err != ESP_OK) {
+        ESP_LOGE(MAIN_TAG, "failed to confirm OTA image: %s",
+                 esp_err_to_name(err));
+        esp_ota_mark_app_invalid_rollback_and_reboot();
+        return;
+    }
+
+    ESP_LOGI(MAIN_TAG, "OTA first-boot self-test passed; image confirmed");
+    vTaskDelete(NULL);
+}
+
+static bool ota_start_first_boot_validation_if_needed(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state;
+    if (running == NULL ||
+        esp_ota_get_state_partition(running, &state) != ESP_OK ||
+        state != ESP_OTA_IMG_PENDING_VERIFY) {
+        return true;
+    }
+
+    ESP_LOGW(MAIN_TAG,
+             "OTA image pending verification; starting %u ms self-test",
+             (unsigned)OTA_FIRST_BOOT_VERIFY_DELAY_MS);
+    if (xTaskCreate(
+            ota_first_boot_validation_task,
+            "ota_first_boot",
+            3072U,
+            NULL,
+            tskIDLE_PRIORITY + 2U,
+            NULL) != pdPASS) {
+        ESP_LOGE(MAIN_TAG, "cannot start OTA self-test; rolling back");
+        esp_ota_mark_app_invalid_rollback_and_reboot();
+        return false;
+    }
+    return true;
+}
 
 #if CC1101_STANDALONE_DIAGNOSTIC
 /* 재배선(2026-08-14): 앰프와의 간섭으로 CC1101도 이동. 특히 GPIO14는 기존
@@ -123,7 +178,21 @@ void app_main(void)
      * CC1101 단독 결과를 판별할 수 없기 때문이다. */
     return;
 #else
-    fsm_init();
+    if (!fsm_init()) {
+        ESP_LOGE(MAIN_TAG, "product initialization failed");
+        const esp_partition_t *running = esp_ota_get_running_partition();
+        esp_ota_img_states_t state;
+        if (running != NULL &&
+            esp_ota_get_state_partition(running, &state) == ESP_OK &&
+            state == ESP_OTA_IMG_PENDING_VERIFY) {
+            esp_ota_mark_app_invalid_rollback_and_reboot();
+        }
+        return;
+    }
+
+    if (!ota_start_first_boot_validation_if_needed()) {
+        return;
+    }
 
 #if defined(TASK_STATS_LOG_ENABLE) && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
     BaseType_t task_stats_ok = xTaskCreate(task_stats_task, "task_stats", 4096, NULL,

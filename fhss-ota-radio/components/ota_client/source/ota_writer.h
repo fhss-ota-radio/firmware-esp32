@@ -6,6 +6,7 @@
 #include "esp_err.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include "psa/crypto.h"
 
 typedef struct {
     const esp_partition_t *partition;
@@ -13,8 +14,10 @@ typedef struct {
 
     size_t image_size;
     size_t written_size;
+    psa_hash_operation_t hash_operation;
 
     bool active;
+    bool hash_active;
 } ota_writer_t;
 
 esp_err_t ota_writer_begin(
