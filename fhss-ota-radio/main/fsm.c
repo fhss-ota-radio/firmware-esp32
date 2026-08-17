@@ -575,6 +575,16 @@ static void on_enter_menu_comm(void)
         status_led_off();
     }
     stop_rx_audio_task();
+    /* 재배정(2026-08-17): fsm_post_rx_audio_frame()은 현재 FSM 상태를 보지
+     * 않고 무조건 s_rx_audio_queue에 프레임을 채워 넣는다 — RF/FHSS 계층은
+     * MENU_IDLE/MENU_OTA 등 COMM이 아닌 메뉴에 있어도 계속 홉핑/추종하며
+     * 수신을 이어가기 때문에, 그 동안 상대가 송신하면 이 큐에 오래된
+     * 프레임이 그대로 쌓인다. 이걸 안 비우고 COMM으로 돌아오면 다음
+     * RX_AUDIO 세션이 새 프레임 대신 이 묵은(순서 깨진) 프레임부터
+     * 재생하면서 Speex 디코더 상태가 꼬여 "RX가 안 됨"으로 이어지는
+     * 문제가 실기기에서 확인됨(MENU_IDLE 경유 후 재현). COMM 진입 시점에
+     * 항상 큐를 비워 다음 세션이 깨끗한 상태로 시작하게 한다. */
+    xQueueReset(s_rx_audio_queue);
     display_ui_draw_menu(DISPLAY_UI_MENU_COMM, menu_item_from_rotary(rotary_encoder_get_cursor()));
     display_ui_set_status_scroll("HOLD PTT TO SPEAK");
 }
