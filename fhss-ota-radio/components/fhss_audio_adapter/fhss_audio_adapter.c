@@ -34,8 +34,18 @@
 
 #define FHSS_AUDIO_TX_DRAIN_TIMEOUT_MS 600U
 
+/* 재배정(2026-08-17): 기존 {0,10,20}(3채널, 스모크 테스트 때 정한 임시값,
+ * 근거 없음)에서 "일단 최대로" 늘림 — CC1101 433MHz 설정은 로우밴드
+ * (387~464MHz) 안에서만 정상 동작하므로, base carrier(~433.95MHz)에서
+ * CHANNR 200kHz 간격으로 464MHz 문턱을 넘지 않는 한도까지 CHANNR을
+ * 0부터 1씩 순차로 채운다(채널 149 -> 약 463.7MHz, 여유 확보).
+ * SEARCHING 최악 획득 시간이 137ms*150 ≈ 20.6초로 크게 늘어나는 트레이드오프를
+ * 감수하기로 함(2026-08-17 확인) — 실사용 채널 수/간격은 전파법 대역폭 확인
+ * 후 다시 좁혀야 함(TODO). */
+#define FHSS_AUDIO_HOP_CHANNEL_COUNT 150U
+
 static const char *TAG = "fhss_audio_adapter";
-static const uint8_t s_hop_channels[] = {0U, 10U, 20U};
+static uint8_t s_hop_channels[FHSS_AUDIO_HOP_CHANNEL_COUNT];
 
 typedef struct {
     fhss_service_t service;
@@ -180,6 +190,10 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
     }
     memset(&s_adapter, 0, sizeof(s_adapter));
     s_adapter.config = *config;
+
+    for (size_t i = 0U; i < FHSS_AUDIO_HOP_CHANNEL_COUNT; ++i) {
+        s_hop_channels[i] = (uint8_t)i;
+    }
 
     const fhss_service_config_t service_config = {
         .role = FHSS_SERVICE_ROLE_RX,

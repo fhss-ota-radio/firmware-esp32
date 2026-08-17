@@ -491,12 +491,23 @@ static void drain_rx_data_until(
 
 static void rx_task(fhss_service_t *service)
 {
-    uint32_t scan_slot = 0U;
+    /* 재배정(2026-08-17): 랑데부 채널 고정 방식으로 변경. 예전엔 SEARCHING이
+     * scan_slot을 계속 늘리며 channels[] 전체(지금은 150개)를 137ms씩 훑어
+     * TX와 우연히 같은 채널·같은 순간에 걸리길 기다렸다 — 채널이 3개일 땐
+     * 버틸 만했지만 150개로 늘리면서 최악 20초+ 걸리고, TX 300ms/RX 137ms
+     * 주기의 위상 관계에 따라 특정 채널 조합은 거의 못 만나는 문제가 있었다.
+     * hop_channels[0](=CHANNR 0)을 고정 랑데부 채널로 삼아 SEARCHING
+     * 동안은 항상 그 채널만 듣는다 — TX도 매 세션 slot=0부터 시작하므로
+     * (tx_task 참고) 첫 SYNC는 항상 이 채널에서 나가 자연히 같은 곳에서
+     * 만난다. 일단 만나면(FIRST_SYNC -> SYNCHRONIZING -> TRACKING) 기존
+     * 슬롯 스케줄러가 SYNC 패킷의 slot_number로 두 기기를 같은 홉 순서에
+     * 태우므로, 이후 150채널 홉은 그대로 유지된다 — 채널 수 확장의 영향은
+     * "초기 만남"이 아니라 "만난 뒤 홉 폭"에만 미친다. */
     int64_t last_diagnostics_log_us = esp_timer_get_time();
     for (;;) {
         maybe_log_diagnostics(service, &last_diagnostics_log_us);
         if (service->fsm.state == FHSS_FSM_STATE_SEARCHING) {
-            if (!select_channel(service, scan_slot)) {
+            if (!select_channel(service, 0U)) {
                 report_event(service, FHSS_SERVICE_EVENT_ERROR);
                 vTaskDelay(pdMS_TO_TICKS(100U));
                 continue;
@@ -520,7 +531,6 @@ static void rx_task(fhss_service_t *service)
                 ESP_LOGW(TAG, "RX processing error: result=%d channel=%u",
                          receive_result, service->current_channel);
             }
-            scan_slot++;
             continue;
         }
 
