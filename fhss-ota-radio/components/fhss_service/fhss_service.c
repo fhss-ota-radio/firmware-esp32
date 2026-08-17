@@ -92,8 +92,17 @@ static void log_diagnostics(fhss_service_t *service, int64_t now_us)
              (long long)snapshot.timing_error_max_us,
              (long long)last_valid_age_ms);
 
+    /* 재배정(2026-08-17): 채널이 3개일 땐 채널별 DIAG 3줄이 볼만했는데,
+     * 150개로 늘면서 5초마다 150줄씩 찍혀 로그가 안 읽히는 수준이 됨.
+     * valid/crc_fail/timeout이 전부 0인(아무 일도 없었던) 채널은 건너뛰고
+     * 실제로 뭔가 있었던 채널만 남긴다. */
     for (size_t i = 0U; i < snapshot.channel_count; ++i) {
         const fhss_diagnostics_channel_t *channel = &snapshot.channels[i];
+        if (channel->rx_valid_count == 0U &&
+            channel->crc_fail_count == 0U &&
+            channel->timeout_count == 0U) {
+            continue;
+        }
         ESP_LOGI(TAG, "DIAG channel=%u valid=%lu crc_fail=%lu timeout=%lu",
                  channel->channel,
                  (unsigned long)channel->rx_valid_count,
