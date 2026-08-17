@@ -21,6 +21,19 @@ device_id_get_hex(hex, sizeof(hex));  // 예: "4A1BC7"
 - 기존 로컬 `sdkconfig` 있음: `CONFIG_FREERTOS_HZ=1000`인지 확인 (`idf.py menuconfig` > Component config > FreeRTOS > Kernel > Tick rate)
 - 새로 clone: `sdkconfig.defaults` 자동 적용, 조치 불필요
 
+**⚠️ N8R8 보드는 별도 명령 필요(N16R8/N8R8 혼용 중)** — 팀 기본값은 N16R8(Flash 16MB)이라 `sdkconfig.defaults`에 그대로 들어있음. **VSCode 빌드 버튼이나 옵션 없는 `idf.py build`는 그대로 N16R8로 빌드됨(대부분은 조치 불필요).** 부품 수급 문제로 N8R8(Flash 8MB)을 쓰는 사람만 아래처럼 오버레이 파일을 추가로 얹어야 함. Flash 총 용량이 실제 칩보다 큰 값으로 빌드된 바이너리를 플래시하면 아주 초기 단계(OLED 등 아무 주변장치도 못 켜는 시점)에 죽는다(2026-08-17 N8R8 실기기에서 확인). `partitions.csv`는 두 보드가 공유하므로 이 오버레이 하나면 충분함:
+
+```bash
+# N8R8 (Flash 8MB) — 부품 수급 문제로 병행 사용 중인 개발용 보드만 필요
+idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.n8r8" build
+```
+
+**N16R8 ↔ N8R8을 오가며 빌드할 땐 반드시 먼저 `sdkconfig` 자체를 지울 것** — `idf.py fullclean`은 `build/`만 지우고 `sdkconfig`는 그대로 남기므로, 이전 보드용 Flash 크기가 계속 남아있게 됨(2026-08-17 N8R8에서 실제로 이 문제로 재현됨: `fullclean` 후 재빌드했는데도 esptool 로그에 `--flash-size 16MB`가 그대로 찍힘). `sdkconfig`까지 지워야 `SDKCONFIG_DEFAULTS`가 다시 반영됨:
+
+```bash
+rm -f sdkconfig && idf.py fullclean   # build/뿐 아니라 sdkconfig도 지워야 함
+```
+
 `components/audio_codec/speex`는 git submodule(xiph/speex 원본)이라 **일반 clone만으로는 비어있습니다.** 빌드 전에 반드시 아래 중 하나를 실행하세요.
 
 ```bash

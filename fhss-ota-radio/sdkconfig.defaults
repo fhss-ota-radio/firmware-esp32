@@ -21,9 +21,19 @@ CONFIG_FREERTOS_RUN_TIME_COUNTER_TYPE_U32=y
 CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER=y
 
 # 제품/OTA 테스트가 동일한 A/B 레이아웃을 사용하도록 새 sdkconfig에도
-# 루트 partitions.csv를 적용한다. 실보드 Flash는 16 MiB이며, 현재 파티션
-# 테이블은 팀 공통 레이아웃과 맞추기 위해 앞쪽 8 MiB 범위만 사용한다.
-CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+# 루트 partitions.csv를 적용한다. partitions.csv는 정확히 8 MiB(0x800000)
+# 안에서 끝나도록 잡혀있어 N16R8/N8R8 두 보드가 그대로 공유해도 안전하다.
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# 팀 대부분이 쓰는 최종 목표 보드(N16R8, Flash 16MB) 기준값 — VSCode
+# 빌드 버튼/`idf.py build`를 옵션 없이 그냥 실행해도 이게 적용된다.
+# 부품 수급 문제로 N8R8(Flash 8MB)을 병행 개발 중인 사람만 아래처럼
+# 오버레이 파일을 추가로 얹어서 빌드할 것(README 참고):
+#   idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.n8r8" build
+# 보드를 바꿔서 빌드할 땐 반드시 먼저 정리할 것(기존 sdkconfig가 있으면
+# SDKCONFIG_DEFAULTS가 반영되지 않음 — Flash 크기가 실제 칩과 안 맞는
+# 바이너리를 그대로 플래시하면 아주 초기 단계에서 부팅이 죽는다):
+#   rm -f sdkconfig && idf.py fullclean   (fullclean만으로는 sdkconfig가 안 지워짐)
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y

@@ -1,0 +1,10 @@
+# 부품 수급 문제로 개발 중 병행 사용하는 보드(ESP32-S3 N8R8: Flash 8MB /
+# PSRAM 8MB Octal). 최종 목표는 N16R8이지만 지금 당장 구할 수 있는 보드로도
+# 개발을 계속하기 위해 별도 유지. sdkconfig.defaults와 함께 레이어링해서
+# 쓴다(README 참고):
+#   idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.n8r8" build
+#
+# partitions.csv가 정확히 8MiB(0x800000)에서 끝나도록 이미 맞춰져 있어
+# 파티션 테이블은 N16R8과 그대로 공유해도 된다 — Flash 총 용량만 실제
+# 칩(8MB)에 맞게 지정.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
