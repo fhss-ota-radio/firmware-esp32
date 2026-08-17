@@ -33,11 +33,18 @@ static fsm_state_t s_state = FSM_STATE_BOOT_INIT;
 /*
  * 오디오 프레임 전용 큐. fsm_event_t(이벤트 큐)는 페이로드가 없는 enum이라
  * 데이터를 못 실으므로, 수신 프레임 바이트는 이 큐로 따로 옮기고 이벤트
- * 큐에는 "도착했다"는 신호(FSM_EVENT_RX_FRAME)만 올린다. 큐 깊이 4개 =
- * 20ms/프레임 기준 약 80ms 지터 버퍼.
+ * 큐에는 "도착했다"는 신호(FSM_EVENT_RX_FRAME)만 올린다.
+ *
+ * 재배정(2026-08-17): 깊이 4(80ms 버퍼)였을 때 실기기 FHSS RX 테스트에서
+ * "rx audio queue full, dropping frame"이 반복되며 재생이 끊기는(두두두
+ * 소리) 문제가 있었음 — MENU_COMM -> RX_AUDIO 전이 직후 rx_audio_task가
+ * 실제로 큐를 비우기 시작하기 전 짧은 구간에 프레임이 몰려서 초반에 버스트로
+ * 드롭되는 것으로 보임. 아이템 하나가 몇십 바이트 수준이라 메모리 부담은
+ * 무시할 만해서, 그 초기 버스트를 넉넉히 흡수하도록 32개(20ms/프레임 기준
+ * 약 640ms 버퍼)로 올림.
  */
 #define FSM_RX_AUDIO_FRAME_MAX_BYTES AUDIO_CODEC_MAX_ENCODED_BYTES
-#define FSM_RX_AUDIO_QUEUE_DEPTH     4
+#define FSM_RX_AUDIO_QUEUE_DEPTH     32
 
 /* 이 시간 동안 새 프레임이 안 오면 수신이 끝난 것으로 보고 FSM_EVENT_RX_DONE을
  * 스스로 올린다 (무음/타임아웃 기반 종료 — 결정 근거는 docs/fsm-design.md 참고). */
