@@ -34,8 +34,8 @@ static bool reset_controller(fhss_service_t *service)
             .channels = service->config.channels,
             .channel_count = service->config.channel_count,
             .timing = {
-                .early_margin_us = service->config.channel_switch_guard_us,
-                .late_margin_us = service->config.channel_switch_guard_us,
+                .early_margin_us = service->config.timing_window_margin_us,
+                .late_margin_us = service->config.timing_window_margin_us,
             },
             .sync = {
                 .acquire_count = service->config.acquire_count,

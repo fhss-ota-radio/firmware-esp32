@@ -34,15 +34,19 @@
 
 #define FHSS_AUDIO_TX_DRAIN_TIMEOUT_MS 600U
 
-/* 재배정(2026-08-17): 기존 {0,10,20}(3채널, 스모크 테스트 때 정한 임시값,
- * 근거 없음)에서 "일단 최대로" 늘림 — CC1101 433MHz 설정은 로우밴드
- * (387~464MHz) 안에서만 정상 동작하므로, base carrier(~433.95MHz)에서
- * CHANNR 200kHz 간격으로 464MHz 문턱을 넘지 않는 한도까지 CHANNR을
- * 0부터 1씩 순차로 채운다(채널 149 -> 약 463.7MHz, 여유 확보).
- * SEARCHING 최악 획득 시간이 137ms*150 ≈ 20.6초로 크게 늘어나는 트레이드오프를
- * 감수하기로 함(2026-08-17 확인) — 실사용 채널 수/간격은 전파법 대역폭 확인
- * 후 다시 좁혀야 함(TODO). */
-#define FHSS_AUDIO_HOP_CHANNEL_COUNT 150U
+/* 재배정 이력(2026-08-17):
+ * 1차 — 기존 {0,10,20}(스모크 테스트 임시값)에서 "일단 최대로" 150개까지
+ *   늘림(CC1101 433MHz 로우밴드 387~464MHz 안에서 CHANNR 200kHz 간격 한도).
+ * 2차 — 채널 0은 OTA 팀이 라즈베리파이 CC1101 드라이버용으로 예약해서
+ *   겹치지 않게 채널 범위를 옮김. 처음엔 랑데부를 맨 끝(150)에 뒀는데
+ *   안테나/PA 매칭이 433.92MHz(채널 0) 중심으로 튜닝돼 있어 463.94MHz까지
+ *   가니 crc_fail/RADIO_ERROR가 실기기에서 눈에 띄게 늘었음.
+ * 3차 — 랑데부를 채널 0과 가장 가까운 1로 옮기고(튜닝 중심에서 거의 안
+ *   벗어남), 대역 폭도 150 대신 100까지로 좁혀 안테나 매칭이 나빠지는
+ *   구간(위쪽 끝)까지 안 가도록 함. 채널 수는 3->150->100으로, SEARCHING
+ *   최악 획득 시간은 이제 무관(랑데부 채널 고정 리슨 방식이라 채널 수와
+ *   상관없음 — fhss_service.c rx_task 참고). */
+#define FHSS_AUDIO_HOP_CHANNEL_COUNT 100U
 
 static const char *TAG = "fhss_audio_adapter";
 static uint8_t s_hop_channels[FHSS_AUDIO_HOP_CHANNEL_COUNT];
@@ -191,8 +195,13 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
     memset(&s_adapter, 0, sizeof(s_adapter));
     s_adapter.config = *config;
 
-    for (size_t i = 0U; i < FHSS_AUDIO_HOP_CHANNEL_COUNT; ++i) {
-        s_hop_channels[i] = (uint8_t)i;
+    /* 채널 0(OTA 팀 예약)은 제외. 랑데부(인덱스 0)는 채널 0과 가장 가까운
+     * 1로 둬 안테나/PA 매칭 중심(433.92MHz)에서 거의 안 벗어나게 하고,
+     * 나머지 인덱스 1~99에는 2~100을 순서대로 채워 대역을 1~100으로
+     * 제한한다(위 파일 상단 주석의 3차 재배정 참고). */
+    s_hop_channels[0] = 1U;
+    for (size_t i = 1U; i < FHSS_AUDIO_HOP_CHANNEL_COUNT; ++i) {
+        s_hop_channels[i] = (uint8_t)(i + 1U);
     }
 
     const fhss_service_config_t service_config = {
@@ -211,8 +220,23 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
         .channel_count = sizeof(s_hop_channels) / sizeof(s_hop_channels[0]),
         .slot_duration_us = 300000U,
         .channel_switch_guard_us = 5000U,
+        /* 재배정(2026-08-17): 판정 허용 오차를 channel_switch_guard_us(5ms)
+         * 재사용에서 분리 — 실제 GDO0 ISR 지연/스케줄링 지터 흡수엔 5ms가
+         * 타이트해서, 패킷은 정상 수신됐는데 타이밍만 창을 벗어나 MISS로
+         * 판정되는 사례가 있었음(fhss_service.h 주석 참고). */
+        .timing_window_margin_us = 20000U,
         .sync_offset_us = 0U,
-        .search_dwell_ms = 137U,
+        /* 재배정(2026-08-17): SEARCHING이 채널 전체를 훑던 시절엔 137ms를
+         * 짧게 잡아야 TX 300ms 주기와 위상이 안 맞고(여러 채널을 골고루
+         * 훑으려고) 했는데, 지금은 랑데부 채널(0) 하나만 고정으로 듣는다
+         * (fhss_service.c rx_task 참고). 이 상태에서 137ms는 오히려 재무장
+         * (SIDLE->CHANNR->SFRX->SFTX->RX 재시작) 횟수만 잦아지고, 그 짧은
+         * 재무장 공백과 TX의 랑데부 SYNC 송신 순간이 겹치면 통째로 놓치는
+         * 사례가 실기기에서 확인됨("송신해도 수신자가 RX로 안 들어감").
+         * 재무장 빈도를 줄여 공백 노출을 줄이려고 400ms로 상향 — PTT 응답
+         * 지연도 이 값만큼 늘어날 수 있어(최악 SEARCHING 중 PTT 누른 경우)
+         * 너무 크게는 안 올림. */
+        .search_dwell_ms = 400U,
         .receive_timeout_ms = 80U,
         .acquire_count = 3U,
         .loss_count = 5U,

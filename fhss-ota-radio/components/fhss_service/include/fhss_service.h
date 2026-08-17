@@ -38,6 +38,15 @@ typedef struct {
     size_t channel_count;
     uint32_t slot_duration_us;
     uint32_t channel_switch_guard_us;
+    /* 재배정(2026-08-17): 예전엔 channel_switch_guard_us(5ms, 채널 전환용
+     * 리드타임)를 수신 타이밍 판정 허용 오차로도 그대로 재사용했는데, 이
+     * 둘은 완전히 다른 예산이다 — 채널 전환은 SPI/CC1101 처리시간만 확보하면
+     * 되지만, 판정 오차는 GDO0 ISR 지연/FreeRTOS 스케줄링 지터/잔여 클럭
+     * 드리프트까지 다 흡수해야 한다. 5ms는 이 지터 예산으론 타이트해서
+     * 실제로 패킷은 정상 수신됐는데 타이밍만 창을 벗어나 MISS로
+     * 판정되는(수신자가 RX를 놓치는) 사례가 실기기에서 확인됨 — 별도
+     * 필드로 분리해 더 넉넉하게 잡는다. */
+    uint32_t timing_window_margin_us;
     uint32_t sync_offset_us;
     uint32_t search_dwell_ms;
     uint32_t receive_timeout_ms;
