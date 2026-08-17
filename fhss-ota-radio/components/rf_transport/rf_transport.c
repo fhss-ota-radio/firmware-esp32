@@ -526,8 +526,14 @@ rf_transport_status_t rf_transport_configure_433mhz(
     ESP_LOGI(TAG, "CC1101 register read-back OK: IOCFG2=0x%02X",
              iocfg2_readback);
 
-    /* Minimum output power for the first close-range test (about -30 dBm). */
-    const uint8_t pa_table = 0x12U;
+    /* 재배정(2026-08-17): 근접 테스트용 최소출력(-30dBm, 0x12)으로는 50m급
+     * 거리에서 안정적으로 안 잡혀서, 433MHz PATABLE 표 기준 이 칩의 최대
+     * 출력 단계인 10dBm(0xC0)으로 올림 — 실외 시야 확보 조건에서 자유공간
+     * 손실만 보면 -30dBm으로도 50m가 이론상 되지만, 실제로는 안테나 효율/
+     * 장애물/PCB 배치 손실이 커서 최대 출력이 필요했음. 전파법상 출력 상한을
+     * 아직 확인 안 했으니 실외 필드테스트 이후 규제값에 맞춰 다시 낮춰야 할
+     * 수 있음(TODO). */
+    const uint8_t pa_table = 0xC0U;
     status = write_register(transport, CC1101_PATABLE_ADDR, pa_table);
     if (status != RF_TRANSPORT_STATUS_OK) {
         return status;
