@@ -184,6 +184,18 @@ int audio_io_decode_play(const uint8_t *data, size_t len)
     return 0;
 }
 
+/* I2S TX는 circular DMA라 write를 멈추면 마지막으로 써넣은 버퍼 내용을
+ * 그대로 반복 재생한다 — 새 프레임이 안 들어오는 idle 구간에 이 함수로
+ * 무음을 계속 채워 넣지 않으면, 마지막 실제 음성 프레임 파형이 DMA
+ * 디스크립터 단위로 계속 루프되어 "두두두두" 잡음으로 들린다(실기기
+ * 확인, 2026-08-17). */
+void audio_io_write_silence(void)
+{
+    static const int16_t silence[AUDIO_CODEC_FRAME_SAMPLES] = {0};
+    size_t bytes_written = 0;
+    i2s_channel_write(s_spk_tx, silence, sizeof(silence), &bytes_written, AUDIO_IO_I2S_TIMEOUT_MS);
+}
+
 #ifdef LOOPBACK_ENABLE
 int16_t audio_io_decode_peek_peak(const uint8_t *data, size_t len)
 {

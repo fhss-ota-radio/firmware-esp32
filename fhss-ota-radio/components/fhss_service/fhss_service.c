@@ -441,9 +441,20 @@ static void drain_rx_data_until(
             return;
         }
 
+        /* 재배정(2026-08-17): 20ms 상한이 49바이트 페이로드(38.4kBaud 기준
+         * 순수 전송시간만 약 10~13ms) + GDO0 감지~태스크 기상 지연 + SPI
+         * 폴링 오버헤드를 감당하기엔 너무 빠듯해서, sync word는 정상
+         * 감지됐는데(rf_transport_wait_rx_timestamp 성공) 본문을 다 못 읽고
+         * rf_transport_receive_packet()이 타임아웃 나는 경우가 실기기에서
+         * 거의 매 슬롯("RX data drain stopped: result=3(RADIO_ERROR)")
+         * 반복 확인됨 — 이게 RECEIVE_RESULT_RADIO_ERROR로 분류돼 드레인
+         * 루프가 그 슬롯 데이터를 통째로 포기하고 있었음. 40ms로 올려도
+         * 위 remaining_us 캡 때문에 슬롯 경계(switch_time_us)를 넘기진
+         * 않음 — 슬롯 뒷부분(전환 임박)에서는 remaining_us 자체가 이 상한보다
+         * 먼저 작아져서 자연히 더 짧게 잡힌다. */
         uint32_t timeout_ms = (uint32_t)((remaining_us + 999) / 1000);
-        if (timeout_ms > 20U) {
-            timeout_ms = 20U;
+        if (timeout_ms > 40U) {
+            timeout_ms = 40U;
         }
 
         fhss_core_rx_result_t result = {0};

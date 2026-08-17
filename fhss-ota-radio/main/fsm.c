@@ -422,18 +422,32 @@ static TaskHandle_t s_rx_audio_task;
  * RX 태스크가 현재 작업을 마친 뒤 speaker channel까지 직접 정리한다. */
 static volatile bool s_rx_audio_should_stop;
 
+/* 새 프레임이 없는 idle 구간에서 xQueueReceive를 짧게 끊어 폴링하며
+ * audio_io_write_silence()로 무음을 채워 넣는 주기(ms). 재배정(2026-08-17):
+ * 예전엔 FSM_RX_AUDIO_IDLE_TIMEOUT_MS(1초)를 한 번에 블로킹 대기해서 그
+ * 동안 I2S write가 전혀 없었는데, I2S TX가 circular DMA라 write가 멈추면
+ * 마지막 실제 음성 프레임 파형을 그대로 반복 재생 -> "두두두두" 잡음으로
+ * 들리는 문제가 실기기에서 확인됨. 프레임 주기(20ms)와 맞춰 폴링. */
+#define FSM_RX_AUDIO_POLL_MS 20U
+
 static void rx_audio_task(void *arg)
 {
     fsm_rx_audio_frame_t frame;
 
     bool timed_out = false;
+    uint32_t idle_ms = 0U;
 
     while (!s_rx_audio_should_stop) {
-        if (xQueueReceive(s_rx_audio_queue, &frame, pdMS_TO_TICKS(FSM_RX_AUDIO_IDLE_TIMEOUT_MS)) == pdTRUE) {
+        if (xQueueReceive(s_rx_audio_queue, &frame, pdMS_TO_TICKS(FSM_RX_AUDIO_POLL_MS)) == pdTRUE) {
             audio_io_decode_play(frame.data, frame.len);
+            idle_ms = 0U;
         } else {
-            timed_out = true;
-            break;
+            audio_io_write_silence();
+            idle_ms += FSM_RX_AUDIO_POLL_MS;
+            if (idle_ms >= FSM_RX_AUDIO_IDLE_TIMEOUT_MS) {
+                timed_out = true;
+                break;
+            }
         }
     }
 

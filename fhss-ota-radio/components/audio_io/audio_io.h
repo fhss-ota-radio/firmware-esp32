@@ -50,6 +50,14 @@ int audio_io_capture_encode(uint8_t *out, size_t out_capacity);
  */
 int audio_io_decode_play(const uint8_t *data, size_t len);
 
+/*
+ * 무음(0) 한 프레임을 스피커로 써넣는다. I2S TX가 circular DMA라 write를
+ * 멈추면 마지막 버퍼 내용을 계속 반복 재생하므로, 새 음성 프레임이 없는
+ * idle 구간에 이 함수를 주기적으로 호출해 DMA에 남은 오래된 파형이 계속
+ * 루프되며 들리는 잡음을 막는다. 호출 전 audio_io_speaker_enable() 필요.
+ */
+void audio_io_write_silence(void);
+
 #ifdef LOOPBACK_ENABLE
 /*
  * TEMP(마이크 loopback 테스트 전용, LOOPBACK_ENABLE 꺼지면 통째로 빠짐):
