@@ -238,6 +238,9 @@ static void tx_task(fhss_service_t *service)
         &service->controller.scheduler, slot, slot_time_us);
 
     for (;;) {
+        if (service->should_stop) {
+            return;
+        }
         int64_t start_us = 0;
         if (fhss_slot_scheduler_get_slot_start_time(
                 &service->controller.scheduler, slot, &start_us) !=
@@ -505,6 +508,9 @@ static void rx_task(fhss_service_t *service)
      * "초기 만남"이 아니라 "만난 뒤 홉 폭"에만 미친다. */
     int64_t last_diagnostics_log_us = esp_timer_get_time();
     for (;;) {
+        if (service->should_stop) {
+            return;
+        }
         maybe_log_diagnostics(service, &last_diagnostics_log_us);
         if (service->fsm.state == FHSS_FSM_STATE_SEARCHING) {
             if (!select_channel(service, 0U)) {
@@ -673,11 +679,16 @@ bool fhss_service_start(fhss_service_t *service)
             : FHSS_FSM_EVENT_START_RX
     );
 
+    /* 재배정(2026-08-17): FHSS_DIAGNOSTICS_MAX_CHANNELS를 150채널에 맞춰
+     * 16->160으로 올리면서 log_diagnostics()의 스택 지역변수
+     * fhss_diagnostics_snapshot_t가 ~2.6KB로 커짐 — 기존 4096바이트
+     * 스택으론 ESP_LOGI 포맷팅 등 나머지 호출 체인과 합쳐 스택 오버플로우
+     * 위험이 있어 여유 있게 올림. */
     TaskHandle_t task = NULL;
     if (xTaskCreate(
             service_task,
             "fhss_service",
-            4096U,
+            8192U,
             service,
             6U,
             &task) != pdPASS) {
@@ -701,12 +712,26 @@ bool fhss_service_set_role(
         return true;
     }
 
+    /* 재배정(2026-08-17): 예전엔 여기서 task_handle을 vTaskDelete()로 바로
+     * 죽였다 — 아래 rf_transport_recover_433mhz()가 "CS LOW/HIGH 사이에서
+     * 끊길 수 있다"는 걸 이미 알고 복구를 시도하고는 있었지만, 짧은 PTT
+     * 세션(약 1.2초)에서 tx_task가 SPI 전송 한복판에 죽어 SPI 버스/CC1101이
+     * 잠긴 채로 남고, 그 뒤에 호출되는 rf_transport_recover_433mhz() 자체도
+     * 잠긴 SPI에 물려 무한 대기하는 전체 행(hang)이 실기기에서 재현됨 —
+     * fsm_task가 여기서 멈추니 로터리엔코더/PTT 입력도 같이 죽었음.
+     * tx_audio_task/rx_audio_task에 이미 쓰던 협조적 종료(should_stop 플래그
+     * + 태스크 스스로 종료 대기)로 교체 — 최악 응답 지연은 슬롯 1개(~300ms)
+     * 남짓이라 강제 종료 없이도 충분히 빠르다. */
     if (service->task_handle != NULL) {
-        vTaskDelete((TaskHandle_t)service->task_handle);
-        service->task_handle = NULL;
+        service->should_stop = true;
+        while (service->task_handle != NULL) {
+            vTaskDelay(pdMS_TO_TICKS(5U));
+        }
+        service->should_stop = false;
     }
-    /* vTaskDelete can interrupt the old RX task between CS LOW and CS HIGH.
-     * Recover SPI framing and radio registers before the new role starts. */
+    /* task가 SPI 전송 중간이 아니라 루프 시작 지점에서만 빠져나오므로 이제는
+     * 항상 CS HIGH(유휴) 상태에서 멈춘다 — 그래도 역할 전환 시 레지스터를
+     * 다시 정렬해두는 것은 안전하니 유지한다. */
     if (rf_transport_recover_433mhz(&service->radio) !=
         RF_TRANSPORT_STATUS_OK) {
         ESP_LOGE(TAG, "CC1101 recovery failed while switching role");

@@ -60,6 +60,13 @@ typedef struct {
     void *task_handle;
     uint8_t current_channel;
     volatile bool tx_in_flight;
+    /* 재배정(2026-08-17): fhss_service_set_role()이 이전엔 task_handle을
+     * vTaskDelete()로 직접 강제 종료했는데, tx_task/rx_task가 SPI 전송
+     * 중간(CS 로우 구간 등)에 죽으면 CC1101/SPI 버스가 잠긴 상태로 남아
+     * 이후 모든 SPI 호출이 무한 대기하는 전체 행(hang)이 실기기에서
+     * 확인됨(짧은 PTT 세션에서 재현). tx_audio_task/rx_audio_task에 이미
+     * 쓰던 것과 같은 협조적 종료 플래그로 교체. */
+    volatile bool should_stop;
     bool initialized;
 } fhss_service_t;
 

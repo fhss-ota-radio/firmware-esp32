@@ -4,7 +4,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define FHSS_DIAGNOSTICS_MAX_CHANNELS 16U
+/* 재배정(2026-08-17): 호핑 채널을 150개로 늘리면서 예전 상한(16)에 걸려
+ * fhss_diagnostics_init()이 조용히(로그 없이) 실패 -> fhss_service_init()
+ * 전체가 CC1101 통신 시도 전에 실패하는 문제가 있었음. 실제 사용 채널 수(150)
+ * 이상으로 올림. */
+#define FHSS_DIAGNOSTICS_MAX_CHANNELS 160U
 
 typedef struct {
     uint8_t channel;
