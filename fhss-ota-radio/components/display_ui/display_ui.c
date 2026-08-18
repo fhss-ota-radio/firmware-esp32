@@ -108,64 +108,39 @@ static void draw_hline(int x, int y, int w, bool on)
     }
 }
 
-/*
- * (px,py)가 (x,y,w,h) 사각형을 4모서리만 반지름 r 원으로 깎은 "둥근 사각형"
- * 내부인지 판정한다. r이 작아서(2~4px) 브루트포스 거리 계산으로도 충분히
- * 빠르다 — 메뉴 갱신 시(사람이 보는 빈도)만 호출되지 프레임마다 도는 게 아님.
- */
-static bool inside_rounded_rect(int px, int py, int x, int y, int w, int h, int r)
+/* TEST SKIN(2026-08-18, test/ota-update-visual-marker-ui 전용 — develop에
+ * 머지하지 않음): OTA 업데이트가 실제로 적용됐는지 화면만 보고 즉시
+ * 구분하기 위한 시각 테스트용 브랜치. 표시되는 문구/메뉴 로직/동작은
+ * 원본과 완전히 동일하고, 그리기 스타일(테두리/구분선/선택·호버 표시
+ * 방식)만 다르게 해서 "다른 펌웨어가 올라갔다"는 걸 한눈에 알아볼 수
+ * 있게 한다. */
+static void draw_hline_dashed(int x, int y, int w, bool on)
 {
-    if (px < x || px >= x + w || py < y || py >= y + h) {
-        return false;
-    }
-
-    int cx, cy;
-    if (px < x + r && py < y + r) {
-        cx = x + r; cy = y + r;
-    } else if (px >= x + w - r && py < y + r) {
-        cx = x + w - 1 - r; cy = y + r;
-    } else if (px < x + r && py >= y + h - r) {
-        cx = x + r; cy = y + h - 1 - r;
-    } else if (px >= x + w - r && py >= y + h - r) {
-        cx = x + w - 1 - r; cy = y + h - 1 - r;
-    } else {
-        return true; /* 모서리 구역 밖 -> 그냥 사각형 내부 */
-    }
-
-    int dx = px - cx;
-    int dy = py - cy;
-    return (dx * dx + dy * dy) <= r * r;
-}
-
-static void fill_rounded_rect(int x, int y, int w, int h, int r, bool on)
-{
-    for (int j = 0; j < h; j++) {
-        for (int i = 0; i < w; i++) {
-            int px = x + i, py = y + j;
-            if (inside_rounded_rect(px, py, x, y, w, h, r)) {
-                set_pixel(px, py, on);
-            }
+    for (int i = 0; i < w; i++) {
+        if ((i & 2) == 0) { /* 2px on, 2px off */
+            set_pixel(x + i, y, on);
         }
     }
 }
 
-/* 둥근 사각형의 1px 테두리만 그린다 — 내부 픽셀 중 상하좌우 이웃 하나라도
- * 도형 밖이면 "테두리"로 판정. */
-static void draw_rounded_rect_outline(int x, int y, int w, int h, int r, bool on)
+static void draw_rect_outline(int x, int y, int w, int h, bool on)
 {
+    draw_hline(x, y, w, on);
+    draw_hline(x, y + h - 1, w, on);
     for (int j = 0; j < h; j++) {
-        for (int i = 0; i < w; i++) {
-            int px = x + i, py = y + j;
-            if (!inside_rounded_rect(px, py, x, y, w, h, r)) {
-                continue;
-            }
-            bool is_border = !inside_rounded_rect(px - 1, py, x, y, w, h, r)
-                           || !inside_rounded_rect(px + 1, py, x, y, w, h, r)
-                           || !inside_rounded_rect(px, py - 1, x, y, w, h, r)
-                           || !inside_rounded_rect(px, py + 1, x, y, w, h, r);
-            if (is_border) {
-                set_pixel(px, py, on);
-            }
+        set_pixel(x, y + j, on);
+        set_pixel(x + w - 1, y + j, on);
+    }
+}
+
+static void draw_rect_outline_dashed(int x, int y, int w, int h, bool on)
+{
+    draw_hline_dashed(x, y, w, on);
+    draw_hline_dashed(x, y + h - 1, w, on);
+    for (int j = 0; j < h; j++) {
+        if ((j & 2) == 0) {
+            set_pixel(x, y + j, on);
+            set_pixel(x + w - 1, y + j, on);
         }
     }
 }
@@ -414,29 +389,36 @@ static void render_screen(void)
 {
     memset(s_framebuf, 0, sizeof(s_framebuf));
 
+    /* TEST SKIN: 화면 전체 테두리 — 원본엔 없던 프레임이라 그것만으로도
+     * 눈에 띔. */
+    draw_rect_outline(0, 0, DISPLAY_UI_HEIGHT, DISPLAY_UI_WIDTH, true);
+
     draw_text(MENU_HEADER_X, MENU_HEADER_Y, "mode", 1, false);
-    draw_hline(RULE_X, HEADER_RULE_Y, RULE_W, true);
+    draw_hline_dashed(RULE_X, HEADER_RULE_Y, RULE_W, true);
 
     for (int i = 0; i < DISPLAY_UI_MENU_COUNT; i++) {
         int item_y = MENU_ITEM_START_Y + i * (MENU_ITEM_H + MENU_ITEM_GAP);
         bool is_selected = (i == s_last_selected);
         bool is_hovered = (i == s_last_hovered);
 
+        /* TEST SKIN: 선택 표시를 "채워진 둥근 박스"에서 "이중 테두리(각진
+         * 모서리)"로 바꿈 — 텍스트는 항상 반전 없이 그대로 표시. */
         if (is_selected) {
-            fill_rounded_rect(MENU_ITEM_X, item_y, MENU_ITEM_W, MENU_ITEM_H, MENU_ITEM_RADIUS, true);
+            draw_rect_outline(MENU_ITEM_X, item_y, MENU_ITEM_W, MENU_ITEM_H, true);
+            draw_rect_outline(MENU_ITEM_X + 2, item_y + 2, MENU_ITEM_W - 4, MENU_ITEM_H - 4, true);
         }
         draw_text_centered(MENU_ITEM_X, item_y, MENU_ITEM_W, MENU_ITEM_H,
-                            s_menu_labels[i], MENU_TEXT_SCALE, is_selected);
+                            s_menu_labels[i], MENU_TEXT_SCALE, false);
 
+        /* TEST SKIN: 호버 표시를 실선 테두리에서, 박스보다 2px 바깥으로
+         * 뺀 점선 테두리로 바꿈 — 선택과 동시에 호버여도(부팅 직후 등)
+         * 이중 실선 테두리 바깥에 점선이 겹치지 않고 따로 보임. */
         if (is_hovered) {
-            /* selected(흰 배경)와 겹치면 테두리는 검은색으로, 아니면(검은
-             * 배경) 흰색으로 — 배경과 항상 대비되게. */
-            draw_rounded_rect_outline(MENU_ITEM_X, item_y, MENU_ITEM_W, MENU_ITEM_H,
-                                       MENU_ITEM_RADIUS, !is_selected);
+            draw_rect_outline_dashed(MENU_ITEM_X, item_y - 2, MENU_ITEM_W, MENU_ITEM_H + 4, true);
         }
     }
 
-    draw_hline(RULE_X, STATUS_RULE_Y, RULE_W, true);
+    draw_hline_dashed(RULE_X, STATUS_RULE_Y, RULE_W, true);
 
     if (s_status_text[0] != '\0') {
         if (s_status_anim_mode == STATUS_ANIM_SCROLL) {
