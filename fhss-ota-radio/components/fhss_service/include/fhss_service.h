@@ -50,6 +50,10 @@ typedef struct {
      * 필드로 분리해 더 넉넉하게 잡는다. */
     uint32_t timing_window_margin_us;
     uint32_t sync_offset_us;
+    uint32_t correction_deadband_us;
+    uint32_t correction_fast_threshold_us;
+    uint32_t correction_slow_divisor;
+    uint32_t correction_fast_divisor;
     uint32_t search_dwell_ms;
     uint32_t receive_timeout_ms;
     uint32_t acquire_count;

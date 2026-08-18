@@ -50,6 +50,13 @@ static bool reset_controller(fhss_service_t *service)
                 service->config.channel_switch_guard_us,
         },
         .sync_offset_us = service->config.sync_offset_us,
+        .correction_deadband_us = service->config.correction_deadband_us,
+        .correction_fast_threshold_us =
+            service->config.correction_fast_threshold_us,
+        .correction_slow_divisor =
+            service->config.correction_slow_divisor,
+        .correction_fast_divisor =
+            service->config.correction_fast_divisor,
     };
     return fhss_sync_controller_init(
                &service->controller,
@@ -366,11 +373,14 @@ static receive_result_t receive_one(
     }
 
     ESP_LOGI(TAG,
-             "SYNC RX: state=%s slot=%lu channel=%u error=%lld us timestamp=%lld",
+             "SYNC RX: state=%s slot=%lu channel=%u error=%lld us "
+             "correction=%lld us accumulated=%lld us timestamp=%lld",
              fhss_fsm_state_name(service->fsm.state),
              (unsigned long)out_result->packet.slot_number,
              out_result->channel,
              (long long)out_result->timing.timing_error_us,
+             (long long)service->controller.last_phase_correction_us,
+             (long long)service->controller.accumulated_phase_correction_us,
              (long long)rx_timestamp_us);
     *out_rx_timestamp_us = rx_timestamp_us;
     return RECEIVE_RESULT_OK;
@@ -679,6 +689,10 @@ bool fhss_service_init(
     if (service == NULL || config == NULL || config->channels == NULL ||
         config->channel_count == 0U || config->slot_duration_us == 0U ||
         config->search_dwell_ms == 0U || config->receive_timeout_ms == 0U ||
+        config->correction_slow_divisor == 0U ||
+        config->correction_fast_divisor == 0U ||
+        config->correction_deadband_us >
+            config->correction_fast_threshold_us ||
         config->recovery_entry_miss_count == 0U ||
         config->recovery_entry_miss_count >= config->loss_count) {
         return false;

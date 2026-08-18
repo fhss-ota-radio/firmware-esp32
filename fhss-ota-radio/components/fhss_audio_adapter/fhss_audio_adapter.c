@@ -230,6 +230,12 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
          * 판정되는 사례가 있었음(fhss_service.h 주석 참고). */
         .timing_window_margin_us = 20000U,
         .sync_offset_us = 0U,
+        /* Adaptive first-order phase correction. Sub-500us variation is
+         * treated as jitter; larger in-window drift is corrected gradually. */
+        .correction_deadband_us = 500U,
+        .correction_fast_threshold_us = 2000U,
+        .correction_slow_divisor = 8U,
+        .correction_fast_divisor = 2U,
         /* 재배정(2026-08-17): SEARCHING이 채널 전체를 훑던 시절엔 137ms를
          * 짧게 잡아야 TX 300ms 주기와 위상이 안 맞고(여러 채널을 골고루
          * 훑으려고) 했는데, 지금은 랑데부 채널(0) 하나만 고정으로 듣는다

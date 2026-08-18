@@ -2,6 +2,44 @@
 
 #include <stdbool.h>
 
+static uint64_t magnitude_i64(int64_t value)
+{
+    return value < 0 ? (uint64_t)(-(value + 1)) + 1U : (uint64_t)value;
+}
+
+static int64_t calculate_phase_correction(
+    const fhss_sync_controller_t *controller,
+    int64_t timing_error_us
+)
+{
+    const uint64_t magnitude = magnitude_i64(timing_error_us);
+    if (magnitude <= controller->correction_deadband_us) {
+        return 0;
+    }
+
+    /* Use a continuous piecewise gain. Only the error beyond the deadband is
+     * corrected, and crossing the fast threshold does not create a correction
+     * jump that could make the scheduler oscillate around that boundary. */
+    const uint64_t slow_limit = controller->correction_fast_threshold_us;
+    const uint64_t slow_magnitude = magnitude < slow_limit
+        ? magnitude
+        : slow_limit;
+    uint64_t correction_magnitude =
+        (slow_magnitude - controller->correction_deadband_us) /
+        controller->correction_slow_divisor;
+    if (magnitude > slow_limit) {
+        correction_magnitude +=
+            (magnitude - slow_limit) /
+            controller->correction_fast_divisor;
+    }
+    if (correction_magnitude == 0U) {
+        correction_magnitude = 1U;
+    }
+    return timing_error_us < 0
+        ? -(int64_t)correction_magnitude
+        : (int64_t)correction_magnitude;
+}
+
 fhss_sync_controller_status_t fhss_sync_controller_init(
     fhss_sync_controller_t *controller,
     const fhss_sync_controller_config_t *config
@@ -10,9 +48,20 @@ fhss_sync_controller_status_t fhss_sync_controller_init(
     if (controller == NULL || config == NULL) {
         return FHSS_CONTROLLER_STATUS_INVALID_ARG;
     }
+    if (config->correction_slow_divisor == 0U ||
+        config->correction_fast_divisor == 0U ||
+        config->correction_deadband_us >
+            config->correction_fast_threshold_us) {
+        return FHSS_CONTROLLER_STATUS_INVALID_ARG;
+    }
 
     fhss_sync_controller_t initialized = {
         .sync_offset_us = config->sync_offset_us,
+        .correction_deadband_us = config->correction_deadband_us,
+        .correction_fast_threshold_us =
+            config->correction_fast_threshold_us,
+        .correction_slow_divisor = config->correction_slow_divisor,
+        .correction_fast_divisor = config->correction_fast_divisor,
         .initialized = false,
     };
 
@@ -82,14 +131,49 @@ fhss_sync_controller_status_t fhss_sync_controller_process_rx(
         return FHSS_CONTROLLER_STATUS_CORE_ERROR;
     }
 
-    if (!controller->scheduler.synchronized ||
-        result.timing.result == FHSS_TIMING_INSIDE_WINDOW) {
+    if (!controller->scheduler.synchronized) {
         if (fhss_slot_scheduler_set_reference(
                 &controller->scheduler,
                 packet.slot_number,
                 observed_slot_start_us) != FHSS_SLOT_STATUS_OK) {
             return FHSS_CONTROLLER_STATUS_SCHEDULER_ERROR;
         }
+        controller->last_phase_correction_us = result.timing.timing_error_us;
+        controller->accumulated_phase_correction_us +=
+            result.timing.timing_error_us;
+    } else if (result.timing.result == FHSS_TIMING_INSIDE_WINDOW) {
+        int64_t expected_slot_start_us = 0;
+        if (fhss_slot_scheduler_get_slot_start_time(
+                &controller->scheduler,
+                packet.slot_number,
+                &expected_slot_start_us) != FHSS_SLOT_STATUS_OK) {
+            return FHSS_CONTROLLER_STATUS_SCHEDULER_ERROR;
+        }
+
+        /* First-order adaptive phase correction:
+         * - deadband rejects timestamp jitter,
+         * - small persistent errors converge slowly,
+         * - larger in-window errors converge faster,
+         * - out-of-window errors keep the old clock for RECOVERY. */
+        const int64_t correction_us = calculate_phase_correction(
+            controller, result.timing.timing_error_us);
+        if (correction_us != 0) {
+            if ((correction_us > 0 &&
+                 expected_slot_start_us > INT64_MAX - correction_us) ||
+                (correction_us < 0 &&
+                 expected_slot_start_us < INT64_MIN - correction_us)) {
+                return FHSS_CONTROLLER_STATUS_SCHEDULER_ERROR;
+            }
+            if (fhss_slot_scheduler_set_reference(
+                    &controller->scheduler,
+                    packet.slot_number,
+                    expected_slot_start_us + correction_us) !=
+                FHSS_SLOT_STATUS_OK) {
+                return FHSS_CONTROLLER_STATUS_SCHEDULER_ERROR;
+            }
+        }
+        controller->last_phase_correction_us = correction_us;
+        controller->accumulated_phase_correction_us += correction_us;
     }
 
     *out_result = result;
@@ -163,6 +247,10 @@ fhss_sync_controller_status_t fhss_sync_controller_recover_rx(
             observed_slot_start_us) != FHSS_SLOT_STATUS_OK) {
         return FHSS_CONTROLLER_STATUS_SCHEDULER_ERROR;
     }
+
+    controller->last_phase_correction_us = result.timing.timing_error_us;
+    controller->accumulated_phase_correction_us +=
+        result.timing.timing_error_us;
 
     *out_result = result;
     return FHSS_CONTROLLER_STATUS_OK;
