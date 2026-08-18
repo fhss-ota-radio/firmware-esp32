@@ -47,10 +47,12 @@ fhss_core_status_t fhss_core_init(
 
     /* 2. Hop Sequence 초기화 */
     const fhss_hop_status_t hop_status =
-        fhss_hop_sequence_init(
+        fhss_hop_sequence_init_seeded(
             &initialized_core.hop_sequence,
             config->channels,
-            config->channel_count
+            config->channel_count,
+            config->hop_seed,
+            config->reserved_channel
         );
 
     if (hop_status != FHSS_HOP_STATUS_OK) {

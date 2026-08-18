@@ -45,6 +45,17 @@ fhss_sync_controller_status_t fhss_sync_controller_process_rx(
     fhss_core_rx_result_t *out_result
 );
 
+/* Validate a SYNC packet and deliberately re-anchor the scheduler to its
+ * observed timestamp. This is only for bounded recovery after normal timing
+ * validation has degraded; initial acquisition still uses process_rx(). */
+fhss_sync_controller_status_t fhss_sync_controller_recover_rx(
+    fhss_sync_controller_t *controller,
+    const uint8_t *buffer,
+    size_t buffer_length,
+    int64_t rx_timestamp_us,
+    fhss_core_rx_result_t *out_result
+);
+
 fhss_sync_controller_status_t fhss_sync_controller_handle_timeout(
     fhss_sync_controller_t *controller,
     fhss_sync_event_t *out_event,

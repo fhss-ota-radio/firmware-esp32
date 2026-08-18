@@ -36,6 +36,8 @@ typedef struct {
     rf_transport_config_t radio;
     const uint8_t *channels;
     size_t channel_count;
+    uint32_t hop_seed;
+    uint8_t reserved_channel;
     uint32_t slot_duration_us;
     uint32_t channel_switch_guard_us;
     /* 재배정(2026-08-17): 예전엔 channel_switch_guard_us(5ms, 채널 전환용
@@ -52,6 +54,9 @@ typedef struct {
     uint32_t receive_timeout_ms;
     uint32_t acquire_count;
     uint32_t loss_count;
+    /* Enter bounded N/N-1/N+1 probing at this many consecutive misses.
+     * Must be smaller than loss_count, which remains the hard reset limit. */
+    uint32_t recovery_entry_miss_count;
     uint32_t diagnostics_interval_ms;
     fhss_service_event_callback_t event_callback;
     fhss_service_data_callback_t data_callback;
@@ -68,6 +73,8 @@ typedef struct {
     void *tx_queue;
     void *task_handle;
     uint8_t current_channel;
+    uint32_t consecutive_sync_misses;
+    uint8_t recovery_probe_index;
     volatile bool tx_in_flight;
     /* 재배정(2026-08-17): fhss_service_set_role()이 이전엔 task_handle을
      * vTaskDelete()로 직접 강제 종료했는데, tx_task/rx_task가 SPI 전송

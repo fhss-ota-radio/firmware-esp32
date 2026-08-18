@@ -218,6 +218,10 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
         },
         .channels = s_hop_channels,
         .channel_count = sizeof(s_hop_channels) / sizeof(s_hop_channels[0]),
+        /* Channel 0 belongs to OTA. Both peers use this shared seed to derive
+         * the same deterministic audio hopping order. */
+        .hop_seed = 0x46485353U,
+        .reserved_channel = 0U,
         .slot_duration_us = 300000U,
         .channel_switch_guard_us = 5000U,
         /* 재배정(2026-08-17): 판정 허용 오차를 channel_switch_guard_us(5ms)
@@ -240,6 +244,7 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
         .receive_timeout_ms = 80U,
         .acquire_count = 3U,
         .loss_count = 5U,
+        .recovery_entry_miss_count = 2U,
         .diagnostics_interval_ms = 5000U,
         .event_callback = on_service_event,
         .data_callback = on_service_data,

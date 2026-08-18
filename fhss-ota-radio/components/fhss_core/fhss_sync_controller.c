@@ -124,3 +124,46 @@ fhss_sync_controller_status_t fhss_sync_controller_handle_timeout(
     }
     return FHSS_CONTROLLER_STATUS_OK;
 }
+
+fhss_sync_controller_status_t fhss_sync_controller_recover_rx(
+    fhss_sync_controller_t *controller,
+    const uint8_t *buffer,
+    size_t buffer_length,
+    int64_t rx_timestamp_us,
+    fhss_core_rx_result_t *out_result
+)
+{
+    if (controller == NULL || buffer == NULL || out_result == NULL ||
+        rx_timestamp_us < (int64_t)controller->sync_offset_us) {
+        return FHSS_CONTROLLER_STATUS_INVALID_ARG;
+    }
+    if (!controller->initialized) {
+        return FHSS_CONTROLLER_STATUS_NOT_INITIALIZED;
+    }
+
+    /* Using the observed time as the expected time makes Core perform all
+     * packet/hop validation while treating this bounded recovery sample as a
+     * valid timing anchor. An invalid packet still cannot move the clock. */
+    fhss_core_rx_result_t result = {0};
+    if (fhss_core_process_rx(
+            &controller->core,
+            buffer,
+            buffer_length,
+            rx_timestamp_us,
+            rx_timestamp_us,
+            &result) != FHSS_CORE_STATUS_OK) {
+        return FHSS_CONTROLLER_STATUS_CORE_ERROR;
+    }
+
+    const int64_t observed_slot_start_us =
+        rx_timestamp_us - (int64_t)controller->sync_offset_us;
+    if (fhss_slot_scheduler_set_reference(
+            &controller->scheduler,
+            result.packet.slot_number,
+            observed_slot_start_us) != FHSS_SLOT_STATUS_OK) {
+        return FHSS_CONTROLLER_STATUS_SCHEDULER_ERROR;
+    }
+
+    *out_result = result;
+    return FHSS_CONTROLLER_STATUS_OK;
+}

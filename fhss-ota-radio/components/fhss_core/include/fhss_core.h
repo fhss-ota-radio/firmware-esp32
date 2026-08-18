@@ -40,6 +40,8 @@ typedef enum {
 typedef struct {
     const uint8_t *channels;
     size_t channel_count;
+    uint32_t hop_seed;
+    uint8_t reserved_channel;
 
     fhss_timing_window_config_t timing;
     fhss_sync_state_config_t sync;

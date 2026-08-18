@@ -33,6 +33,8 @@ static bool reset_controller(fhss_service_t *service)
         .core = {
             .channels = service->config.channels,
             .channel_count = service->config.channel_count,
+            .hop_seed = service->config.hop_seed,
+            .reserved_channel = service->config.reserved_channel,
             .timing = {
                 .early_margin_us = service->config.timing_window_margin_us,
                 .late_margin_us = service->config.timing_window_margin_us,
@@ -345,12 +347,21 @@ static receive_result_t receive_one(
         return RECEIVE_RESULT_DATA;
     }
 
-    if (fhss_sync_controller_process_rx(
-            &service->controller,
-            packet.payload,
-            packet.length,
-            rx_timestamp_us,
-            out_result) != FHSS_CONTROLLER_STATUS_OK) {
+    const fhss_sync_controller_status_t sync_status =
+        service->fsm.state == FHSS_FSM_STATE_RECOVERY
+            ? fhss_sync_controller_recover_rx(
+                &service->controller,
+                packet.payload,
+                packet.length,
+                rx_timestamp_us,
+                out_result)
+            : fhss_sync_controller_process_rx(
+                &service->controller,
+                packet.payload,
+                packet.length,
+                rx_timestamp_us,
+                out_result);
+    if (sync_status != FHSS_CONTROLLER_STATUS_OK) {
         return RECEIVE_RESULT_SYNC_ERROR;
     }
 
@@ -394,6 +405,15 @@ static void handle_sync_result(
     const fhss_core_rx_result_t *result
 )
 {
+    service->consecutive_sync_misses = 0U;
+    service->recovery_probe_index = 0U;
+    if (service->fsm.state == FHSS_FSM_STATE_RECOVERY) {
+        ESP_LOGI(TAG,
+                 "RECOVERY succeeded: slot=%lu channel=%u; tracking resumed",
+                 (unsigned long)result->packet.slot_number,
+                 result->channel);
+        fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_SYNC_RECOVERED);
+    }
     if (service->fsm.state == FHSS_FSM_STATE_SEARCHING &&
         result->timing.result == FHSS_TIMING_INSIDE_WINDOW) {
         fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_FIRST_SYNC);
@@ -419,6 +439,7 @@ static void handle_miss(fhss_service_t *service)
 {
     const bool was_synchronizing =
         service->fsm.state == FHSS_FSM_STATE_SYNCHRONIZING;
+    service->consecutive_sync_misses++;
     fhss_sync_event_t event = FHSS_SYNC_EVENT_NONE;
     fhss_sync_state_t state = FHSS_SYNC_STATE_SEARCHING;
     if (fhss_sync_controller_handle_timeout(
@@ -433,10 +454,44 @@ static void handle_miss(fhss_service_t *service)
         diagnostics_unlock(service);
         fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_SYNC_LOST);
         report_event(service, FHSS_SERVICE_EVENT_SYNC_LOST);
+        service->consecutive_sync_misses = 0U;
+        service->recovery_probe_index = 0U;
     } else if (was_synchronizing) {
         fhss_slot_scheduler_clear_reference(&service->controller.scheduler);
         fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_SYNC_LOST);
+        service->consecutive_sync_misses = 0U;
+    } else if (service->fsm.state == FHSS_FSM_STATE_TRACKING &&
+               service->consecutive_sync_misses >=
+                   service->config.recovery_entry_miss_count) {
+        /* Keep the scheduler reference. RECOVERY probes nearby slot channels
+         * before the hard loss_count threshold is allowed to clear it. */
+        fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_SYNC_DEGRADED);
+        service->recovery_probe_index = 0U;
+        ESP_LOGW(TAG,
+                 "RECOVERY entered after %lu consecutive sync misses",
+                 (unsigned long)service->consecutive_sync_misses);
     }
+}
+
+static uint32_t get_recovery_probe_slot(
+    fhss_service_t *service,
+    uint32_t predicted_slot
+)
+{
+    /* Probe the predicted channel first, then one slot behind and one ahead.
+     * Repeating this bounded pattern covers the common +/- one-slot slip while
+     * the original scheduler clock continues to advance. */
+    static const int8_t offsets[] = {0, -1, 1};
+    const int8_t offset = offsets[
+        service->recovery_probe_index % (sizeof(offsets) / sizeof(offsets[0]))];
+    service->recovery_probe_index++;
+
+    if (offset < 0 && predicted_slot == 0U) {
+        return predicted_slot;
+    }
+    return offset < 0
+        ? predicted_slot - 1U
+        : predicted_slot + (uint32_t)offset;
 }
 
 static void drain_rx_data_until(
@@ -564,7 +619,15 @@ static void rx_task(fhss_service_t *service)
 
         drain_rx_data_until(service, switch_time_us);
         delay_until_us(switch_time_us);
-        if (!select_channel(service, next_slot)) {
+        uint32_t channel_slot = next_slot;
+        if (service->fsm.state == FHSS_FSM_STATE_RECOVERY) {
+            channel_slot = get_recovery_probe_slot(service, next_slot);
+            ESP_LOGI(TAG,
+                     "RECOVERY probe: predicted_slot=%lu candidate_slot=%lu",
+                     (unsigned long)next_slot,
+                     (unsigned long)channel_slot);
+        }
+        if (!select_channel(service, channel_slot)) {
             report_event(service, FHSS_SERVICE_EVENT_ERROR);
             continue;
         }
@@ -615,7 +678,9 @@ bool fhss_service_init(
 {
     if (service == NULL || config == NULL || config->channels == NULL ||
         config->channel_count == 0U || config->slot_duration_us == 0U ||
-        config->search_dwell_ms == 0U || config->receive_timeout_ms == 0U) {
+        config->search_dwell_ms == 0U || config->receive_timeout_ms == 0U ||
+        config->recovery_entry_miss_count == 0U ||
+        config->recovery_entry_miss_count >= config->loss_count) {
         return false;
     }
 
@@ -752,6 +817,10 @@ bool fhss_service_set_role(
     }
     service->config.role = role;
     service->tx_in_flight = false;
+    /* A role change starts a new radio session. Do not let stale RX recovery
+     * progress force the new session into RECOVERY or SEARCHING early. */
+    service->consecutive_sync_misses = 0U;
+    service->recovery_probe_index = 0U;
     if (role == FHSS_SERVICE_ROLE_RX) {
         xQueueReset((QueueHandle_t)service->tx_queue);
     }
