@@ -6,6 +6,7 @@
 #include "driver/spi_master.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "fhss_audio_packet.h"
@@ -33,6 +34,7 @@
 #define CC1101_SPI_CLOCK_HZ 100000
 
 #define FHSS_AUDIO_TX_DRAIN_TIMEOUT_MS 600U
+#define OTA_FIXED_CHANNEL 0U
 
 /* 재배정 이력(2026-08-17):
  * 1차 — 기존 {0,10,20}(스모크 테스트 임시값)에서 "일단 최대로" 150개까지
@@ -64,6 +66,8 @@ typedef struct {
     bool have_rx_sequence;
     bool initialized;
     bool tx_active;
+    bool ota_active;
+    SemaphoreHandle_t radio_mutex;
 } fhss_audio_adapter_state_t;
 
 static fhss_audio_adapter_state_t s_adapter;
@@ -194,6 +198,10 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
     }
     memset(&s_adapter, 0, sizeof(s_adapter));
     s_adapter.config = *config;
+    s_adapter.radio_mutex = xSemaphoreCreateMutex();
+    if (s_adapter.radio_mutex == NULL) {
+        return false;
+    }
 
     /* 채널 0(OTA 팀 예약)은 제외. 랑데부(인덱스 0)는 채널 0과 가장 가까운
      * 1로 둬 안테나/PA 매칭 중심(433.92MHz)에서 거의 안 벗어나게 하고,
@@ -257,7 +265,7 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
 
 bool fhss_audio_adapter_begin_tx(void)
 {
-    if (!s_adapter.initialized || s_adapter.tx_active) {
+    if (!s_adapter.initialized || s_adapter.tx_active || s_adapter.ota_active) {
         return false;
     }
     s_adapter.frame_count = 0U;
@@ -310,4 +318,103 @@ bool fhss_audio_adapter_end_tx(void)
     ESP_LOGI(TAG, "TX session ended: packets=%lu; RX standby resumed",
              (unsigned long)s_adapter.tx_packet_count);
     return ok;
+}
+
+bool fhss_audio_adapter_begin_ota(void)
+{
+    if (!s_adapter.initialized || s_adapter.tx_active || s_adapter.ota_active) {
+        return false;
+    }
+    if (xSemaphoreTake(s_adapter.radio_mutex, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
+    bool ok = fhss_service_pause(&s_adapter.service);
+    if (ok) {
+        ok = rf_transport_set_channel(
+                 &s_adapter.service.radio, OTA_FIXED_CHANNEL) ==
+             RF_TRANSPORT_STATUS_OK;
+    }
+    if (ok) {
+        ok = rf_transport_start_receive(&s_adapter.service.radio) ==
+             RF_TRANSPORT_STATUS_OK;
+    }
+    s_adapter.ota_active = ok;
+    xSemaphoreGive(s_adapter.radio_mutex);
+    if (!ok) {
+        (void)fhss_service_set_role(
+            &s_adapter.service, FHSS_SERVICE_ROLE_RX);
+        ESP_LOGE(TAG, "failed to enter fixed-channel OTA mode");
+        return false;
+    }
+    ESP_LOGI(TAG, "OTA mode started on CHANNR=%u", OTA_FIXED_CHANNEL);
+    return true;
+}
+
+bool fhss_audio_adapter_end_ota(void)
+{
+    if (!s_adapter.initialized || !s_adapter.ota_active) {
+        return true;
+    }
+    if (xSemaphoreTake(s_adapter.radio_mutex, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
+    s_adapter.ota_active = false;
+    const bool ok = fhss_service_set_role(
+        &s_adapter.service, FHSS_SERVICE_ROLE_RX);
+    xSemaphoreGive(s_adapter.radio_mutex);
+    if (ok) {
+        ESP_LOGI(TAG, "OTA mode ended; FHSS RX resumed");
+    }
+    return ok;
+}
+
+fhss_audio_adapter_ota_rx_status_t fhss_audio_adapter_ota_receive(
+    uint8_t *packet,
+    size_t capacity,
+    size_t *out_length,
+    uint32_t timeout_ms
+)
+{
+    if (!s_adapter.ota_active || packet == NULL || out_length == NULL ||
+        capacity == 0U || timeout_ms == 0U) {
+        return FHSS_AUDIO_ADAPTER_OTA_RX_ERROR;
+    }
+    if (xSemaphoreTake(s_adapter.radio_mutex, portMAX_DELAY) != pdTRUE) {
+        return FHSS_AUDIO_ADAPTER_OTA_RX_ERROR;
+    }
+    rf_transport_rx_packet_t received = {0};
+    const rf_transport_status_t status = rf_transport_receive_packet(
+        &s_adapter.service.radio, timeout_ms, &received);
+    xSemaphoreGive(s_adapter.radio_mutex);
+    if (status == RF_TRANSPORT_STATUS_TIMEOUT) {
+        return FHSS_AUDIO_ADAPTER_OTA_RX_TIMEOUT;
+    }
+    if (status != RF_TRANSPORT_STATUS_OK || received.length == 0U ||
+        received.length > capacity) {
+        return FHSS_AUDIO_ADAPTER_OTA_RX_ERROR;
+    }
+    if (!received.crc_ok) {
+        return FHSS_AUDIO_ADAPTER_OTA_RX_CRC_ERROR;
+    }
+    memcpy(packet, received.payload, received.length);
+    *out_length = received.length;
+    return FHSS_AUDIO_ADAPTER_OTA_RX_OK;
+}
+
+bool fhss_audio_adapter_ota_send(const uint8_t *packet, size_t length)
+{
+    if (!s_adapter.ota_active || packet == NULL || length == 0U ||
+        length > RF_TRANSPORT_MAX_PACKET_LENGTH) {
+        return false;
+    }
+    if (xSemaphoreTake(s_adapter.radio_mutex, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
+    const rf_transport_status_t send_status = rf_transport_send_packet(
+        &s_adapter.service.radio, packet, (uint8_t)length);
+    const rf_transport_status_t rx_status = rf_transport_start_receive(
+        &s_adapter.service.radio);
+    xSemaphoreGive(s_adapter.radio_mutex);
+    return send_status == RF_TRANSPORT_STATUS_OK &&
+           rx_status == RF_TRANSPORT_STATUS_OK;
 }

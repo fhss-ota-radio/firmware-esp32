@@ -22,11 +22,20 @@ esp_err_t ota_writer_begin(
     if (image_size > update_partition->size) {
         return ESP_ERR_INVALID_SIZE;
     }
+
+    writer->hash_operation = (psa_hash_operation_t)PSA_HASH_OPERATION_INIT;
+    if (psa_hash_setup(&writer->hash_operation, PSA_ALG_SHA_256) !=
+        PSA_SUCCESS) {
+        return ESP_FAIL;
+    }
+    writer->hash_active = true;
     
     esp_ota_handle_t handle = 0; // 값 변경될 위험 있으므로 새 변수에 
     esp_err_t err = esp_ota_begin(update_partition, image_size, &handle);
     
     if (err != ESP_OK) {
+        (void)psa_hash_abort(&writer->hash_operation);
+        writer->hash_active = false;
         return err;
     }
 
@@ -68,6 +77,12 @@ esp_err_t ota_writer_write(
         return err;
     }
 
+    if (!writer->hash_active ||
+        psa_hash_update(&writer->hash_operation, data, data_size) !=
+            PSA_SUCCESS) {
+        return ESP_FAIL;
+    }
+
     writer->written_size += data_size;
 
     return ESP_OK;
@@ -100,14 +115,27 @@ esp_err_t ota_writer_finish(
     writer->active = false;
 
     if (err != ESP_OK) {
+        if (writer->hash_active) {
+            (void)psa_hash_abort(&writer->hash_operation);
+            writer->hash_active = false;
+        }
         return err;
     }
 
     uint8_t actual_sha256[32];
-    err = esp_partition_get_sha256(writer->partition, actual_sha256);
-    if (err != ESP_OK) {
-        return err;
+    size_t actual_sha256_size = 0U;
+    if (!writer->hash_active ||
+        psa_hash_finish(
+            &writer->hash_operation,
+            actual_sha256,
+            sizeof(actual_sha256),
+            &actual_sha256_size) != PSA_SUCCESS ||
+        actual_sha256_size != sizeof(actual_sha256)) {
+        (void)psa_hash_abort(&writer->hash_operation);
+        writer->hash_active = false;
+        return ESP_FAIL;
     }
+    writer->hash_active = false;
     if (memcmp(actual_sha256, expected_sha256, sizeof(actual_sha256)) != 0) {
         return ESP_ERR_INVALID_CRC;
     }
@@ -134,6 +162,10 @@ esp_err_t ota_writer_abort(
     }
 
     esp_err_t err = esp_ota_abort(writer->handle);
+    if (writer->hash_active) {
+        (void)psa_hash_abort(&writer->hash_operation);
+        writer->hash_active = false;
+    }
 
     /*
      * 성공 여부와 관계없이 현재 세션은 더 이상 사용하지 않는다.

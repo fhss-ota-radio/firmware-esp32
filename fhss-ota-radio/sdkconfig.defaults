@@ -27,6 +27,10 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 
+# 새 OTA 이미지의 첫 부팅이 제품 self-test를 통과하기 전에는 확정하지 않는다.
+# 검증 전 crash/reset 또는 명시적 실패 시 bootloader가 이전 슬롯으로 복귀한다.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
 # 팀 대부분이 쓰는 최종 목표 보드(N16R8, Flash 16MB) 기준값 — VSCode
 # 빌드 버튼/`idf.py build`를 옵션 없이 그냥 실행해도 이게 적용된다.
 # 부품 수급 문제로 N8R8(Flash 8MB)을 병행 개발 중인 사람만 아래처럼

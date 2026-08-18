@@ -10,4 +10,5 @@ idf_component_register(
         app_update
         esp_partition
         freertos
+        mbedtls
 )
