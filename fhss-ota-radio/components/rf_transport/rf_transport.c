@@ -38,6 +38,7 @@
 #define CC1101_MARCSTATE_RX       0x0DU
 #define CC1101_MARCSTATE_MASK     0x1FU
 #define CC1101_FIFO_ERROR_MASK    0x80U
+#define CC1101_FIFO_COUNT_MASK    0x7FU
 
 static const char *TAG = "rf_transport";
 
@@ -679,7 +680,14 @@ rf_transport_status_t rf_transport_send_packet(
                          marc_state, tx_bytes);
                 return RF_TRANSPORT_STATUS_SPI_ERROR;
             }
-            return RF_TRANSPORT_STATUS_OK;
+            /* STX can be accepted at the SPI boundary while the radio stays
+             * IDLE (for example when calibration/TX never starts).  The old
+             * code treated that first stale-IDLE sample as successful even
+             * though the complete frame was still queued.  A transmission is
+             * complete only after the FIFO has drained to zero. */
+            if ((tx_bytes & CC1101_FIFO_COUNT_MASK) == 0U) {
+                return RF_TRANSPORT_STATUS_OK;
+            }
         }
         vTaskDelay(1U);
     }
