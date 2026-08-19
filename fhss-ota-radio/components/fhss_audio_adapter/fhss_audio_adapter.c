@@ -244,6 +244,9 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
         .correction_fast_threshold_us = 2000U,
         .correction_slow_divisor = 8U,
         .correction_fast_divisor = 2U,
+        /* Do not mistake a one-slot FreeRTOS/SPI scheduling delay for clock
+         * drift; cap one observation and converge over several valid SYNCs. */
+        .correction_max_step_us = 500U,
         /* 재배정(2026-08-17): SEARCHING이 채널 전체를 훑던 시절엔 137ms를
          * 짧게 잡아야 TX 300ms 주기와 위상이 안 맞고(여러 채널을 골고루
          * 훑으려고) 했는데, 지금은 랑데부 채널(0) 하나만 고정으로 듣는다

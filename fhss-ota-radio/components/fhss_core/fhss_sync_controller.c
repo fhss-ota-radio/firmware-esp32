@@ -35,6 +35,12 @@ static int64_t calculate_phase_correction(
     if (correction_magnitude == 0U) {
         correction_magnitude = 1U;
     }
+    /* A single delayed task wake-up is not radio clock drift. Limit how much
+     * one observation can move the slot reference so the following normal
+     * SYNC packet can pull the scheduler back without losing the hop. */
+    if (correction_magnitude > controller->correction_max_step_us) {
+        correction_magnitude = controller->correction_max_step_us;
+    }
     return timing_error_us < 0
         ? -(int64_t)correction_magnitude
         : (int64_t)correction_magnitude;
@@ -50,6 +56,7 @@ fhss_sync_controller_status_t fhss_sync_controller_init(
     }
     if (config->correction_slow_divisor == 0U ||
         config->correction_fast_divisor == 0U ||
+        config->correction_max_step_us == 0U ||
         config->correction_deadband_us >
             config->correction_fast_threshold_us) {
         return FHSS_CONTROLLER_STATUS_INVALID_ARG;
@@ -62,6 +69,7 @@ fhss_sync_controller_status_t fhss_sync_controller_init(
             config->correction_fast_threshold_us,
         .correction_slow_divisor = config->correction_slow_divisor,
         .correction_fast_divisor = config->correction_fast_divisor,
+        .correction_max_step_us = config->correction_max_step_us,
         .initialized = false,
     };
 

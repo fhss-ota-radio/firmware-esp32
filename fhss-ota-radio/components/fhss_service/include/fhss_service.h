@@ -54,6 +54,7 @@ typedef struct {
     uint32_t correction_fast_threshold_us;
     uint32_t correction_slow_divisor;
     uint32_t correction_fast_divisor;
+    uint32_t correction_max_step_us;
     uint32_t search_dwell_ms;
     uint32_t receive_timeout_ms;
     uint32_t acquire_count;
@@ -78,6 +79,10 @@ typedef struct {
     void *task_handle;
     uint8_t current_channel;
     uint32_t consecutive_sync_misses;
+    /* A/B test counter used only when timestamp fault injection is enabled in
+     * fhss_service.c. It is kept per service so restarting a session resets
+     * the experiment deterministically. */
+    uint32_t test_tracking_sync_count;
     uint8_t recovery_probe_index;
     volatile bool tx_in_flight;
     /* 재배정(2026-08-17): fhss_service_set_role()이 이전엔 task_handle을

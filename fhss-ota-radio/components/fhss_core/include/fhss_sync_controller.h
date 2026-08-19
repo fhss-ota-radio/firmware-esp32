@@ -27,6 +27,7 @@ typedef struct {
     uint32_t correction_fast_threshold_us;
     uint32_t correction_slow_divisor;
     uint32_t correction_fast_divisor;
+    uint32_t correction_max_step_us;
 } fhss_sync_controller_config_t;
 
 typedef struct {
@@ -37,6 +38,7 @@ typedef struct {
     uint32_t correction_fast_threshold_us;
     uint32_t correction_slow_divisor;
     uint32_t correction_fast_divisor;
+    uint32_t correction_max_step_us;
     int64_t last_phase_correction_us;
     int64_t accumulated_phase_correction_us;
     bool initialized;

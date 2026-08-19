@@ -1,84 +1,95 @@
-# FHSS 알고리즘 A/B 장시간 테스트
+# FHSS 시간 보정 알고리즘 A/B 테스트
 
 ## 목적
 
-동일한 무선 환경에서 시간 보정 전·후 펌웨어를 각각 2시간 운용해 동기
-유지율, 제한 복구 성공률, 완전 재탐색 횟수와 보정 안정성을 비교한다.
+단일 수신 지연을 실제 clock drift로 오판해 슬롯 기준을 과도하게 이동시키는 문제를 재현하고, 1회 보정 상한 적용 전후의 동기 유지 성능을 비교한다.
 
-## 비교 대상
+## 공통 조건
 
-| 구분 | 기준 커밋 | 설명 |
-|---|---|---|
-| A | b3a6f78 | seeded hopping과 N/N-1/N+1 복구, 시간 보정 없음 |
-| B | 8086096 이후 | adaptive phase correction 적용 |
+| 항목 | 값 |
+|---|---:|
+| 보드 | ESP32-S3 2대, CC1101 2대 |
+| TX / RX | COM6 / COM10 |
+| 슬롯 길이 | 300,000 us |
+| Timing Window | ±20,000 us |
+| 강제 지연 | +19,000 us |
+| 주입 주기 | TRACKING SYNC 10회마다 |
+| PTT 유지 | 약 15초 |
 
-두 펌웨어는 같은 보드, 거리, 안테나 방향, 전원과 주변 RF 환경에서 측정한다.
-한 번의 실험에서는 알고리즘 파라미터를 하나만 변경한다.
+강제 지연은 RX가 controller에 전달하는 timestamp에만 더했다. 실제 RF airtime과 채널 환경은 바꾸지 않았으므로 시간 보정 알고리즘만 비교할 수 있다.
 
-## 수집 로그
+20,000 us를 그대로 주입하면 실제 지터가 더해져 Timing Window 바깥으로 분류될 수 있다. 실제 장애에서 관측한 약 19.7 ms 지연을 윈도우 내부에서 재현하기 위해 19,000 us를 사용했다.
 
-fhss_service는 diagnostics_interval_ms마다 누적 통계를 출력한다.
+## 비교 설정
 
-~~~text
-FHSS_CSV_HEADER,uptime_ms,state,valid,...,correction_max_abs_us
-FHSS_CSV,5000,TRACKING,16,0,2,1,0,-42,-3,35,0,0,0,1,0,0,8,12,31
-~~~
+| 구분 | 1회 최대 보정량 | 의미 |
+|---|---:|---|
+| A 기준 | 30,000 us | 사실상 상한 없음 |
+| B 후보 | 500 us | 단일 이상치의 영향 제한 |
 
-| 열 | 의미 |
-|---|---|
-| valid | 정상 SYNC 수신 누계 |
-| crc_fail | CRC 실패 누계 |
-| timeout | GDO timestamp timeout 누계 |
-| acquired, lost | 동기 획득·상실 이벤트 누계 |
-| timing_min/avg/max_us | 보정 전 측정한 수신 timing error |
-| recovery_entry | 제한 복구 진입 횟수 |
-| recovery_success | 제한 복구 성공 횟수 |
-| hard_research | 제한 복구 실패 후 완전 재탐색 횟수 |
-| max_misses | 관측된 최대 연속 SYNC MISS |
-| recovery_avg/max_us | 제한 복구 소요 시간 |
-| correction_applied | 0이 아닌 시간 보정 적용 횟수 |
-| correction_avg/max_abs_us | 적용 보정량 절댓값의 평균·최댓값 |
+- ±500 us: deadband, 보정 없음
+- 500~2,000 us: 초과분의 1/8 보정
+- 2,000 us 초과: 추가 초과분의 1/2 보정
+- B에서는 최종 계산 결과를 최대 500 us로 제한
 
-## 로그 저장
+## 실제 결과
 
-보드 포트에 맞춰 monitor 출력을 파일로 저장한다.
+| 지표 | A 기준 | B 후보 | 변화 |
+|---|---:|---:|---:|
+| 정상 수신 SYNC(초기 단일 실행) | 13 | 54 | +41, 4.15배 |
+| 정상 추종 증가율(초기 단일 실행) | 기준 | 기준 대비 | +315% |
+| 반복 강제 이상치 통과 | 0/10회 | 16/16회 | 생존율 0% → 100% |
+| 최대 1회 보정 | 8,691 us | 500 us | 94.2% 감소 |
+| 강제 이상치 후 SYNC_LOST | 10/10회 | 0/16회 | 실패율 100% → 0% |
+| B 연속 TRACKING | 해당 없음 | 180슬롯 이상 | 54초 이상 |
 
-~~~powershell
-idf.py -p COM8 monitor | Tee-Object fhss_b_2h.log
-~~~
+### A 기준 로그
 
-실험 종료 후 CSV 행만 추출한다.
+```text
+A/B FAULT: sync_sample=20 injected_delay=19000 us
+SYNC RX: slot=13 error=19009 us correction=8691 us
+RECOVERY entered after 2 consecutive sync misses
+SYNC_LOST
+```
 
-~~~powershell
-Select-String -Path fhss_b_2h.log -Pattern 'FHSS_CSV(_HEADER)?,' |
-    ForEach-Object { $_.Line -replace '^.*FHSS_CSV', 'FHSS_CSV' } |
-    Set-Content fhss_b_2h.csv
-~~~
+첫 이상치를 실제 drift로 오판해 슬롯 기준을 8.691 ms 이동했다. 이후 SYNC를 한 개도 추가로 받지 못하고 전체 채널 검색으로 복귀했다.
 
-## 핵심 판정식
+### B 후보 로그
 
-~~~text
-복구 성공률 = recovery_success / recovery_entry
-완전 재탐색률 = hard_research / 전체 관측 슬롯
-SYNC 수신 성공 비율 = valid / (valid + timeout + crc_fail)
-~~~
+```text
+A/B FAULT: sync_sample=10 injected_delay=19000 us
+SYNC RX: slot=12 error=19032 us correction=500 us
+SYNC RX: slot=14 error=-977 us correction=-59 us
 
-시간 보정 적용 후에는 다음 조건을 함께 만족해야 개선으로 판단한다.
+A/B FAULT: sync_sample=20 injected_delay=19000 us
+SYNC RX: slot=22 error=18343 us correction=500 us
+```
 
-1. hard_research와 lost가 감소한다.
-2. 복구 성공률이 증가하거나 유지된다.
-3. timing error가 한 방향으로 계속 증가하지 않는다.
-4. correction_max_abs_us가 반복적으로 슬롯 길이에 근접하지 않는다.
-5. CRC 실패와 timeout이 증가하지 않는다.
+B는 19 ms 이상치의 영향을 500 us로 제한했다. 이후 정상 패킷에서 약 -16~-96 us씩 완만하게 반대 방향으로 보정하며 TRACKING을 유지했다.
 
-## 테스트 순서
+반복 시험에서 A는 유효 강제 이상치 10회가 모두 SYNC_LOST로 이어졌다. B는 목표 10회를 넘어 동일 세션에서 최소 16회의 강제 이상치를 연속 통과했고, 약 180슬롯(54초) 이상 TRACKING을 유지했다. 따라서 이 시험 조건의 이상치 생존율은 0%에서 100%로, 동기 상실률은 100%에서 0%로 개선됐다.
 
-1. CONFIG_FREERTOS_HZ=1000, 보드 Flash 종류와 submodule 상태를 확인한다.
-2. A 펌웨어를 양쪽 보드에 올리고 2시간 로그를 저장한다.
-3. 같은 배치에서 B 펌웨어로 바꾸고 2시간 로그를 저장한다.
-4. 정상 환경 비교 후 TX를 1~4 슬롯 동안 차단해 제한 복구를 검증한다.
-5. TX를 loss 임계값 이상 차단해 완전 재탐색과 재획득을 검증한다.
-6. 결과를 바탕으로 deadband, 보정 divisor 또는 복구 임계값 중 하나만 조정한다.
+PTT 해제 뒤 발생한 recovery와 SYNC_LOST는 송신 종료 패킷이 아직 없어 정상 세션 종료를 미수신으로 해석한 별도 문제이며, 시간 보정 실패 통계에서는 제외했다.
 
-현재 코드는 계측 및 CSV 출력까지 구현됐다. 보드가 연결되지 않은 상태에서는
-ESP32-S3 개별 소스 컴파일까지만 검증했으며, 실제 2시간 결과는 아직 없다.
+## 결론
+
+500 us 상한은 단일 스케줄링 지연이 전체 슬롯 기준을 훼손하는 것을 막았다. 초기 단일 실행에서 정상 추종 길이는 13개에서 54개로 315% 증가했다. 반복 시험에서는 A가 10/10회 실패한 반면 B는 최소 16/16회 성공했다.
+
+이 결과는 의도적으로 주입한 19 ms 단발 지연에 대한 값이다. 실제 RF 간섭, 장기 oscillator drift 및 정상 세션 종료 문제는 별도 2시간 시험으로 검증해야 한다.
+
+## 다음 실험
+
+1. 지연 5/10/15/19 ms 단계별 sweep
+2. 500/1,000/2,000 us 보정 상한 비교
+3. 정상 환경에서 불필요한 보정과 음성 패킷 손실률 비교
+4. 2시간 장기 시험으로 clock drift와 채널별 성공률 측정
+
+## 정상 펌웨어 설정
+
+실험 후 timestamp fault injection은 비활성화하고 보정 상한 500 us를 유지한다.
+
+```c
+#define FHSS_SERVICE_TEST_DELAY_ENABLED 0U
+#define FHSS_SERVICE_TEST_DELAY_PERIOD  10U
+#define FHSS_SERVICE_TEST_DELAY_US      19000LL
+```

@@ -21,6 +21,20 @@ typedef enum {
 } receive_result_t;
 
 #define FHSS_SERVICE_TX_QUEUE_DEPTH 8U
+/* Channel switching and SYNC transmission have hard slot deadlines. Keep the
+ * radio service above temporary task-stats logging (priority 10) and audio
+ * producer/consumer tasks (priority 3), which may run for several ms. */
+#define FHSS_SERVICE_TASK_PRIORITY 12U
+/* A maximum audio packet occupies roughly 13 ms on air at 38.4 kBaud once
+ * CC1101 framing is included. Do not start DATA close enough to the next
+ * channel-switch deadline that it can delay the following slot's SYNC. */
+#define FHSS_SERVICE_DATA_TX_AIRTIME_GUARD_US 20000LL
+/* Controlled A/B experiment hook. Enabling it makes the selected TRACKING
+ * observations appear late without perturbing RF airtime. Keep it disabled
+ * in normal firmware; the documented experiment used period 10. */
+#define FHSS_SERVICE_TEST_DELAY_ENABLED 0U
+#define FHSS_SERVICE_TEST_DELAY_PERIOD  10U
+#define FHSS_SERVICE_TEST_DELAY_US     19000LL
 
 typedef struct {
     uint8_t data[RF_TRANSPORT_MAX_PACKET_LENGTH];
@@ -57,10 +71,17 @@ static bool reset_controller(fhss_service_t *service)
             service->config.correction_slow_divisor,
         .correction_fast_divisor =
             service->config.correction_fast_divisor,
+        .correction_max_step_us =
+            service->config.correction_max_step_us,
     };
-    return fhss_sync_controller_init(
-               &service->controller,
-               &controller_config) == FHSS_CONTROLLER_STATUS_OK;
+    const bool initialized = fhss_sync_controller_init(
+                                 &service->controller,
+                                 &controller_config) ==
+                             FHSS_CONTROLLER_STATUS_OK;
+    if (initialized) {
+        service->test_tracking_sync_count = 0U;
+    }
+    return initialized;
 }
 
 static void diagnostics_lock(fhss_service_t *service)
@@ -270,8 +291,11 @@ static rf_transport_status_t send_sync(
 static void drain_tx_data_until(fhss_service_t *service, int64_t deadline_us)
 {
     fhss_service_tx_item_t item;
-    while (esp_timer_get_time() < deadline_us) {
-        const int64_t remaining_us = deadline_us - esp_timer_get_time();
+    const int64_t latest_data_start_us =
+        deadline_us - FHSS_SERVICE_DATA_TX_AIRTIME_GUARD_US;
+    while (esp_timer_get_time() < latest_data_start_us) {
+        const int64_t remaining_us =
+            latest_data_start_us - esp_timer_get_time();
         TickType_t wait_ticks = pdMS_TO_TICKS(
             remaining_us > 20000 ? 20U : (uint32_t)(remaining_us / 1000));
         if (wait_ticks == 0U) {
@@ -283,7 +307,9 @@ static void drain_tx_data_until(fhss_service_t *service, int64_t deadline_us)
                 wait_ticks) != pdTRUE) {
             continue;
         }
-        if (esp_timer_get_time() >= deadline_us) {
+        if (esp_timer_get_time() >= latest_data_start_us) {
+            /* Preserve the frame for the next slot. Dropping it here would
+             * turn a scheduling guard into avoidable audio packet loss. */
             (void)xQueueSendToFront(
                 (QueueHandle_t)service->tx_queue, &item, 0U);
             return;
@@ -410,19 +436,33 @@ static receive_result_t receive_one(
         return RECEIVE_RESULT_DATA;
     }
 
+    int64_t controller_timestamp_us = rx_timestamp_us;
+    if (FHSS_SERVICE_TEST_DELAY_ENABLED != 0U &&
+        service->fsm.state == FHSS_FSM_STATE_TRACKING) {
+        service->test_tracking_sync_count++;
+        if ((service->test_tracking_sync_count %
+             FHSS_SERVICE_TEST_DELAY_PERIOD) == 0U) {
+            controller_timestamp_us += FHSS_SERVICE_TEST_DELAY_US;
+            ESP_LOGW(TAG,
+                     "A/B FAULT: sync_sample=%lu injected_delay=%lld us",
+                     (unsigned long)service->test_tracking_sync_count,
+                     (long long)FHSS_SERVICE_TEST_DELAY_US);
+        }
+    }
+
     const fhss_sync_controller_status_t sync_status =
         service->fsm.state == FHSS_FSM_STATE_RECOVERY
             ? fhss_sync_controller_recover_rx(
                 &service->controller,
                 packet.payload,
                 packet.length,
-                rx_timestamp_us,
+                controller_timestamp_us,
                 out_result)
             : fhss_sync_controller_process_rx(
                 &service->controller,
                 packet.payload,
                 packet.length,
-                rx_timestamp_us,
+                controller_timestamp_us,
                 out_result);
     if (sync_status != FHSS_CONTROLLER_STATUS_OK) {
         return RECEIVE_RESULT_SYNC_ERROR;
@@ -764,6 +804,7 @@ bool fhss_service_init(
         config->search_dwell_ms == 0U || config->receive_timeout_ms == 0U ||
         config->correction_slow_divisor == 0U ||
         config->correction_fast_divisor == 0U ||
+        config->correction_max_step_us == 0U ||
         config->correction_deadband_us >
             config->correction_fast_threshold_us ||
         config->recovery_entry_miss_count == 0U ||
@@ -851,7 +892,7 @@ bool fhss_service_start(fhss_service_t *service)
             "fhss_service",
             8192U,
             service,
-            6U,
+            FHSS_SERVICE_TASK_PRIORITY,
             &task) != pdPASS) {
         fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_STOP);
         return false;
