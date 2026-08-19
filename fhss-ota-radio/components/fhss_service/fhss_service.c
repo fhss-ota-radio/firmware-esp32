@@ -18,6 +18,7 @@ typedef enum {
     RECEIVE_RESULT_RADIO_ERROR,
     RECEIVE_RESULT_SYNC_ERROR,
     RECEIVE_RESULT_DATA,
+    RECEIVE_RESULT_SESSION_END,
 } receive_result_t;
 
 #define FHSS_SERVICE_TX_QUEUE_DEPTH 8U
@@ -427,10 +428,15 @@ static receive_result_t receive_one(
     if (!fhss_sync_packet_has_valid_magic(packet.payload, packet.length)) {
         if (service->fsm.state != FHSS_FSM_STATE_SEARCHING &&
             service->config.data_callback != NULL) {
-            service->config.data_callback(
+            const fhss_service_data_action_t action =
+                service->config.data_callback(
                 packet.payload,
                 packet.length,
                 service->config.event_context);
+            if (action == FHSS_SERVICE_DATA_SESSION_END) {
+                *out_rx_timestamp_us = rx_timestamp_us;
+                return RECEIVE_RESULT_SESSION_END;
+            }
         }
         *out_rx_timestamp_us = rx_timestamp_us;
         return RECEIVE_RESULT_DATA;
@@ -617,7 +623,30 @@ static uint32_t get_recovery_probe_slot(
         : predicted_slot + (uint32_t)offset;
 }
 
-static void drain_rx_data_until(
+static bool handle_session_end(fhss_service_t *service)
+{
+    /* A peer ended the talkspurt normally. Clear the old timing reference and
+     * return to the common rendezvous channel without counting fake misses or
+     * escalating the application through SYNC_LOST. */
+    fhss_fsm_init(&service->fsm);
+    if (!reset_controller(service) ||
+        !fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_START_RX)) {
+        report_event(service, FHSS_SERVICE_EVENT_ERROR);
+        return false;
+    }
+    service->consecutive_sync_misses = 0U;
+    service->recovery_probe_index = 0U;
+    service->test_tracking_sync_count = 0U;
+    if (!select_channel(service, 0U)) {
+        report_event(service, FHSS_SERVICE_EVENT_ERROR);
+        return false;
+    }
+    ESP_LOGI(TAG, "peer talkspurt ended; rendezvous RX resumed on channel=%u",
+             service->current_channel);
+    return true;
+}
+
+static bool drain_rx_data_until(
     fhss_service_t *service,
     int64_t switch_time_us
 )
@@ -628,7 +657,7 @@ static void drain_rx_data_until(
     for (;;) {
         const int64_t remaining_us = switch_time_us - esp_timer_get_time();
         if (remaining_us <= 1000) {
-            return;
+            return false;
         }
 
         /* 재배정(2026-08-17): 20ms 상한이 49바이트 페이로드(38.4kBaud 기준
@@ -661,6 +690,9 @@ static void drain_rx_data_until(
         if (receive_result == RECEIVE_RESULT_DATA) {
             continue;
         }
+        if (receive_result == RECEIVE_RESULT_SESSION_END) {
+            return handle_session_end(service);
+        }
         if (receive_result == RECEIVE_RESULT_OK) {
             /* Tolerate a repeated SYNC while draining without losing the
              * opportunity to refresh the scheduler reference. */
@@ -675,7 +707,7 @@ static void drain_rx_data_until(
 
         ESP_LOGW(TAG, "RX data drain stopped: result=%d channel=%u",
                  receive_result, service->current_channel);
-        return;
+        return false;
     }
 }
 
@@ -740,7 +772,9 @@ static void rx_task(fhss_service_t *service)
             continue;
         }
 
-        drain_rx_data_until(service, switch_time_us);
+        if (drain_rx_data_until(service, switch_time_us)) {
+            continue;
+        }
         delay_until_us(switch_time_us);
         uint32_t channel_slot = next_slot;
         if (service->fsm.state == FHSS_FSM_STATE_RECOVERY) {
@@ -767,6 +801,8 @@ static void rx_task(fhss_service_t *service)
             service, receive_result, &result, rx_timestamp_us);
         if (receive_result == RECEIVE_RESULT_OK) {
             handle_sync_result(service, &result);
+        } else if (receive_result == RECEIVE_RESULT_SESSION_END) {
+            (void)handle_session_end(service);
         } else if (receive_result == RECEIVE_RESULT_DATA) {
             /* Data packets do not advance the sync miss counter. */
         } else if (receive_result == RECEIVE_RESULT_TIMEOUT ||

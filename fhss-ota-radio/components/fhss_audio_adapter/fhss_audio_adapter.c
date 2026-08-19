@@ -34,6 +34,7 @@
 #define CC1101_SPI_CLOCK_HZ 100000
 
 #define FHSS_AUDIO_TX_DRAIN_TIMEOUT_MS 600U
+#define FHSS_AUDIO_END_REPEAT_COUNT 3U
 #define OTA_FIXED_CHANNEL 0U
 
 /* 재배정 이력(2026-08-17):
@@ -60,10 +61,14 @@ typedef struct {
     size_t frame_lengths[FHSS_AUDIO_PACKET_MAX_FRAMES];
     size_t frame_count;
     uint16_t tx_sequence;
+    uint16_t tx_session_id;
     uint16_t expected_rx_sequence;
     uint32_t tx_packet_count;
     uint32_t rx_packet_count;
     bool have_rx_sequence;
+    bool have_last_rx_end;
+    uint16_t last_rx_end_session_id;
+    uint16_t last_rx_end_sequence;
     bool initialized;
     bool tx_active;
     bool ota_active;
@@ -100,19 +105,43 @@ static void on_service_event(fhss_service_event_t event, void *context)
     }
 }
 
-static void on_service_data(
+static fhss_service_data_action_t on_service_data(
     const uint8_t *data,
     size_t length,
     void *context
 )
 {
     (void)context;
+    fhss_audio_end_packet_t end = {0};
+    if (fhss_audio_end_packet_unpack(data, length, &end) ==
+        FHSS_AUDIO_PACKET_STATUS_OK) {
+        const bool duplicate = s_adapter.have_last_rx_end &&
+            end.session_id == s_adapter.last_rx_end_session_id &&
+            end.final_sequence == s_adapter.last_rx_end_sequence;
+        if (!duplicate) {
+            s_adapter.have_last_rx_end = true;
+            s_adapter.last_rx_end_session_id = end.session_id;
+            s_adapter.last_rx_end_sequence = end.final_sequence;
+            s_adapter.have_rx_sequence = false;
+            ESP_LOGI(TAG, "TALKSPURT_END RX: session=%u final_sequence=%u",
+                     end.session_id, end.final_sequence);
+            if (s_adapter.config.event_callback != NULL) {
+                s_adapter.config.event_callback(
+                    FHSS_AUDIO_ADAPTER_EVENT_TALKSPURT_ENDED,
+                    s_adapter.config.callback_context);
+            }
+        }
+        /* Repeated END packets must also return the radio to rendezvous mode,
+         * but only the first copy is forwarded to the application FSM. */
+        return FHSS_SERVICE_DATA_SESSION_END;
+    }
+
     fhss_audio_packet_view_t packet = {0};
     if (fhss_audio_packet_unpack(data, length, &packet) !=
         FHSS_AUDIO_PACKET_STATUS_OK) {
         ESP_LOGW(TAG, "dropping invalid audio packet: length=%u",
                  (unsigned)length);
-        return;
+        return FHSS_SERVICE_DATA_CONTINUE;
     }
 
     if (s_adapter.have_rx_sequence &&
@@ -144,6 +173,7 @@ static void on_service_data(
                      packet.sequence, (unsigned)i);
         }
     }
+    return FHSS_SERVICE_DATA_CONTINUE;
 }
 
 static bool send_buffered_frames(uint8_t flags)
@@ -188,6 +218,35 @@ static bool send_buffered_frames(uint8_t flags)
     s_adapter.tx_sequence++;
     s_adapter.frame_count = 0U;
     memset(s_adapter.frame_lengths, 0, sizeof(s_adapter.frame_lengths));
+    return true;
+}
+
+static bool send_end_packets(void)
+{
+    const fhss_audio_end_packet_t end = {
+        .session_id = s_adapter.tx_session_id,
+        .final_sequence = s_adapter.tx_sequence == 0U
+            ? FHSS_AUDIO_END_NO_AUDIO_SEQUENCE
+            : (uint16_t)(s_adapter.tx_sequence - 1U),
+        .reason = FHSS_AUDIO_END_REASON_PTT_RELEASE,
+    };
+    uint8_t packet[FHSS_AUDIO_END_PACKET_SIZE] = {0};
+    size_t packet_length = 0U;
+    if (fhss_audio_end_packet_pack(
+            &end, packet, sizeof(packet), &packet_length) !=
+        FHSS_AUDIO_PACKET_STATUS_OK) {
+        return false;
+    }
+    for (uint32_t i = 0U; i < FHSS_AUDIO_END_REPEAT_COUNT; ++i) {
+        if (!fhss_service_send_data(
+                &s_adapter.service, packet, packet_length)) {
+            ESP_LOGW(TAG, "END TX queue full: copy=%lu",
+                     (unsigned long)(i + 1U));
+            return false;
+        }
+    }
+    ESP_LOGI(TAG, "TALKSPURT_END TX: session=%u final_sequence=%u copies=%u",
+             end.session_id, end.final_sequence, FHSS_AUDIO_END_REPEAT_COUNT);
     return true;
 }
 
@@ -285,6 +344,10 @@ bool fhss_audio_adapter_begin_tx(void)
     s_adapter.frame_count = 0U;
     s_adapter.tx_sequence = 0U;
     s_adapter.tx_packet_count = 0U;
+    s_adapter.tx_session_id++;
+    if (s_adapter.tx_session_id == 0U) {
+        s_adapter.tx_session_id = 1U;
+    }
     if (!fhss_service_set_role(&s_adapter.service, FHSS_SERVICE_ROLE_TX)) {
         return false;
     }
@@ -315,7 +378,12 @@ bool fhss_audio_adapter_end_tx(void)
     if (!s_adapter.initialized || !s_adapter.tx_active) {
         return true;
     }
-    bool ok = send_buffered_frames(FHSS_AUDIO_PACKET_FLAG_END_OF_TALKSPURT);
+    /* Flush real audio first, then send a control-only END packet. The old
+     * audio flag could not represent a PTT release when no frame was pending. */
+    bool ok = send_buffered_frames(0U);
+    if (!send_end_packets()) {
+        ok = false;
+    }
     /* A short PTT press can end before the first 300 ms FHSS slot starts.
      * Wait for both the software queue and the CC1101 transaction instead of
      * using a fixed delay, otherwise the final talkspurt packet can be lost. */

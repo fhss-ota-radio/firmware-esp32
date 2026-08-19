@@ -25,7 +25,12 @@ typedef void (*fhss_service_event_callback_t)(
     void *context
 );
 
-typedef void (*fhss_service_data_callback_t)(
+typedef enum {
+    FHSS_SERVICE_DATA_CONTINUE = 0,
+    FHSS_SERVICE_DATA_SESSION_END,
+} fhss_service_data_action_t;
+
+typedef fhss_service_data_action_t (*fhss_service_data_callback_t)(
     const uint8_t *data,
     size_t length,
     void *context

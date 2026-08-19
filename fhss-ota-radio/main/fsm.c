@@ -216,14 +216,24 @@ static bool on_fhss_rx_audio_frame(const uint8_t *frame, size_t length, void *co
     return fsm_post_rx_audio_frame(frame, length);
 }
 
-/* 정상적인 슬롯 보정은 FHSS 내부에서 처리하고, 완전히 추종을 놓치거나 RF 계층이
- * 복구 불가능할 때만 팀 FSM의 전역 안전장치 이벤트로 변환한다. */
+/* 정상적인 슬롯 보정은 FHSS 내부에서 처리한다. TALKSPURT_ENDED만 RX_AUDIO를
+ * 즉시 정상 종료하기 위해 RX_DONE으로 변환한다. 이 연결이 없으면 PTT를 놓은 뒤
+ * 수신 측이 1초 무음 timeout까지 기다리고 이후 SYNC_LOST로 오인할 수 있다. */
 static void on_fhss_audio_event(fhss_audio_adapter_event_t event, void *context)
 {
     (void)context;
-    fsm_post_event(event == FHSS_AUDIO_ADAPTER_EVENT_SYNC_LOST
-        ? FSM_EVENT_SYNC_LOST
-        : FSM_EVENT_ERROR);
+    switch (event) {
+    case FHSS_AUDIO_ADAPTER_EVENT_SYNC_LOST:
+        fsm_post_event(FSM_EVENT_SYNC_LOST);
+        break;
+    case FHSS_AUDIO_ADAPTER_EVENT_TALKSPURT_ENDED:
+        fsm_post_event(FSM_EVENT_RX_DONE);
+        break;
+    case FHSS_AUDIO_ADAPTER_EVENT_ERROR:
+    default:
+        fsm_post_event(FSM_EVENT_ERROR);
+        break;
+    }
 }
 
 /* 상태별 이름/이벤트별 이름: 로그 및 OLED 표시용 */

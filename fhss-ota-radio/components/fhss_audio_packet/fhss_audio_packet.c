@@ -131,3 +131,58 @@ fhss_audio_packet_status_t fhss_audio_packet_unpack(
     *out_view = view;
     return FHSS_AUDIO_PACKET_STATUS_OK;
 }
+
+fhss_audio_packet_status_t fhss_audio_end_packet_pack(
+    const fhss_audio_end_packet_t *end,
+    uint8_t *out_packet,
+    size_t out_capacity,
+    size_t *out_length
+)
+{
+    if (end == NULL || out_packet == NULL || out_length == NULL) {
+        return FHSS_AUDIO_PACKET_STATUS_INVALID_ARGUMENT;
+    }
+    if (out_capacity < FHSS_AUDIO_END_PACKET_SIZE) {
+        return FHSS_AUDIO_PACKET_STATUS_BUFFER_TOO_SMALL;
+    }
+
+    const uint8_t packet[FHSS_AUDIO_END_PACKET_SIZE] = {
+        FHSS_AUDIO_PACKET_MAGIC,
+        FHSS_AUDIO_PACKET_VERSION,
+        FHSS_AUDIO_END_PACKET_TYPE,
+        (uint8_t)end->reason,
+        (uint8_t)(end->session_id & 0xFFU),
+        (uint8_t)(end->session_id >> 8U),
+        (uint8_t)(end->final_sequence & 0xFFU),
+        (uint8_t)(end->final_sequence >> 8U),
+        0U,
+    };
+    memcpy(out_packet, packet, sizeof(packet));
+    *out_length = sizeof(packet);
+    return FHSS_AUDIO_PACKET_STATUS_OK;
+}
+
+fhss_audio_packet_status_t fhss_audio_end_packet_unpack(
+    const uint8_t *packet,
+    size_t packet_length,
+    fhss_audio_end_packet_t *out_end
+)
+{
+    if (packet == NULL || out_end == NULL) {
+        return FHSS_AUDIO_PACKET_STATUS_INVALID_ARGUMENT;
+    }
+    if (packet_length != FHSS_AUDIO_END_PACKET_SIZE ||
+        packet[0] != FHSS_AUDIO_PACKET_MAGIC ||
+        packet[1] != FHSS_AUDIO_PACKET_VERSION ||
+        packet[2] != FHSS_AUDIO_END_PACKET_TYPE ||
+        packet[3] != FHSS_AUDIO_END_REASON_PTT_RELEASE ||
+        packet[8] != 0U) {
+        return FHSS_AUDIO_PACKET_STATUS_INVALID_FORMAT;
+    }
+
+    out_end->reason = (fhss_audio_end_reason_t)packet[3];
+    out_end->session_id = (uint16_t)packet[4] | ((uint16_t)packet[5] << 8U);
+    out_end->final_sequence =
+        (uint16_t)packet[6] | ((uint16_t)packet[7] << 8U);
+    return FHSS_AUDIO_PACKET_STATUS_OK;
+}

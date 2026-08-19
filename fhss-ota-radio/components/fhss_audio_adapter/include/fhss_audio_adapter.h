@@ -16,6 +16,7 @@ typedef bool (*fhss_audio_adapter_rx_frame_callback_t)(
 
 typedef enum {
     FHSS_AUDIO_ADAPTER_EVENT_SYNC_LOST = 0,
+    FHSS_AUDIO_ADAPTER_EVENT_TALKSPURT_ENDED,
     FHSS_AUDIO_ADAPTER_EVENT_ERROR,
 } fhss_audio_adapter_event_t;
 
