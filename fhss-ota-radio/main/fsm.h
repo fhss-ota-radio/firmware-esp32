@@ -73,7 +73,7 @@ typedef enum {
 } fsm_event_t;
 
 /* FSM 태스크와 이벤트 큐를 생성한다. app_main()에서 한 번 호출. */
-void fsm_init(void);
+bool fsm_init(void);
 
 /* 다른 태스크/ISR에서 이벤트를 큐에 넣는다 (ISR에서는 안전하지 않음, 디퍼드 처리 필요). */
 void fsm_post_event(fsm_event_t event);

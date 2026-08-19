@@ -787,6 +787,31 @@ bool fhss_service_start(fhss_service_t *service)
     return true;
 }
 
+bool fhss_service_pause(fhss_service_t *service)
+{
+    if (service == NULL || !service->initialized) {
+        return false;
+    }
+    if (service->task_handle != NULL) {
+        service->should_stop = true;
+        while (service->task_handle != NULL) {
+            vTaskDelay(pdMS_TO_TICKS(5U));
+        }
+        service->should_stop = false;
+    }
+    service->tx_in_flight = false;
+    if (service->tx_queue != NULL) {
+        xQueueReset((QueueHandle_t)service->tx_queue);
+    }
+    fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_STOP);
+    if (rf_transport_recover_433mhz(&service->radio) !=
+        RF_TRANSPORT_STATUS_OK) {
+        ESP_LOGE(TAG, "CC1101 recovery failed while pausing service");
+        return false;
+    }
+    return true;
+}
+
 bool fhss_service_set_role(
     fhss_service_t *service,
     fhss_service_role_t role

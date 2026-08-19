@@ -96,6 +96,9 @@ bool fhss_service_init(
 );
 
 bool fhss_service_start(fhss_service_t *service);
+/* Cooperatively stops the service task and leaves the shared radio recovered
+ * and exclusively available to another mode such as fixed-channel OTA. */
+bool fhss_service_pause(fhss_service_t *service);
 bool fhss_service_set_role(
     fhss_service_t *service,
     fhss_service_role_t role

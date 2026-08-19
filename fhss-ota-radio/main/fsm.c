@@ -8,8 +8,10 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_system.h"
 
 #include "audio_codec.h"
 #include "audio_io.h"
@@ -17,6 +19,9 @@
 #include "display_ui.h"
 #include "fhss_audio_adapter.h"
 #include "fhss_audio_pcm_test.h"
+#include "firmware_version.h"
+#include "ota_client.h"
+#include "ota_protocol.h"
 #include "ptt_button.h"
 #include "rotary_encoder.h"
 #include "status_led.h"
@@ -56,6 +61,152 @@ typedef struct {
 } fsm_rx_audio_frame_t;
 
 static QueueHandle_t s_rx_audio_queue;
+static TaskHandle_t s_ota_radio_task;
+static volatile bool s_ota_radio_should_stop;
+static SemaphoreHandle_t s_ota_response_done;
+static volatile bool s_ota_ready_to_reboot;
+static TaskHandle_t s_ota_reboot_task;
+
+#define OTA_RADIO_RX_TIMEOUT_MS 40U
+#define OTA_RESPONSE_WAIT_MS    150U
+#define OTA_REBOOT_DELAY_MS     250U
+
+static void ota_reboot_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(OTA_REBOOT_DELAY_MS));
+    ESP_LOGI(TAG, "final END ACK sent; restarting into OTA partition");
+    esp_restart();
+}
+
+static esp_err_t ota_radio_send_callback(
+    const uint8_t *packet,
+    size_t packet_length,
+    void *context
+)
+{
+    (void)context;
+    const esp_err_t result = fhss_audio_adapter_ota_send(packet, packet_length)
+        ? ESP_OK
+        : ESP_FAIL;
+
+    ota_packet_type_t response_type;
+    ota_ack_fields_t ack;
+    const bool final_end_ack =
+        result == ESP_OK &&
+        s_ota_ready_to_reboot &&
+        ota_protocol_decode_ack(
+            packet, packet_length, &response_type, &ack) &&
+        response_type == OTA_PKT_ACK &&
+        ack.acknowledged_type == (uint8_t)OTA_PKT_END;
+
+    if (s_ota_response_done != NULL) {
+        xSemaphoreGive(s_ota_response_done);
+    }
+
+    /* ota_writer_finish() has already selected the new boot partition.  The
+     * synchronous radio send above reaches IDLE only after the complete END
+     * ACK has left the CC1101, so rebooting from a separate task cannot cut
+     * the final handshake short. */
+    if (final_end_ack && s_ota_reboot_task == NULL) {
+        if (xTaskCreate(
+                ota_reboot_task,
+                "ota_reboot",
+                2048U,
+                NULL,
+                tskIDLE_PRIORITY + 2U,
+                &s_ota_reboot_task) != pdPASS) {
+            s_ota_reboot_task = NULL;
+            /* The ACK is already completely transmitted.  A short blocking
+             * fallback is safer than leaving a verified image selected but
+             * never rebooting solely because task allocation failed. */
+            ESP_LOGW(TAG, "reboot task allocation failed; using inline delay");
+            vTaskDelay(pdMS_TO_TICKS(OTA_REBOOT_DELAY_MS));
+            esp_restart();
+        }
+    }
+    return result;
+}
+
+static void ota_radio_task(void *arg)
+{
+    (void)arg;
+    uint8_t packet[OTA_CLIENT_MAX_PACKET_LENGTH];
+    while (!s_ota_radio_should_stop) {
+        size_t packet_length = 0U;
+        const fhss_audio_adapter_ota_rx_status_t status =
+            fhss_audio_adapter_ota_receive(
+                packet,
+                sizeof(packet),
+                &packet_length,
+                OTA_RADIO_RX_TIMEOUT_MS);
+        if (status == FHSS_AUDIO_ADAPTER_OTA_RX_OK) {
+            if (s_ota_response_done != NULL) {
+                (void)xSemaphoreTake(s_ota_response_done, 0U);
+            }
+            const esp_err_t err = ota_client_submit_packet(
+                packet, packet_length);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "OTA RX queue submit failed: %s",
+                         esp_err_to_name(err));
+            } else if (s_ota_response_done != NULL) {
+                /* Do not re-enter RX before the lower-priority consumer has
+                 * encoded and transmitted ACK/NACK on the same half-duplex
+                 * radio. Malformed packets legitimately time out here. */
+                (void)xSemaphoreTake(
+                    s_ota_response_done,
+                    pdMS_TO_TICKS(OTA_RESPONSE_WAIT_MS));
+            }
+        } else if (status == FHSS_AUDIO_ADAPTER_OTA_RX_CRC_ERROR) {
+            ESP_LOGW(TAG, "OTA RF packet dropped: CC1101 CRC failed");
+        } else if (status == FHSS_AUDIO_ADAPTER_OTA_RX_ERROR &&
+                   !s_ota_radio_should_stop) {
+            ESP_LOGE(TAG, "OTA RF receive failed");
+            fsm_post_event(FSM_EVENT_ERROR);
+            break;
+        } else {
+            /* Allow timeout-driven NACK processing to acquire the radio mutex. */
+            vTaskDelay(1U);
+        }
+    }
+    s_ota_radio_task = NULL;
+    vTaskDelete(NULL);
+}
+
+static bool start_ota_radio(void)
+{
+    if (s_ota_radio_task != NULL) {
+        return true;
+    }
+    if (!fhss_audio_adapter_begin_ota()) {
+        return false;
+    }
+    s_ota_radio_should_stop = false;
+    if (xTaskCreate(
+            ota_radio_task,
+            "ota_radio",
+            4096U,
+            NULL,
+            tskIDLE_PRIORITY + 4U,
+            &s_ota_radio_task) != pdPASS) {
+        s_ota_radio_task = NULL;
+        (void)fhss_audio_adapter_end_ota();
+        return false;
+    }
+    return true;
+}
+
+static bool stop_ota_radio(void)
+{
+    if (s_ota_radio_task != NULL) {
+        s_ota_radio_should_stop = true;
+        while (s_ota_radio_task != NULL) {
+            vTaskDelay(pdMS_TO_TICKS(5U));
+        }
+        s_ota_radio_should_stop = false;
+    }
+    return fhss_audio_adapter_end_ota();
+}
 
 /* RF 태스크에서 Speex decode/I2S 재생까지 실행하면 다음 홉 수신이 늦어진다.
  * 따라서 수신 frame은 팀 FSM이 이미 소유한 오디오 큐로 넘겨 RX 태스크가 재생한다. */
@@ -165,7 +316,6 @@ static const fsm_transition_t s_transitions[] = {
     { FSM_STATE_OTA_RECEIVING, FSM_EVENT_OTA_CHUNK,      FSM_STATE_OTA_RECEIVING },
     { FSM_STATE_OTA_RECEIVING, FSM_EVENT_OTA_COMPLETE,   FSM_STATE_OTA_APPLYING },
 
-    { FSM_STATE_OTA_APPLYING,  FSM_EVENT_OTA_VERIFY_OK,   FSM_STATE_BOOT_INIT },
     { FSM_STATE_OTA_APPLYING,  FSM_EVENT_OTA_VERIFY_FAIL, FSM_STATE_MENU_OTA },
 
     { FSM_STATE_ERROR,         FSM_EVENT_RETRY,          FSM_STATE_BOOT_INIT },
@@ -538,6 +688,29 @@ static void on_enter_boot_init(void)
             fsm_post_event(FSM_EVENT_ERROR);
         }
 
+        uint8_t id[DEVICE_ID_LEN] = {0};
+        device_id_get(id);
+        const ota_client_config_t ota_config = {
+            .device_id = ((uint32_t)id[0] << 16U) |
+                         ((uint32_t)id[1] << 8U) |
+                         (uint32_t)id[2],
+            .firmware_version = {
+                FIRMWARE_VERSION_MAJOR,
+                FIRMWARE_VERSION_MINOR,
+                FIRMWARE_VERSION_PATCH,
+            },
+            .receive_timeout_ms = 500U,
+            .send_callback = ota_radio_send_callback,
+            .event_callback = fsm_ota_event_callback,
+            .ota_mode_callback = fsm_ota_mode_callback,
+            .callback_context = NULL,
+        };
+        if (ota_client_init(&ota_config) != ESP_OK ||
+            ota_client_start_consumer() != ESP_OK) {
+            ESP_LOGE(TAG, "OTA client initialization failed");
+            fsm_post_event(FSM_EVENT_ERROR);
+        }
+
         s_boot_init_done = true;
     }
 }
@@ -547,6 +720,9 @@ static void on_enter_boot_init(void)
  * 완전히 다른 뮤트 상태). */
 static void on_enter_menu_comm(void)
 {
+    if (!stop_ota_radio()) {
+        ESP_LOGW(TAG, "failed to leave OTA radio mode cleanly");
+    }
     if (s_tx_audio_task != NULL) {
         stop_tx_audio_task();
 #if FHSS_AUDIO_PCM_TEST_ENABLED
@@ -593,6 +769,9 @@ static void on_enter_menu_comm(void)
  * 오디오 태스크가 실행 중일 수 없다 — 정리할 게 없다. */
 static void on_enter_menu_idle(void)
 {
+    if (!stop_ota_radio()) {
+        ESP_LOGW(TAG, "failed to leave OTA radio mode cleanly");
+    }
     display_ui_draw_menu(DISPLAY_UI_MENU_IDLE, menu_item_from_rotary(rotary_encoder_get_cursor()));
 #ifdef LOOPBACK_ENABLE
     display_ui_set_status_scroll("PRESS PTT TO TEST LOOPBACK");
@@ -607,7 +786,10 @@ static void on_enter_menu_ota(void)
     /* 글자 수는 화면 폭(8자)에 다 들어가지만, "대기 중"임을 시각적으로
      * 드러내려고 일부러 흐르는 문구로 표시(display_ui_set_status_scroll()). */
     display_ui_set_status_scroll("STANDBY");
-    /* TODO(팀2): CC1101 OTA 채널 리스닝 준비. */
+    if (!start_ota_radio()) {
+        ESP_LOGE(TAG, "failed to start OTA channel listener");
+        fsm_post_event(FSM_EVENT_ERROR);
+    }
 }
 static void on_enter_tx_audio(void)
 {
@@ -659,15 +841,13 @@ static void on_enter_rx_audio(void)
 static void on_enter_ota_receiving(void)
 {
     display_ui_set_status_scroll("RX 0%");
-    /* TODO(팀2): OTA 수신 버퍼 초기화, 음성 태스크 일시 중단 */
 }
 
-/* OTA_COMPLETE(모든 청크 수신 완료)로 여기 진입 — 실제 이미지 검증/파티션
- * 기록은 팀2 TODO로 남겨두고, 지금은 진행 중임을 영어로 표시만 한다. */
+/* OTA_COMPLETE 시 ota_writer_finish()가 이미지와 SHA-256을 검증하고 다음 부팅
+ * 파티션을 지정한다. 여기서는 최종 END ACK가 전송될 때까지 상태를 유지한다. */
 static void on_enter_ota_applying(void)
 {
-    display_ui_set_status_scroll("APPLY PENDING");
-    /* TODO(팀2): 이미지 검증 및 OTA 파티션 기록 */
+    display_ui_set_status_scroll("VERIFYING");
 }
 /*
  * EV_ERROR는 전역 전이라(fsm_task() 참고) 어느 상태에서든 여기로 곧장 올 수
@@ -682,6 +862,9 @@ static void on_enter_error(void)
     ESP_LOGE(TAG, "entering ERROR state");
 
     stop_tx_audio_task();
+    if (!stop_ota_radio()) {
+        ESP_LOGW(TAG, "failed to stop OTA radio while entering ERROR");
+    }
     /* ERROR에서도 RF TX 세션을 반드시 닫아 producer가 멈춘 뒤 큐가 차며
      * SUBMIT_FAIL이 반복되는 현상을 막고, 상대 수신 가능한 시작 상태로 복귀한다. */
     if (!fhss_audio_adapter_end_tx()) {
@@ -760,11 +943,22 @@ static void fsm_task(void *arg)
     }
 }
 
-void fsm_init(void)
+bool fsm_init(void)
 {
     s_event_queue = xQueueCreate(16, sizeof(fsm_event_t));
     s_rx_audio_queue = xQueueCreate(FSM_RX_AUDIO_QUEUE_DEPTH, sizeof(fsm_rx_audio_frame_t));
-    xTaskCreate(fsm_task, "fsm_task", 4096, NULL, tskIDLE_PRIORITY + 3, NULL);
+    s_ota_response_done = xSemaphoreCreateBinary();
+    if (s_event_queue == NULL || s_rx_audio_queue == NULL ||
+        s_ota_response_done == NULL) {
+        ESP_LOGE(TAG, "failed to allocate FSM queues/semaphore");
+        return false;
+    }
+    if (xTaskCreate(fsm_task, "fsm_task", 4096, NULL,
+                    tskIDLE_PRIORITY + 3, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "failed to create FSM task");
+        return false;
+    }
+    return true;
 }
 
 void fsm_post_event(fsm_event_t event)
@@ -840,7 +1034,11 @@ void fsm_ota_event_callback(
             fsm_post_event(FSM_EVENT_OTA_COMPLETE);
             break;
         case OTA_CLIENT_EVENT_COMPLETED:
-            fsm_post_event(FSM_EVENT_OTA_VERIFY_OK);
+            /* ota_client emits COMPLETED after esp_ota_set_boot_partition(),
+             * before ota_consumer sends the END ACK.  The send callback uses
+             * this flag to restart only after that synchronous RF TX succeeds. */
+            s_ota_ready_to_reboot = true;
+            display_ui_set_status_scroll("RESTARTING");
             break;
         case OTA_CLIENT_EVENT_FAILED:
             ESP_LOGE(TAG, "OTA failed: %s", esp_err_to_name(error));
