@@ -75,6 +75,7 @@ static void diagnostics_unlock(fhss_service_t *service)
 
 static void log_diagnostics(fhss_service_t *service, int64_t now_us)
 {
+    static bool csv_header_logged;
     fhss_diagnostics_snapshot_t snapshot = {0};
     if (!fhss_service_get_diagnostics(service, &snapshot)) {
         return;
@@ -86,6 +87,14 @@ static void log_diagnostics(fhss_service_t *service, int64_t now_us)
     const int64_t last_valid_age_ms = snapshot.last_valid_timestamp_us > 0
         ? (now_us - snapshot.last_valid_timestamp_us) / 1000
         : -1;
+    const int64_t recovery_average_us =
+        snapshot.recovery_duration_sample_count > 0U
+        ? snapshot.recovery_duration_sum_us /
+            snapshot.recovery_duration_sample_count
+        : 0;
+    const int64_t correction_average_us = snapshot.correction_applied_count > 0U
+        ? snapshot.correction_abs_sum_us / snapshot.correction_applied_count
+        : 0;
     ESP_LOGI(TAG,
              "DIAG state=%s valid=%lu crc_fail=%lu timeout=%lu "
              "acquired=%lu lost=%lu timing_us[min/avg/max]=%lld/%lld/%lld "
@@ -100,6 +109,53 @@ static void log_diagnostics(fhss_service_t *service, int64_t now_us)
              (long long)average_us,
              (long long)snapshot.timing_error_max_us,
              (long long)last_valid_age_ms);
+
+    ESP_LOGI(TAG,
+             "DIAG recovery[entry/success/research]=%lu/%lu/%lu "
+             "max_misses=%lu recovery_us[avg/max]=%lld/%lld "
+             "correction[applied/avg_abs/max_abs]=%lu/%lld/%lld",
+             (unsigned long)snapshot.recovery_entry_count,
+             (unsigned long)snapshot.recovery_success_count,
+             (unsigned long)snapshot.hard_research_count,
+             (unsigned long)snapshot.max_consecutive_misses,
+             (long long)recovery_average_us,
+             (long long)snapshot.recovery_duration_max_us,
+             (unsigned long)snapshot.correction_applied_count,
+             (long long)correction_average_us,
+             (long long)snapshot.correction_abs_max_us);
+
+    /* Stable comma-separated output lets a long monitor capture be imported
+     * directly into a spreadsheet for before/after algorithm comparison. */
+    if (!csv_header_logged) {
+        ESP_LOGI(TAG,
+                 "FHSS_CSV_HEADER,uptime_ms,state,valid,crc_fail,timeout,"
+                 "acquired,lost,timing_min_us,timing_avg_us,timing_max_us,"
+                 "recovery_entry,recovery_success,hard_research,max_misses,"
+                 "recovery_avg_us,recovery_max_us,correction_applied,"
+                 "correction_avg_abs_us,correction_max_abs_us");
+        csv_header_logged = true;
+    }
+    ESP_LOGI(TAG,
+             "FHSS_CSV,%lld,%s,%lu,%lu,%lu,%lu,%lu,%lld,%lld,%lld,%lu,%lu,%lu,%lu,%lld,%lld,%lu,%lld,%lld",
+             (long long)(now_us / 1000),
+             fhss_fsm_state_name(service->fsm.state),
+             (unsigned long)snapshot.rx_valid_count,
+             (unsigned long)snapshot.crc_fail_count,
+             (unsigned long)snapshot.timeout_count,
+             (unsigned long)snapshot.sync_acquired_count,
+             (unsigned long)snapshot.sync_lost_count,
+             (long long)snapshot.timing_error_min_us,
+             (long long)average_us,
+             (long long)snapshot.timing_error_max_us,
+             (unsigned long)snapshot.recovery_entry_count,
+             (unsigned long)snapshot.recovery_success_count,
+             (unsigned long)snapshot.hard_research_count,
+             (unsigned long)snapshot.max_consecutive_misses,
+             (long long)recovery_average_us,
+             (long long)snapshot.recovery_duration_max_us,
+             (unsigned long)snapshot.correction_applied_count,
+             (long long)correction_average_us,
+             (long long)snapshot.correction_abs_max_us);
 
     /* 재배정(2026-08-17): 채널이 3개일 땐 채널별 DIAG 3줄이 볼만했는데,
      * 150개로 늘면서 5초마다 150줄씩 찍혀 로그가 안 읽히는 수준이 됨.
@@ -400,6 +456,9 @@ static void record_receive_result(
             result->channel,
             result->timing.timing_error_us,
             rx_timestamp_us);
+        fhss_diagnostics_record_correction(
+            &service->diagnostics,
+            service->controller.last_phase_correction_us);
     } else if (receive_result == RECEIVE_RESULT_CRC_FAIL) {
         fhss_diagnostics_record_crc_fail(
             &service->diagnostics, service->current_channel);
@@ -422,6 +481,10 @@ static void handle_sync_result(
                  "RECOVERY succeeded: slot=%lu channel=%u; tracking resumed",
                  (unsigned long)result->packet.slot_number,
                  result->channel);
+        diagnostics_lock(service);
+        fhss_diagnostics_record_recovery_success(
+            &service->diagnostics, esp_timer_get_time());
+        diagnostics_unlock(service);
         fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_SYNC_RECOVERED);
     }
     if (service->fsm.state == FHSS_FSM_STATE_SEARCHING &&
@@ -438,6 +501,7 @@ static void handle_sync_result(
     if (result->sync_event == FHSS_SYNC_EVENT_LOST) {
         diagnostics_lock(service);
         fhss_diagnostics_record_sync_lost(&service->diagnostics);
+        fhss_diagnostics_record_hard_research(&service->diagnostics);
         diagnostics_unlock(service);
         fhss_slot_scheduler_clear_reference(&service->controller.scheduler);
         fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_SYNC_LOST);
@@ -450,6 +514,10 @@ static void handle_miss(fhss_service_t *service)
     const bool was_synchronizing =
         service->fsm.state == FHSS_FSM_STATE_SYNCHRONIZING;
     service->consecutive_sync_misses++;
+    diagnostics_lock(service);
+    fhss_diagnostics_record_miss(
+        &service->diagnostics, service->consecutive_sync_misses);
+    diagnostics_unlock(service);
     fhss_sync_event_t event = FHSS_SYNC_EVENT_NONE;
     fhss_sync_state_t state = FHSS_SYNC_STATE_SEARCHING;
     if (fhss_sync_controller_handle_timeout(
@@ -461,6 +529,7 @@ static void handle_miss(fhss_service_t *service)
     if (event == FHSS_SYNC_EVENT_LOST) {
         diagnostics_lock(service);
         fhss_diagnostics_record_sync_lost(&service->diagnostics);
+        fhss_diagnostics_record_hard_research(&service->diagnostics);
         diagnostics_unlock(service);
         fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_SYNC_LOST);
         report_event(service, FHSS_SERVICE_EVENT_SYNC_LOST);
@@ -477,6 +546,10 @@ static void handle_miss(fhss_service_t *service)
          * before the hard loss_count threshold is allowed to clear it. */
         fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_SYNC_DEGRADED);
         service->recovery_probe_index = 0U;
+        diagnostics_lock(service);
+        fhss_diagnostics_record_recovery_entry(
+            &service->diagnostics, esp_timer_get_time());
+        diagnostics_unlock(service);
         ESP_LOGW(TAG,
                  "RECOVERY entered after %lu consecutive sync misses",
                  (unsigned long)service->consecutive_sync_misses);

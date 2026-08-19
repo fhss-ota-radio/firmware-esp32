@@ -114,3 +114,76 @@ void fhss_diagnostics_record_sync_lost(fhss_diagnostics_t *diagnostics)
     }
 }
 
+void fhss_diagnostics_record_miss(
+    fhss_diagnostics_t *diagnostics,
+    uint32_t consecutive_misses
+)
+{
+    if (diagnostics != NULL &&
+        consecutive_misses > diagnostics->max_consecutive_misses) {
+        diagnostics->max_consecutive_misses = consecutive_misses;
+    }
+}
+
+void fhss_diagnostics_record_recovery_entry(
+    fhss_diagnostics_t *diagnostics,
+    int64_t timestamp_us
+)
+{
+    if (diagnostics == NULL) {
+        return;
+    }
+    diagnostics->recovery_entry_count++;
+    diagnostics->recovery_started_timestamp_us = timestamp_us;
+}
+
+void fhss_diagnostics_record_recovery_success(
+    fhss_diagnostics_t *diagnostics,
+    int64_t timestamp_us
+)
+{
+    if (diagnostics == NULL) {
+        return;
+    }
+    diagnostics->recovery_success_count++;
+    if (diagnostics->recovery_started_timestamp_us <= 0 ||
+        timestamp_us < diagnostics->recovery_started_timestamp_us) {
+        diagnostics->recovery_started_timestamp_us = 0;
+        return;
+    }
+    const int64_t duration_us =
+        timestamp_us - diagnostics->recovery_started_timestamp_us;
+    diagnostics->recovery_duration_sum_us += duration_us;
+    diagnostics->recovery_duration_sample_count++;
+    if (duration_us > diagnostics->recovery_duration_max_us) {
+        diagnostics->recovery_duration_max_us = duration_us;
+    }
+    diagnostics->recovery_started_timestamp_us = 0;
+}
+
+void fhss_diagnostics_record_hard_research(fhss_diagnostics_t *diagnostics)
+{
+    if (diagnostics != NULL) {
+        diagnostics->hard_research_count++;
+        diagnostics->recovery_started_timestamp_us = 0;
+    }
+}
+
+void fhss_diagnostics_record_correction(
+    fhss_diagnostics_t *diagnostics,
+    int64_t correction_us
+)
+{
+    if (diagnostics == NULL || correction_us == 0) {
+        return;
+    }
+    const int64_t magnitude_us = correction_us < 0
+        ? -correction_us
+        : correction_us;
+    diagnostics->correction_applied_count++;
+    diagnostics->correction_abs_sum_us += magnitude_us;
+    if (magnitude_us > diagnostics->correction_abs_max_us) {
+        diagnostics->correction_abs_max_us = magnitude_us;
+    }
+}
+
