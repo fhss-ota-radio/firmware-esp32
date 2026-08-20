@@ -1,11 +1,14 @@
+#include <inttypes.h>
 #include <string.h>
 
+#include "esp_log.h"
 #include "ota_client.h"
 #include "ota_client_internal.h"
 #include "freertos/queue.h"
 #include "ota_protocol.h"
 
 static ota_client_context_t s_ota_client;
+static const char *TAG = "ota_client";
 
 static uint32_t ota_client_calculate_total_chunks(uint32_t image_size)
 {
@@ -171,24 +174,57 @@ esp_err_t ota_client_write_chunk(
         return ESP_OK;
     }
 
+    bool duplicate = false;
     const esp_err_t store_err = ota_batch_cache_store(
         &s_ota_client.batch_cache,
         sequence,
         data,
         data_size,
-        NULL
+        &duplicate
     );
     if (store_err != ESP_OK) {
         return store_err;
     }
 
+    if (duplicate) {
+        /* 이미 받은 slot의 반복 패킷으로 다른 missing slot의 timeout/NACK를
+         * 무기한 미루지 않는다. ACK 유실 복구를 위해 호출 자체는 성공이다. */
+        ESP_LOGI(
+            TAG,
+            "batch duplicate: base=%" PRIu32 ", seq=%" PRIu32
+            ", received=0x%02X, missing=0x%02X",
+            s_ota_client.batch_cache.base_sequence,
+            sequence,
+            s_ota_client.batch_cache.received_mask,
+            ota_batch_cache_missing_mask(&s_ota_client.batch_cache)
+        );
+        return ESP_OK;
+    }
+
     s_ota_client.last_packet_tick = xTaskGetTickCount();
+
+    ESP_LOGI(
+        TAG,
+        "batch store: base=%" PRIu32 ", seq=%" PRIu32
+        ", received=0x%02X, missing=0x%02X",
+        s_ota_client.batch_cache.base_sequence,
+        sequence,
+        s_ota_client.batch_cache.received_mask,
+        ota_batch_cache_missing_mask(&s_ota_client.batch_cache)
+    );
 
     /* Wire protocol에는 BATCH_CHECK가 없다. 각 DATA는 개별 ACK/NACK 대상이며,
      * 현재 고정 배치가 완성되면 연속된 최대 240B를 Flash에 한 번 기록한다. */
     if (!ota_batch_cache_is_complete(&s_ota_client.batch_cache)) {
         return ESP_OK;
     }
+
+    ESP_LOGI(
+        TAG,
+        "batch complete: base=%" PRIu32 ", chunks=%u; committing to Flash",
+        s_ota_client.batch_cache.base_sequence,
+        (unsigned)s_ota_client.batch_cache.chunk_count
+    );
 
     size_t batch_bytes = 0U;
     const esp_err_t write_err = ota_batch_cache_commit(
@@ -214,6 +250,15 @@ esp_err_t ota_client_write_chunk(
 
     s_ota_client.received_bytes += batch_bytes;
     s_ota_client.expected_sequence += s_ota_client.batch_cache.chunk_count;
+
+    ESP_LOGI(
+        TAG,
+        "batch committed: bytes=%u, received_bytes=%" PRIu32
+        ", next_sequence=%" PRIu32,
+        (unsigned)batch_bytes,
+        s_ota_client.received_bytes,
+        s_ota_client.expected_sequence
+    );
 
     ota_batch_cache_prepare(
         &s_ota_client.batch_cache,

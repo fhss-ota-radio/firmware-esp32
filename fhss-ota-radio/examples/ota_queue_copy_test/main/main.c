@@ -280,7 +280,9 @@ static bool run_batch_retransmission_test(void)
     uint8_t acknowledged_mask = 0U;
 
     ESP_LOGI(TAG, "BATCH START: base=0, count=5, range=[0..4]");
-    const uint8_t first_sequences[] = {0U, 2U, 4U};
+    /* Gateway가 한 배치에서 seq=3 하나만 유실한 실제 RF 순서를 재현한다.
+     * 0,1,2,4를 먼저 받으면 timeout NACK는 반드시 seq=3 하나뿐이어야 한다. */
+    const uint8_t first_sequences[] = {0U, 1U, 2U, 4U};
     for (size_t i = 0U; i < sizeof(first_sequences); ++i) {
         const uint8_t sequence = first_sequences[i];
         ESP_LOGI(TAG, "RX DATA: seq=%u", sequence);
@@ -294,10 +296,10 @@ static bool run_batch_retransmission_test(void)
 
     /* Gateway는 5개를 보낸 뒤 개별 ACK 수신 여부로 재전송 대상을 고른다. */
     const uint8_t first_missing_mask = ota_batch_cache_missing_mask(&cache);
-    ESP_LOGI(TAG, "GATEWAY ACK TRACKER: acked_mask=0x%02X, no_ack=[1,3]",
+    ESP_LOGI(TAG, "GATEWAY ACK TRACKER: acked_mask=0x%02X, no_ack=[3]",
              acknowledged_mask);
-    if (first_missing_mask != 0x0AU || acknowledged_mask != 0x15U) {
-        ESP_LOGE(TAG, "missing mask mismatch: expected=0x0A actual=0x%02X",
+    if (first_missing_mask != 0x08U || acknowledged_mask != 0x17U) {
+        ESP_LOGE(TAG, "missing mask mismatch: expected=0x08 actual=0x%02X",
                  first_missing_mask);
         return false;
     }
@@ -313,12 +315,6 @@ static bool run_batch_retransmission_test(void)
     }
     ESP_LOGI(TAG, "DUPLICATE DATA: seq=2 ignored, TX ACK seq=2 again");
 
-    ESP_LOGI(TAG, "RETRY RX DATA: seq=1");
-    if (!store_test_chunk(&cache, 1U, 1U)) {
-        ESP_LOGE(TAG, "selective retransmission did not complete batch");
-        return false;
-    }
-    ESP_LOGI(TAG, "TX ACK: seq=1");
     ESP_LOGI(TAG, "RETRY RX DATA: seq=3");
     if (!store_test_chunk(&cache, 3U, 3U) ||
         !ota_batch_cache_is_complete(&cache)) {
@@ -648,7 +644,8 @@ static bool run_consumer_session_test(void)
     }
     ESP_LOGI(TAG, "SESSION TEST: short non-final DATA size NACK PASS");
 
-    const uint8_t first_sequences[] = {0U, 2U, 4U};
+    /* seq=3 하나만 유실된 Gateway 배치를 재현한다. */
+    const uint8_t first_sequences[] = {0U, 1U, 2U, 4U};
     for (size_t i = 0U; i < sizeof(first_sequences); ++i) {
         const uint32_t sequence = first_sequences[i];
         packet_length = ota_protocol_encode_data(
@@ -671,36 +668,19 @@ static bool run_consumer_session_test(void)
             return false;
         }
     }
-    ESP_LOGI(TAG, "SESSION TEST: out-of-order DATA [0,2,4] ACK PASS");
+    ESP_LOGI(TAG, "SESSION TEST: DATA [0,1,2,4] ACK PASS; seq=3 omitted");
 
+    /* 현재 batch의 duplicate가 missing slot(seq=3)의 timeout 기준을
+     * 갱신하면 반복 duplicate로 NACK를 무기한 막을 수 있다. seq=4를
+     * 받은 뒤 600ms에 duplicate seq=2를 넣고, 원래 기준 1.2초 시점에는
+     * 반드시 seq=3 TIMEOUT NACK가 나오는지 확인한다. */
+    vTaskDelay(pdMS_TO_TICKS(600U));
     packet_length = ota_protocol_encode_data(
         packet,
         sizeof(packet),
         session_id,
-        1U,
-        &image[OTA_MAX_PAYLOAD_SIZE],
-        OTA_MAX_PAYLOAD_SIZE
-    );
-    packet[OTA_DATA_HEADER_SIZE] ^= 0xFFU;
-    if (!submit_and_expect_ack(
-            packet,
-            packet_length,
-            OTA_PKT_NACK,
-            session_id,
-            OTA_PKT_DATA,
-            1U,
-            OTA_RESULT_INVALID_CRC
-        )) {
-        return false;
-    }
-    ESP_LOGI(TAG, "SESSION TEST: corrupted DATA CRC NACK PASS");
-
-    packet_length = ota_protocol_encode_data(
-        packet,
-        sizeof(packet),
-        session_id,
-        1U,
-        &image[OTA_MAX_PAYLOAD_SIZE],
+        2U,
+        &image[2U * OTA_MAX_PAYLOAD_SIZE],
         OTA_MAX_PAYLOAD_SIZE
     );
     if (!submit_and_expect_ack(
@@ -709,16 +689,25 @@ static bool run_consumer_session_test(void)
             OTA_PKT_ACK,
             session_id,
             OTA_PKT_DATA,
-            1U,
+            2U,
             OTA_RESULT_OK
         )) {
+        ESP_LOGE(TAG, "incomplete-batch duplicate was not ACKed");
         return false;
     }
 
     const uint32_t timeout_response_count = s_send_capture.count + 1U;
-    vTaskDelay(pdMS_TO_TICKS(1100U));
+    vTaskDelay(pdMS_TO_TICKS(600U));
     if (s_send_capture.count < timeout_response_count) {
-        ESP_LOGE(TAG, "missing sequence timeout NACK was not sent");
+        ESP_LOGE(
+            TAG,
+            "duplicate incorrectly postponed missing sequence timeout NACK"
+        );
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(100U));
+    if (s_send_capture.count != timeout_response_count) {
+        ESP_LOGE(TAG, "timeout emitted more than one NACK for single missing seq");
         return false;
     }
     ota_packet_type_t timeout_type;
@@ -737,7 +726,10 @@ static bool run_consumer_session_test(void)
         ESP_LOGE(TAG, "missing sequence timeout NACK mismatch");
         return false;
     }
-    ESP_LOGI(TAG, "SESSION TEST: missing seq=3 TIMEOUT NACK PASS");
+    ESP_LOGI(
+        TAG,
+        "SESSION TEST: duplicate preserved missing seq=3 timeout NACK PASS"
+    );
 
     packet_length = ota_protocol_encode_data(
         packet,

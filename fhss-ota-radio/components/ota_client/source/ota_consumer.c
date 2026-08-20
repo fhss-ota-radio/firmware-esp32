@@ -560,10 +560,18 @@ static void ota_consumer_task(void *arg)
     ota_client_rx_packet_t packet;
 
     ESP_LOGI(TAG, "consumer task started");
-    const TickType_t receive_wait = pdMS_TO_TICKS(
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(
         context->config.receive_timeout_ms
     );
     for (;;) {
+        TickType_t receive_wait = timeout_ticks;
+        if (context->state == OTA_CLIENT_STATE_RECEIVING) {
+            const TickType_t elapsed =
+                xTaskGetTickCount() - context->last_packet_tick;
+            receive_wait = elapsed >= timeout_ticks
+                ? 0U
+                : timeout_ticks - elapsed;
+        }
         if (ota_client_receive_packet(&packet, receive_wait) == ESP_OK) {
             ota_consumer_process_packet(context, &packet);
         } else {
