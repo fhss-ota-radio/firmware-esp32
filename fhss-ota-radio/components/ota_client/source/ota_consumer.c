@@ -108,6 +108,23 @@ static void ota_consumer_handle_discover(ota_client_context_t *context)
         return;
     }
 
+    const uint32_t backoff_max_ms =
+        context->config.discover_backoff_max_ms;
+    if (backoff_max_ms > 0U) {
+        const uint32_t delay_ms = context->config.random_callback(
+            context->config.callback_context
+        ) % (backoff_max_ms + 1U);
+        if (delay_ms > 0U) {
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        }
+        /* 메뉴를 떠난 동안 예약됐던 응답은 보내지 않는다. DISCOVER 자체는
+         * session이나 제품 FSM을 변경하지 않는다. */
+        if (!ota_consumer_is_ota_mode(context)) {
+            ESP_LOGD(TAG, "DISCOVER_ACK cancelled: product left OTA menu");
+            return;
+        }
+    }
+
     const ota_discover_ack_fields_t fields = {
         .device_id = context->config.device_id,
         .fw_major = context->config.firmware_version[0],

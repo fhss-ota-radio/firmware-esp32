@@ -11,6 +11,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_system.h"
 
 #include "audio_codec.h"
@@ -27,6 +28,10 @@
 #include "status_led.h"
 
 static const char *TAG = "fsm";
+
+#define OTA_DISCOVER_BACKOFF_MAX_MS 100U
+
+static uint32_t ota_discovery_random_callback(void *context);
 
 /* 마이크가 없어도 codec -> FHSS -> CC1101 -> codec -> speaker 전체 경로를
  * 실기기에서 확인하기 위한 임시 모드다. 0이면 기존 마이크 캡처를 사용한다. */
@@ -68,8 +73,14 @@ static volatile bool s_ota_ready_to_reboot;
 static TaskHandle_t s_ota_reboot_task;
 
 #define OTA_RADIO_RX_TIMEOUT_MS 40U
-#define OTA_RESPONSE_WAIT_MS    150U
+#define OTA_RESPONSE_WAIT_MS    250U
 #define OTA_REBOOT_DELAY_MS     250U
+
+_Static_assert(
+    OTA_DISCOVER_BACKOFF_MAX_MS + OTA_RADIO_RX_TIMEOUT_MS <
+        OTA_RESPONSE_WAIT_MS,
+    "DISCOVER backoff must leave time for response TX and RX re-arm"
+);
 
 static void ota_reboot_task(void *arg)
 {
@@ -476,6 +487,14 @@ static display_ui_menu_item_t menu_item_from_fsm_state(fsm_state_t state)
 
 static void on_menu_select(rotary_encoder_menu_t selected, void *ctx)
 {
+    (void)ctx;
+    /* ERROR 화면에서는 메뉴 선택보다 복구가 우선이다. 기존에는 RETRY를
+     * 발생시키는 입력 경로가 없어 사용자가 ERROR 화면에 영구 고정됐다. */
+    if (fsm_get_state() == FSM_STATE_ERROR) {
+        fsm_post_event(FSM_EVENT_RETRY);
+        return;
+    }
+
     fsm_event_t event;
     switch (selected) {
         case ROTARY_ENCODER_MENU_COMM: event = FSM_EVENT_MENU_SELECT_COMM; break;
@@ -710,9 +729,11 @@ static void on_enter_boot_init(void)
                 FIRMWARE_VERSION_PATCH,
             },
             .receive_timeout_ms = 500U,
+            .discover_backoff_max_ms = OTA_DISCOVER_BACKOFF_MAX_MS,
             .send_callback = ota_radio_send_callback,
             .event_callback = fsm_ota_event_callback,
             .ota_mode_callback = fsm_ota_mode_callback,
+            .random_callback = ota_discovery_random_callback,
             .callback_context = NULL,
         };
         if (ota_client_init(&ota_config) != ESP_OK ||
@@ -875,6 +896,12 @@ static void on_enter_error(void)
     if (!stop_ota_radio()) {
         ESP_LOGW(TAG, "failed to stop OTA radio while entering ERROR");
     }
+    const ota_client_state_t ota_state = ota_client_get_state();
+    if ((ota_state == OTA_CLIENT_STATE_RECEIVING ||
+         ota_state == OTA_CLIENT_STATE_ERROR) &&
+        ota_client_abort() != ESP_OK) {
+        ESP_LOGW(TAG, "failed to abort OTA session while entering ERROR");
+    }
     /* ERROR에서도 RF TX 세션을 반드시 닫아 producer가 멈춘 뒤 큐가 차며
      * SUBMIT_FAIL이 반복되는 현상을 막고, 상대 수신 가능한 시작 상태로 복귀한다. */
     if (!fhss_audio_adapter_end_tx()) {
@@ -1014,6 +1041,12 @@ bool fsm_ota_mode_callback(void *context)
 {
     (void)context;
     return fsm_get_state() == FSM_STATE_MENU_OTA;
+}
+
+static uint32_t ota_discovery_random_callback(void *context)
+{
+    (void)context;
+    return esp_random();
 }
 
 void fsm_ota_event_callback(

@@ -24,7 +24,10 @@ esp_err_t ota_client_init(const ota_client_config_t *config)
     if (config->device_id > OTA_DEVICE_ID_MAX) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (config->receive_timeout_ms == 0) {
+    if (config->receive_timeout_ms == 0 ||
+        config->discover_backoff_max_ms == UINT32_MAX ||
+        (config->discover_backoff_max_ms > 0U &&
+         config->random_callback == NULL)) {
         return ESP_ERR_INVALID_ARG;
     }
     if (s_ota_client.state != OTA_CLIENT_STATE_UNINITIALIZED) {

@@ -35,6 +35,10 @@ typedef enum {
  * FSM_STATE_MENU_OTA 여부를 반환하는 callback을 연결한다. */
 typedef bool (*ota_client_ota_mode_callback_t)(void *context);
 
+/* DISCOVER 응답 충돌 회피에 사용할 난수 원본. 반환값은
+ * discover_backoff_max_ms 범위로 축소되며, 제품에서는 esp_random()을 연결한다. */
+typedef uint32_t (*ota_client_random_callback_t)(void *context);
+
 typedef esp_err_t (*ota_client_send_callback_t)(
     const uint8_t *packet,
     size_t packet_length,
@@ -52,10 +56,12 @@ typedef struct {
     uint32_t device_id;
     uint8_t firmware_version[3];
     uint32_t receive_timeout_ms;
+    uint32_t discover_backoff_max_ms;
 
     ota_client_send_callback_t send_callback;
     ota_client_event_callback_t event_callback;
     ota_client_ota_mode_callback_t ota_mode_callback;
+    ota_client_random_callback_t random_callback;
 
     void *callback_context;
 } ota_client_config_t;

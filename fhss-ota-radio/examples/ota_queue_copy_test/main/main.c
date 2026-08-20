@@ -24,6 +24,8 @@ typedef struct {
 
 static send_capture_t s_send_capture;
 static volatile bool s_ota_mode;
+static uint32_t s_random_values[] = {7U, 19U};
+static volatile size_t s_random_index;
 
 typedef bool (*test_case_fn_t)(void);
 
@@ -74,6 +76,14 @@ static bool test_ota_mode(void *context)
 {
     (void)context;
     return s_ota_mode;
+}
+
+static uint32_t test_random(void *context)
+{
+    (void)context;
+    const size_t index = s_random_index++ %
+        (sizeof(s_random_values) / sizeof(s_random_values[0]));
+    return s_random_values[index];
 }
 
 static bool wait_for_send_count(uint32_t expected_count)
@@ -474,13 +484,28 @@ static bool run_consumer_wire_test(void)
         return false;
     }
 
-    s_ota_mode = true;
+    const ota_client_state_t initial_state = ota_client_get_state();
     uint8_t discover[OTA_DISCOVER_PACKET_SIZE];
     const size_t discover_length = ota_protocol_encode_discover(
         discover, sizeof(discover)
     );
+    s_ota_mode = false;
+    const uint32_t ignored_count = s_send_capture.count;
+    if (ota_client_submit_packet(discover, discover_length) != ESP_OK) {
+        ESP_LOGE(TAG, "consumer rejected DISCOVER outside OTA mode");
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(40U));
+    if (s_send_capture.count != ignored_count ||
+        ota_client_get_state() != initial_state) {
+        ESP_LOGE(TAG, "DISCOVER outside OTA mode changed state or responded");
+        return false;
+    }
+
+    s_ota_mode = true;
+    const uint32_t first_discover_count = s_send_capture.count + 1U;
     if (ota_client_submit_packet(discover, discover_length) != ESP_OK ||
-        !wait_for_send_count(1U)) {
+        !wait_for_send_count(first_discover_count)) {
         ESP_LOGE(TAG, "consumer did not answer DISCOVER");
         return false;
     }
@@ -498,9 +523,23 @@ static bool run_consumer_wire_test(void)
         ESP_LOGE(TAG, "consumer DISCOVER_ACK fields mismatch");
         return false;
     }
-    ESP_LOGI(TAG, "CONSUMER RX DISCOVER -> TX DISCOVER_ACK test PASS");
+    if (ota_client_get_state() != initial_state || s_random_index != 1U) {
+        ESP_LOGE(TAG, "DISCOVER mutated session state or skipped backoff");
+        return false;
+    }
 
-    s_ota_mode = false;
+    const uint32_t repeated_discover_count = s_send_capture.count + 1U;
+    if (ota_client_submit_packet(discover, discover_length) != ESP_OK ||
+        !wait_for_send_count(repeated_discover_count) ||
+        ota_client_get_state() != initial_state || s_random_index != 2U) {
+        ESP_LOGE(TAG, "repeated DISCOVER was not idempotent");
+        return false;
+    }
+    ESP_LOGI(
+        TAG,
+        "CONSUMER repeated DISCOVER -> bounded DISCOVER_ACK test PASS"
+    );
+
     const ota_start_fields_t start = {
         .session_id = 0x12345678U,
         .target_device_id = 0x00AABBCCU,
@@ -512,29 +551,36 @@ static bool run_consumer_wire_test(void)
     const size_t start_length = ota_protocol_encode_start(
         start_packet, sizeof(start_packet), &start
     );
+    const uint32_t start_ack_count = s_send_capture.count + 1U;
     if (ota_client_submit_packet(start_packet, start_length) != ESP_OK ||
-        !wait_for_send_count(2U)) {
-        ESP_LOGE(TAG, "consumer did not reject START outside OTA mode");
+        !wait_for_send_count(start_ack_count)) {
+        ESP_LOGE(TAG, "consumer did not answer targeted START after DISCOVER");
         return false;
     }
 
     ota_packet_type_t response_type;
-    ota_ack_fields_t nack = {0};
+    ota_ack_fields_t ack = {0};
     if (!ota_protocol_decode_ack(
             s_send_capture.packet,
             s_send_capture.length,
             &response_type,
-            &nack
+            &ack
         ) ||
-        response_type != OTA_PKT_NACK ||
-        nack.session_id != start.session_id ||
-        nack.acknowledged_type != OTA_PKT_START ||
-        nack.sequence != OTA_CONTROL_SEQUENCE ||
-        nack.result_code != OTA_RESULT_BUSY) {
-        ESP_LOGE(TAG, "consumer START BUSY NACK fields mismatch");
+        response_type != OTA_PKT_ACK ||
+        ack.session_id != start.session_id ||
+        ack.acknowledged_type != OTA_PKT_START ||
+        ack.sequence != OTA_CONTROL_SEQUENCE ||
+        ack.result_code != OTA_RESULT_OK ||
+        ota_client_get_state() != OTA_CLIENT_STATE_RECEIVING) {
+        ESP_LOGE(TAG, "targeted START ACK fields mismatch");
         return false;
     }
-    ESP_LOGI(TAG, "CONSUMER RX START outside MENU_OTA -> TX BUSY NACK test PASS");
+    if (ota_client_abort() != ESP_OK ||
+        ota_client_get_state() != OTA_CLIENT_STATE_IDLE) {
+        ESP_LOGE(TAG, "targeted START cleanup failed");
+        return false;
+    }
+    ESP_LOGI(TAG, "DISCOVER callback completion -> targeted START ACK PASS");
     return true;
 }
 
@@ -771,8 +817,10 @@ void app_main(void)
         .device_id = 0x00AABBCCU,
         .firmware_version = {1U, 2U, 3U},
         .receive_timeout_ms = 1000U,
+        .discover_backoff_max_ms = 25U,
         .send_callback = capture_send,
         .ota_mode_callback = test_ota_mode,
+        .random_callback = test_random,
     };
 
     if (ota_client_init(&config) != ESP_OK) {
@@ -822,7 +870,7 @@ void app_main(void)
         {
             "consumer_wire_control",
             run_consumer_wire_test,
-            "DISCOVER_ACK and START BUSY NACK",
+            "MENU gate repeat backoff state invariance and targeted START",
         },
         {
             "consumer_session_flow",
