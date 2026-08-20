@@ -676,6 +676,8 @@ static bool s_boot_init_done;
 /* 상태별 진입 동작. 실제 하드웨어 제어는 각 담당(TODO)이 채운다. */
 static void on_enter_boot_init(void)
 {
+    const bool retrying_after_error = s_boot_init_done;
+
     char id_hex[DEVICE_ID_LEN * 2 + 1];
     device_id_get_hex(id_hex, sizeof(id_hex));
     ESP_LOGI(TAG, "device id: %s", id_hex);
@@ -743,6 +745,13 @@ static void on_enter_boot_init(void)
         }
 
         s_boot_init_done = true;
+    }
+
+    /* 최초 부팅의 INIT_DONE은 app_main()이 보낸다. ERROR 복구로 BOOT_INIT에
+     * 다시 들어온 경우에는 app_main()이 재실행되지 않으므로 여기서 후속
+     * 전이를 예약하지 않으면 BOOT_INIT에 영구 고정된다. */
+    if (retrying_after_error) {
+        fsm_post_event(FSM_EVENT_INIT_DONE);
     }
 }
 /* MENU_COMM: 통신 대기(기본 메뉴). TX_AUDIO/RX_AUDIO는 여기서만 나가고
