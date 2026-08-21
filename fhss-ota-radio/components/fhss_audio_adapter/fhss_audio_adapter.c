@@ -5,9 +5,11 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "psa/crypto.h"
 
 #include "fhss_audio_packet.h"
 #include "fhss_service.h"
@@ -53,6 +55,90 @@
 
 static const char *TAG = "fhss_audio_adapter";
 static uint8_t s_hop_channels[FHSS_AUDIO_HOP_CHANNEL_COUNT];
+
+/* 두 무전기에 동일하게 박혀 있어야 하는 팀 공유 비밀. 지금은 소스 상수라
+ * secret_seed/public_seed 조합 구조가 도청 방지 효과는 아직 없음(둘 다
+ * 사실상 공개) — README TODO에 적어둔 대로 추후 NVS, 더 나아가 eFuse
+ * 읽기보호 블록(esp_hmac_calculate() HW 주변장치)으로 옮길 여지를 남긴다.
+ * 그 전환 시에도 derive_session_hop_seed()의 HMAC-SHA256 구조 자체는 그대로
+ * 재사용 가능하도록(키 소스만 교체) 설계했다. */
+static const uint8_t s_secret_seed[4] = {0x4B, 0x43, 0x43, 0x49};
+
+#define SHA256_BLOCK_SIZE 64U
+#define SHA256_DIGEST_SIZE 32U
+
+/* ota_writer.c와 동일하게 psa_hash_*를 쓴다 — 이 ESP-IDF(mbedtls 4.x)
+ * 빌드에서 mbedtls_md_hmac()/mbedtls_sha256() 같은 옛 API는 "private"
+ * 식별자로 막혀 있어(md.h/sha256.h가 MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS
+ * 뒤에 선언됨) 직접 호출할 수 없고, PSA Crypto API가 공개된 경로다. */
+static bool sha256_compute(
+    const uint8_t *chunk_a, size_t chunk_a_len,
+    const uint8_t *chunk_b, size_t chunk_b_len,
+    uint8_t out_digest[SHA256_DIGEST_SIZE]
+)
+{
+    psa_hash_operation_t operation = PSA_HASH_OPERATION_INIT;
+    size_t out_length = 0U;
+    if (psa_hash_setup(&operation, PSA_ALG_SHA_256) != PSA_SUCCESS ||
+        psa_hash_update(&operation, chunk_a, chunk_a_len) != PSA_SUCCESS ||
+        psa_hash_update(&operation, chunk_b, chunk_b_len) != PSA_SUCCESS ||
+        psa_hash_finish(&operation, out_digest, SHA256_DIGEST_SIZE,
+                         &out_length) != PSA_SUCCESS) {
+        (void)psa_hash_abort(&operation);
+        return false;
+    }
+    return true;
+}
+
+/* 세션마다 새로 생성되는 public_seed(평문, SYNC 패킷으로 전송됨)와
+ * secret_seed를 HMAC-SHA256으로 조합해 그 세션만의 hop_seed를 만든다.
+ * HMAC은 일방향이라 public_seed와 결과값을 모두 알아도 secret_seed를
+ * 역산할 수 없다 — 단순 XOR/덧셈 조합이 가진 역산 위험이 없다.
+ * HMAC(K,m) = SHA256((K' xor opad) || SHA256((K' xor ipad) || m)) —
+ * secret_seed(4바이트)는 블록 크기(64바이트)보다 짧아 그대로 제로패딩한
+ * 게 K'가 된다(RFC 2104). */
+static uint32_t derive_session_hop_seed(uint32_t public_seed, void *context)
+{
+    (void)context;
+
+    const uint8_t message[4] = {
+        (uint8_t)((public_seed >> 24) & 0xFFU),
+        (uint8_t)((public_seed >> 16) & 0xFFU),
+        (uint8_t)((public_seed >> 8) & 0xFFU),
+        (uint8_t)(public_seed & 0xFFU),
+    };
+
+    uint8_t ipad[SHA256_BLOCK_SIZE];
+    uint8_t opad[SHA256_BLOCK_SIZE];
+    memset(ipad, 0x36, sizeof(ipad));
+    memset(opad, 0x5CU, sizeof(opad));
+    for (size_t i = 0U; i < sizeof(s_secret_seed); ++i) {
+        ipad[i] ^= s_secret_seed[i];
+        opad[i] ^= s_secret_seed[i];
+    }
+
+    uint8_t inner_digest[SHA256_DIGEST_SIZE];
+    uint8_t outer_digest[SHA256_DIGEST_SIZE];
+    const bool ok =
+        sha256_compute(ipad, sizeof(ipad), message, sizeof(message),
+                        inner_digest) &&
+        sha256_compute(opad, sizeof(opad), inner_digest, sizeof(inner_digest),
+                        outer_digest);
+    if (!ok) {
+        /* HMAC 실패는 빌드 설정 오류 등 프로그래밍 실수 상황이지, 정상
+         * 운용 중 발생할 일이 아니다 — 그래도 무전 자체는 끊기지 않도록
+         * 양쪽이 항상 같은 값을 계산할 수 있는 고정 상수로 폴백한다
+         * (public_seed를 그대로 hop_seed로 쓰면 그 세션 홉 패턴이 평문
+         * public_seed만으로 완전히 예측 가능해져 더 나쁘다). */
+        ESP_LOGE(TAG, "HMAC hop_seed derivation failed; using fallback seed");
+        return 0x46485353U;
+    }
+
+    return ((uint32_t)outer_digest[0] << 24) |
+           ((uint32_t)outer_digest[1] << 16) |
+           ((uint32_t)outer_digest[2] << 8) |
+           (uint32_t)outer_digest[3];
+}
 
 typedef struct {
     fhss_service_t service;
@@ -285,9 +371,14 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
         },
         .channels = s_hop_channels,
         .channel_count = sizeof(s_hop_channels) / sizeof(s_hop_channels[0]),
-        /* Channel 0 belongs to OTA. Both peers use this shared seed to derive
-         * the same deterministic audio hopping order. */
+        /* Channel 0 belongs to OTA. 이 값은 아직 세션이 시작되기 전(RX가
+         * 랑데부 채널에서 첫 SYNC를 기다리는 동안)의 기본값일 뿐이다 —
+         * 랑데부 채널(index 0)은 시드와 무관하게 고정이라 실제로 쓰이지
+         * 않는다. 세션이 시작되면 TX가 생성한 public_seed로부터 매번 새로
+         * 파생된다(derive_hop_seed 참고). */
         .hop_seed = 0x46485353U,
+        .public_seed = 0U,
+        .derive_hop_seed = derive_session_hop_seed,
         .reserved_channel = 0U,
         .slot_duration_us = 300000U,
         .channel_switch_guard_us = 5000U,
@@ -348,11 +439,23 @@ bool fhss_audio_adapter_begin_tx(void)
     if (s_adapter.tx_session_id == 0U) {
         s_adapter.tx_session_id = 1U;
     }
+
+    /* 이번 PTT 세션 전용 public_seed를 새로 뽑고, secret_seed와 HMAC으로
+     * 조합해 이번 세션의 hop_seed를 만든다 — fhss_service_set_role()이
+     * reset_controller()를 거쳐 이 값으로 hop_sequence를 새로 구성하므로
+     * 역할 전환 전에 미리 채워둬야 한다. RX 쪽은 이 public_seed를 SYNC
+     * 패킷으로 받아 fhss_service.c의 receive_one()에서 동일하게 파생한다. */
+    const uint32_t public_seed = esp_random();
+    s_adapter.service.config.public_seed = public_seed;
+    s_adapter.service.config.hop_seed =
+        derive_session_hop_seed(public_seed, NULL);
+
     if (!fhss_service_set_role(&s_adapter.service, FHSS_SERVICE_ROLE_TX)) {
         return false;
     }
     s_adapter.tx_active = true;
-    ESP_LOGI(TAG, "TX session started");
+    ESP_LOGI(TAG, "TX session started: public_seed=%lu",
+             (unsigned long)public_seed);
     return true;
 }
 

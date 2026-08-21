@@ -36,12 +36,24 @@ typedef fhss_service_data_action_t (*fhss_service_data_callback_t)(
     void *context
 );
 
+/* TX 세션 시작 시 새로 생성된 public_seed로부터 실제 hop_seed를 파생시킨다.
+ * fhss_service는 이 파생 로직(비밀키 조합 방식 등)을 모른다 — secret_seed를
+ * 쥐고 있는 상위 계층(fhss_audio_adapter)이 구현해서 콜백으로 넘긴다. */
+typedef uint32_t (*fhss_service_derive_hop_seed_callback_t)(
+    uint32_t public_seed,
+    void *context
+);
+
 typedef struct {
     fhss_service_role_t role;
     rf_transport_config_t radio;
     const uint8_t *channels;
     size_t channel_count;
     uint32_t hop_seed;
+    /* TX가 세션마다 새로 생성해 SYNC 패킷에 실어 보내는 값(RX는 수신 값을
+     * 그대로 따라간다). derive_hop_seed가 설정된 경우에만 의미가 있다. */
+    uint32_t public_seed;
+    fhss_service_derive_hop_seed_callback_t derive_hop_seed;
     uint8_t reserved_channel;
     uint32_t slot_duration_us;
     uint32_t channel_switch_guard_us;
@@ -84,6 +96,11 @@ typedef struct {
     void *task_handle;
     uint8_t current_channel;
     uint32_t consecutive_sync_misses;
+    /* RX가 마지막으로 hop_sequence를 재구성한 기준 public_seed. 수신 SYNC의
+     * public_seed가 이 값과 다르면(새 세션 시작) derive_hop_seed로 다시
+     * 파생시켜 hop_sequence를 즉시 갱신한다. */
+    uint32_t last_derived_public_seed;
+    bool have_derived_public_seed;
     /* A/B test counter used only when timestamp fault injection is enabled in
      * fhss_service.c. It is kept per service so restarting a session resets
      * the experiment deterministically. */

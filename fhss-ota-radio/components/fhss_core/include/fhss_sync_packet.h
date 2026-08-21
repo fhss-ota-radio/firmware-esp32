@@ -9,8 +9,8 @@ extern "C" {
 #endif
 
 #define FHSS_SYNC_PACKET_MAGIC       0x46485353UL
-#define FHSS_SYNC_PACKET_VERSION     1U
-#define FHSS_SYNC_PACKET_LENGTH      13U
+#define FHSS_SYNC_PACKET_VERSION     2U
+#define FHSS_SYNC_PACKET_LENGTH      17U
 
 typedef enum {
     FHSS_PACKET_TYPE_SYNC = 1,
@@ -32,6 +32,10 @@ typedef struct {
     uint16_t sequence;
     uint8_t hop_index;
     uint32_t slot_number;
+    /* TX가 세션마다 새로 생성해 평문으로 실어 보내는 값. secret_seed(양쪽에
+     * 미리 공유된 비밀 키)와 HMAC-SHA256으로 조합해 그 세션만의 hop_seed를
+     * 만드는 데 쓴다 — 이 값 자체는 공개돼도 안전하다. */
+    uint32_t public_seed;
 } fhss_sync_packet_t;
 
 /**

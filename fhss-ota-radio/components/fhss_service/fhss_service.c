@@ -81,6 +81,10 @@ static bool reset_controller(fhss_service_t *service)
                              FHSS_CONTROLLER_STATUS_OK;
     if (initialized) {
         service->test_tracking_sync_count = 0U;
+        /* hop_sequence가 방금 config.hop_seed 기준으로 다시 만들어졌으니,
+         * receive_one()의 재파생 로직이 이전 세션의 public_seed를 "이미
+         * 반영됨"으로 착각해 건너뛰지 않도록 추적값도 같이 초기화한다. */
+        service->have_derived_public_seed = false;
     }
     return initialized;
 }
@@ -279,6 +283,7 @@ static rf_transport_status_t send_sync(
         .sequence = sequence,
         .hop_index = hop_index,
         .slot_number = slot,
+        .public_seed = service->config.public_seed,
     };
     uint8_t buffer[FHSS_SYNC_PACKET_LENGTH] = {0};
     size_t length = 0U;
@@ -440,6 +445,38 @@ static receive_result_t receive_one(
         }
         *out_rx_timestamp_us = rx_timestamp_us;
         return RECEIVE_RESULT_DATA;
+    }
+
+    /* TX가 이번 세션에 쓴 public_seed가 이전에 파생해둔 값과 다르면(새 PTT
+     * 세션 시작) hop_sequence를 그 자리에서 다시 만든다. 이 SYNC 패킷 자체의
+     * hop_index/channel 해석은 아래 process_rx/recover_rx가 새로 만든
+     * hop_sequence를 그대로 쓰게 된다 — slot 0(랑데부)는 시드와 무관하게
+     * channels[0]로 고정이라 이 타이밍에 걸려도 문제없다. */
+    if (service->config.derive_hop_seed != NULL) {
+        fhss_sync_packet_t peek_packet = {0};
+        if (fhss_sync_packet_decode(
+                packet.payload, packet.length, &peek_packet) ==
+                FHSS_PACKET_STATUS_OK &&
+            (!service->have_derived_public_seed ||
+             peek_packet.public_seed != service->last_derived_public_seed)) {
+            const uint32_t derived_hop_seed = service->config.derive_hop_seed(
+                peek_packet.public_seed, service->config.event_context);
+            if (fhss_hop_sequence_init_seeded(
+                    &service->controller.core.hop_sequence,
+                    service->config.channels,
+                    service->config.channel_count,
+                    derived_hop_seed,
+                    service->config.reserved_channel) == FHSS_HOP_STATUS_OK) {
+                service->last_derived_public_seed = peek_packet.public_seed;
+                service->have_derived_public_seed = true;
+                ESP_LOGI(TAG, "hop_seed re-derived: public_seed=%lu",
+                         (unsigned long)peek_packet.public_seed);
+            } else {
+                ESP_LOGE(TAG, "hop_sequence reinit failed for public_seed=%lu",
+                         (unsigned long)peek_packet.public_seed);
+                return RECEIVE_RESULT_SYNC_ERROR;
+            }
+        }
     }
 
     int64_t controller_timestamp_us = rx_timestamp_us;

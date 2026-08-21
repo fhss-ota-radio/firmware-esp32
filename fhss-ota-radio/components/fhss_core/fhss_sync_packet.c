@@ -89,6 +89,7 @@ fhss_packet_status_t fhss_sync_packet_encode(
      * 6       2     Sequence
      * 8       1     Hop Index
      * 9       4     Slot Number
+     * 13      4     Public Seed
      */
     write_u32_be(&buffer[0], (uint32_t)FHSS_SYNC_PACKET_MAGIC);
 
@@ -100,6 +101,8 @@ fhss_packet_status_t fhss_sync_packet_encode(
     buffer[8] = packet->hop_index;
 
     write_u32_be(&buffer[9], packet->slot_number);
+
+    write_u32_be(&buffer[13], packet->public_seed);
 
     *out_length = FHSS_SYNC_PACKET_LENGTH;
 
@@ -147,6 +150,7 @@ fhss_packet_status_t fhss_sync_packet_decode(
         .sequence = read_u16_be(&buffer[6]),
         .hop_index = buffer[8],
         .slot_number = read_u32_be(&buffer[9]),
+        .public_seed = read_u32_be(&buffer[13]),
     };
 
     *out_packet = decoded_packet;
