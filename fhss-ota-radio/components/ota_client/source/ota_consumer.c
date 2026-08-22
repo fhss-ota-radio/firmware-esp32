@@ -11,6 +11,17 @@
 
 static const char *TAG = "ota_consumer";
 
+static void ota_consumer_emit_event(
+    ota_client_context_t *context,
+    ota_client_event_t event,
+    esp_err_t error)
+{
+    if (context->config.event_callback != NULL) {
+        context->config.event_callback(
+            event, 0U, error, context->config.callback_context);
+    }
+}
+
 static bool ota_consumer_is_ota_mode(const ota_client_context_t *context)
 {
     return context->config.ota_mode_callback != NULL &&
@@ -289,9 +300,12 @@ static void ota_consumer_handle_fhss_config(
             OTA_CONTROL_SEQUENCE, OTA_RESULT_VERIFY_FAILED);
         return;
     }
-    (void)ota_consumer_send_ack(
-        context, fields.session_id, OTA_PKT_FHSS_CONFIG,
-        OTA_CONTROL_SEQUENCE);
+    if (ota_consumer_send_ack(
+            context, fields.session_id, OTA_PKT_FHSS_CONFIG,
+            OTA_CONTROL_SEQUENCE) == ESP_OK) {
+        ota_consumer_emit_event(
+            context, OTA_CLIENT_EVENT_FHSS_CONFIG_READY, ESP_OK);
+    }
 }
 
 static void ota_consumer_handle_fhss_activate(
@@ -324,10 +338,14 @@ static void ota_consumer_handle_fhss_activate(
             OTA_CONTROL_SEQUENCE) != ESP_OK) {
         return;
     }
+    ota_consumer_emit_event(
+        context, OTA_CLIENT_EVENT_FHSS_ACTIVATING, ESP_OK);
     if (context->config.fhss_activate_callback == NULL ||
         context->config.fhss_activate_callback(
             &pending, context->config.callback_context) != ESP_OK) {
         ESP_LOGE(TAG, "FHSS activation failed after ACK; bootstrap recovery required");
+        ota_consumer_emit_event(
+            context, OTA_CLIENT_EVENT_FHSS_ACTIVATE_FAILED, ESP_FAIL);
         return;
     }
     /* Keep it pending until the radio service proves this generation by

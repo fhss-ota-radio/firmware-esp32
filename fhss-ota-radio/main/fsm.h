@@ -13,7 +13,9 @@ extern "C" {
 /* 상태/이벤트 정의 및 전이표는 docs/fsm-design.md 참고 */
 
 /*
- * 브로드캐스트 방식이라 "동기 획득 대기" 상태(FSM_STATE_FHSS_SYNC)가 없다.
+ * 음성 브로드캐스트에는 별도의 "동기 획득 대기" 상태가 없지만, OTA는
+ * Gateway가 배포한 generation의 SYNC를 확인해야 전송을 시작할 수 있으므로
+ * OTA_FHSS_CONFIGURED/SYNCING/READY 상태로 그 생명주기를 명시한다.
  * PTT 누른 쪽이 정해진 시작 채널로 먼저 송신하고 그 순간부터 시드 기반으로
  * 호핑하며, 받는 쪽은 그 수신 시점을 기준으로 같은 시드를 따라 호핑을
  * 추종한다(팀5 담당) — 그래서 BOOT_INIT 다음엔 곧바로 MENU_COMM(통신 대기,
@@ -44,6 +46,9 @@ typedef enum {
     FSM_STATE_MENU_COMM,
     FSM_STATE_MENU_IDLE,
     FSM_STATE_MENU_OTA,
+    FSM_STATE_OTA_FHSS_CONFIGURED,
+    FSM_STATE_OTA_FHSS_SYNCING,
+    FSM_STATE_OTA_FHSS_READY,
     FSM_STATE_TX_AUDIO,
     FSM_STATE_RX_AUDIO,
     FSM_STATE_OTA_RECEIVING,
@@ -58,6 +63,10 @@ typedef enum {
     FSM_EVENT_MENU_SELECT_COMM,
     FSM_EVENT_MENU_SELECT_IDLE,
     FSM_EVENT_MENU_SELECT_OTA,
+    FSM_EVENT_FHSS_CONFIG_READY,
+    FSM_EVENT_FHSS_ACTIVATE,
+    FSM_EVENT_SYNC_ACQUIRED,
+    FSM_EVENT_FHSS_SYNC_TIMEOUT,
     FSM_EVENT_PTT_PRESS,
     FSM_EVENT_PTT_RELEASE,
     FSM_EVENT_RX_FRAME,
