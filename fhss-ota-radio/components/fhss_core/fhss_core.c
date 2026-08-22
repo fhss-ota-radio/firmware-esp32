@@ -41,6 +41,7 @@ fhss_core_status_t fhss_core_init(
      */
     fhss_core_t initialized_core = {
         .timing_config = config->timing,
+        .generation = config->generation,
         .initialized = false,
     };
 
@@ -124,6 +125,19 @@ fhss_core_status_t fhss_core_process_rx(
         );
 
     if (packet_status != FHSS_PACKET_STATUS_OK) {
+        return FHSS_CORE_STATUS_PACKET_ERROR;
+    }
+    if (result.packet.generation != core->generation) {
+        return FHSS_CORE_STATUS_PACKET_ERROR;
+    }
+    uint8_t expected_hop_index = 0U;
+    if (fhss_hop_sequence_get_index(
+            &core->hop_sequence,
+            result.packet.slot_number,
+            &expected_hop_index) != FHSS_HOP_STATUS_OK) {
+        return FHSS_CORE_STATUS_HOP_ERROR;
+    }
+    if (result.packet.hop_index != expected_hop_index) {
         return FHSS_CORE_STATUS_PACKET_ERROR;
     }
 

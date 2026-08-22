@@ -4,13 +4,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "ota_protocol.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define FHSS_SYNC_PACKET_MAGIC       0x46485353UL
-#define FHSS_SYNC_PACKET_VERSION     1U
-#define FHSS_SYNC_PACKET_LENGTH      13U
+#define FHSS_SYNC_PACKET_VERSION     OTA_FHSS_SYNC_VERSION
+#define FHSS_SYNC_PACKET_LENGTH      OTA_FHSS_SYNC_PACKET_SIZE
 
 typedef enum {
     FHSS_PACKET_TYPE_SYNC = 1,
@@ -28,7 +29,7 @@ typedef enum {
 
 typedef struct {
     uint8_t version;
-    fhss_packet_type_t type;
+    uint32_t generation;
     uint16_t sequence;
     uint8_t hop_index;
     uint32_t slot_number;

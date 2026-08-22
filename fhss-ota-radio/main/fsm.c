@@ -19,6 +19,7 @@
 #include "device_id.h"
 #include "display_ui.h"
 #include "fhss_audio_adapter.h"
+#include "fhss_config_store.h"
 #include "fhss_audio_pcm_test.h"
 #include "firmware_version.h"
 #include "ota_client.h"
@@ -32,6 +33,8 @@ static const char *TAG = "fsm";
 #define OTA_DISCOVER_BACKOFF_MAX_MS 100U
 
 static uint32_t ota_discovery_random_callback(void *context);
+static esp_err_t ota_fhss_activate_callback(
+    const ota_fhss_config_fields_t *config, void *context);
 
 /* 마이크가 없어도 codec -> FHSS -> CC1101 -> codec -> speaker 전체 경로를
  * 실기기에서 확인하기 위한 임시 모드다. 0이면 기존 마이크 캡처를 사용한다. */
@@ -234,6 +237,18 @@ static void on_fhss_audio_event(fhss_audio_adapter_event_t event, void *context)
 {
     (void)context;
     switch (event) {
+    case FHSS_AUDIO_ADAPTER_EVENT_SYNC_ACQUIRED: {
+        uint32_t generation = 0U;
+        if (fhss_audio_adapter_get_ota_fhss_generation(&generation)) {
+            const esp_err_t err = fhss_config_store_activate(generation);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "failed to promote synchronized FHSS generation: %s",
+                         esp_err_to_name(err));
+                fsm_post_event(FSM_EVENT_ERROR);
+            }
+        }
+        break;
+    }
     case FHSS_AUDIO_ADAPTER_EVENT_SYNC_LOST:
         fsm_post_event(FSM_EVENT_SYNC_LOST);
         break;
@@ -736,6 +751,7 @@ static void on_enter_boot_init(void)
             .event_callback = fsm_ota_event_callback,
             .ota_mode_callback = fsm_ota_mode_callback,
             .random_callback = ota_discovery_random_callback,
+            .fhss_activate_callback = ota_fhss_activate_callback,
             .callback_context = NULL,
         };
         if (ota_client_init(&ota_config) != ESP_OK ||
@@ -1056,6 +1072,14 @@ static uint32_t ota_discovery_random_callback(void *context)
 {
     (void)context;
     return esp_random();
+}
+
+static esp_err_t ota_fhss_activate_callback(
+    const ota_fhss_config_fields_t *config,
+    void *context)
+{
+    (void)context;
+    return fhss_audio_adapter_activate_ota_fhss(config);
 }
 
 void fsm_ota_event_callback(

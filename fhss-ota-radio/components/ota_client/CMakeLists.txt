@@ -10,6 +10,7 @@ idf_component_register(
         "source"
     REQUIRES
         ota_protocol
+        fhss_config_store
     PRIV_REQUIRES
         app_update
         esp_partition

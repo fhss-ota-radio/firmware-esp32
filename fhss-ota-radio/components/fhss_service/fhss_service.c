@@ -49,6 +49,7 @@ static bool reset_controller(fhss_service_t *service)
             .channels = service->config.channels,
             .channel_count = service->config.channel_count,
             .hop_seed = service->config.hop_seed,
+            .generation = service->config.generation,
             .reserved_channel = service->config.reserved_channel,
             .timing = {
                 .early_margin_us = service->config.timing_window_margin_us,
@@ -275,7 +276,7 @@ static rf_transport_status_t send_sync(
 
     const fhss_sync_packet_t packet = {
         .version = FHSS_SYNC_PACKET_VERSION,
-        .type = FHSS_PACKET_TYPE_SYNC,
+        .generation = service->config.generation,
         .sequence = sequence,
         .hop_index = hop_index,
         .slot_number = slot,
@@ -328,6 +329,28 @@ static void drain_tx_data_until(fhss_service_t *service, int64_t deadline_us)
             &service->radio, 20U, &ignored_timestamp_us);
         service->tx_in_flight = false;
     }
+}
+
+static void send_one_queued_data(fhss_service_t *service, int64_t deadline_us)
+{
+    if (esp_timer_get_time() >=
+        deadline_us - FHSS_SERVICE_DATA_TX_AIRTIME_GUARD_US) {
+        return;
+    }
+    fhss_service_tx_item_t item;
+    if (xQueueReceive(
+            (QueueHandle_t)service->tx_queue, &item, 0U) != pdTRUE) {
+        return;
+    }
+    service->tx_in_flight = true;
+    if (rf_transport_send_packet(&service->radio, item.data, item.length) !=
+        RF_TRANSPORT_STATUS_OK) {
+        (void)xQueueSendToFront(
+            (QueueHandle_t)service->tx_queue, &item, 0U);
+        ESP_LOGW(TAG, "response TX failed: length=%u", item.length);
+    }
+    service->tx_in_flight = false;
+    (void)rf_transport_start_receive(&service->radio);
 }
 
 static void tx_task(fhss_service_t *service)
@@ -659,6 +682,11 @@ static bool drain_rx_data_until(
         if (remaining_us <= 1000) {
             return false;
         }
+
+        /* A slave may need to return OTA ACK/NACK on the current hop channel.
+         * Serialize those responses in this radio-owning task instead of
+         * letting ota_client touch the CC1101 concurrently. */
+        send_one_queued_data(service, switch_time_us);
 
         /* 재배정(2026-08-17): 20ms 상한이 49바이트 페이로드(38.4kBaud 기준
          * 순수 전송시간만 약 10~13ms) + GDO0 감지~태스크 기상 지연 + SPI
@@ -1024,7 +1052,6 @@ bool fhss_service_send_data(
 {
     if (service == NULL || data == NULL || length == 0U ||
         length > RF_TRANSPORT_MAX_PACKET_LENGTH ||
-        service->config.role != FHSS_SERVICE_ROLE_TX ||
         service->tx_queue == NULL) {
         return false;
     }

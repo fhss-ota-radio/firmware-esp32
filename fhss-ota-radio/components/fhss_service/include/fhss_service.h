@@ -42,6 +42,7 @@ typedef struct {
     const uint8_t *channels;
     size_t channel_count;
     uint32_t hop_seed;
+    uint32_t generation;
     uint8_t reserved_channel;
     uint32_t slot_duration_us;
     uint32_t channel_switch_guard_us;

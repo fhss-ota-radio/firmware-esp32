@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "ota_protocol.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,6 +40,14 @@ typedef bool (*ota_client_ota_mode_callback_t)(void *context);
  * discover_backoff_max_ms 범위로 축소되며, 제품에서는 esp_random()을 연결한다. */
 typedef uint32_t (*ota_client_random_callback_t)(void *context);
 
+/* Called only after a matching FHSS_ACTIVATE ACK has been transmitted. The
+ * radio owner uses this hook to leave bootstrap channel 0 and start the
+ * pending generation as an FHSS slave. */
+typedef esp_err_t (*ota_client_fhss_activate_callback_t)(
+    const ota_fhss_config_fields_t *config,
+    void *context
+);
+
 typedef esp_err_t (*ota_client_send_callback_t)(
     const uint8_t *packet,
     size_t packet_length,
@@ -62,6 +71,7 @@ typedef struct {
     ota_client_event_callback_t event_callback;
     ota_client_ota_mode_callback_t ota_mode_callback;
     ota_client_random_callback_t random_callback;
+    ota_client_fhss_activate_callback_t fhss_activate_callback;
 
     void *callback_context;
 } ota_client_config_t;

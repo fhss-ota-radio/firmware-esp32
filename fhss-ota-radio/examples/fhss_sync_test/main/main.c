@@ -58,6 +58,7 @@ void app_main(void)
         .channels = s_hop_channels,
         .channel_count = sizeof(s_hop_channels) / sizeof(s_hop_channels[0]),
         .hop_seed = 0x46485353U,
+        .generation = 0U,
         .reserved_channel = 0U,
         .slot_duration_us = 300000U,
         .channel_switch_guard_us = 5000U,
