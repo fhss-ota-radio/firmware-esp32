@@ -3,6 +3,7 @@
 #include <inttypes.h>
 
 #include "esp_log.h"
+#include "fhss_config_store.h"
 #include "ota_protocol.h"
 
 #define OTA_CONSUMER_TASK_STACK_SIZE 4096U
@@ -106,6 +107,23 @@ static void ota_consumer_handle_discover(ota_client_context_t *context)
     if (!ota_consumer_is_ota_mode(context)) {
         ESP_LOGD(TAG, "RX DISCOVER ignored: product is not in OTA menu");
         return;
+    }
+
+    const uint32_t backoff_max_ms =
+        context->config.discover_backoff_max_ms;
+    if (backoff_max_ms > 0U) {
+        const uint32_t delay_ms = context->config.random_callback(
+            context->config.callback_context
+        ) % (backoff_max_ms + 1U);
+        if (delay_ms > 0U) {
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        }
+        /* 메뉴를 떠난 동안 예약됐던 응답은 보내지 않는다. DISCOVER 자체는
+         * session이나 제품 FSM을 변경하지 않는다. */
+        if (!ota_consumer_is_ota_mode(context)) {
+            ESP_LOGD(TAG, "DISCOVER_ACK cancelled: product left OTA menu");
+            return;
+        }
     }
 
     const ota_discover_ack_fields_t fields = {
@@ -234,6 +252,86 @@ static void ota_consumer_handle_start(
         OTA_PKT_START,
         OTA_CONTROL_SEQUENCE
     );
+}
+
+static bool ota_consumer_target_matches(
+    const ota_client_context_t *context,
+    uint32_t target_device_id)
+{
+    return target_device_id == context->config.device_id ||
+           target_device_id == OTA_BROADCAST_DEVICE_ID;
+}
+
+static void ota_consumer_handle_fhss_config(
+    ota_client_context_t *context,
+    const uint8_t *packet,
+    size_t packet_length)
+{
+    ota_fhss_config_fields_t fields = {0};
+    if (!ota_protocol_decode_fhss_config(packet, packet_length, &fields)) {
+        return;
+    }
+    if (!ota_consumer_target_matches(context, fields.target_device_id)) {
+        return;
+    }
+    if (!ota_consumer_is_ota_mode(context)) {
+        (void)ota_consumer_send_nack(
+            context, fields.session_id, OTA_PKT_FHSS_CONFIG,
+            OTA_CONTROL_SEQUENCE, OTA_RESULT_BUSY);
+        return;
+    }
+    const esp_err_t err = fhss_config_store_save_pending(&fields);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "FHSS_CONFIG pending save failed: %s",
+                 esp_err_to_name(err));
+        (void)ota_consumer_send_nack(
+            context, fields.session_id, OTA_PKT_FHSS_CONFIG,
+            OTA_CONTROL_SEQUENCE, OTA_RESULT_VERIFY_FAILED);
+        return;
+    }
+    (void)ota_consumer_send_ack(
+        context, fields.session_id, OTA_PKT_FHSS_CONFIG,
+        OTA_CONTROL_SEQUENCE);
+}
+
+static void ota_consumer_handle_fhss_activate(
+    ota_client_context_t *context,
+    const uint8_t *packet,
+    size_t packet_length)
+{
+    ota_fhss_activate_fields_t activate = {0};
+    if (!ota_protocol_decode_fhss_activate(
+            packet, packet_length, &activate)) {
+        return;
+    }
+    if (!ota_consumer_target_matches(context, activate.target_device_id)) {
+        return;
+    }
+    ota_fhss_config_fields_t pending = {0};
+    if (fhss_config_store_load_pending(&pending) != ESP_OK ||
+        pending.generation != activate.generation ||
+        pending.session_id != activate.session_id) {
+        (void)ota_consumer_send_nack(
+            context, activate.session_id, OTA_PKT_FHSS_ACTIVATE,
+            OTA_CONTROL_SEQUENCE, OTA_RESULT_INVALID_SEQUENCE);
+        return;
+    }
+
+    /* The ACK must leave on bootstrap channel 0 before the callback switches
+     * the shared CC1101 to rendezvous channel 1. */
+    if (ota_consumer_send_ack(
+            context, activate.session_id, OTA_PKT_FHSS_ACTIVATE,
+            OTA_CONTROL_SEQUENCE) != ESP_OK) {
+        return;
+    }
+    if (context->config.fhss_activate_callback == NULL ||
+        context->config.fhss_activate_callback(
+            &pending, context->config.callback_context) != ESP_OK) {
+        ESP_LOGE(TAG, "FHSS activation failed after ACK; bootstrap recovery required");
+        return;
+    }
+    /* Keep it pending until the radio service proves this generation by
+     * acquiring valid SYNC packets. */
 }
 
 static ota_result_t ota_consumer_data_decode_error(
@@ -485,6 +583,17 @@ static void ota_consumer_process_packet(
                 context, queued_packet->data, queued_packet->length
             );
             break;
+        case OTA_PKT_FHSS_CONFIG:
+            ota_consumer_handle_fhss_config(
+                context, queued_packet->data, queued_packet->length);
+            break;
+        case OTA_PKT_FHSS_ACTIVATE:
+            ota_consumer_handle_fhss_activate(
+                context, queued_packet->data, queued_packet->length);
+            break;
+        case OTA_PKT_FHSS_SYNC:
+            /* Runtime SYNC belongs to fhss_service, not the OTA consumer. */
+            break;
         case OTA_PKT_ACK:
         case OTA_PKT_NACK:
         case OTA_PKT_DISCOVER_ACK:
@@ -543,10 +652,18 @@ static void ota_consumer_task(void *arg)
     ota_client_rx_packet_t packet;
 
     ESP_LOGI(TAG, "consumer task started");
-    const TickType_t receive_wait = pdMS_TO_TICKS(
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(
         context->config.receive_timeout_ms
     );
     for (;;) {
+        TickType_t receive_wait = timeout_ticks;
+        if (context->state == OTA_CLIENT_STATE_RECEIVING) {
+            const TickType_t elapsed =
+                xTaskGetTickCount() - context->last_packet_tick;
+            receive_wait = elapsed >= timeout_ticks
+                ? 0U
+                : timeout_ticks - elapsed;
+        }
         if (ota_client_receive_packet(&packet, receive_wait) == ESP_OK) {
             ota_consumer_process_packet(context, &packet);
         } else {

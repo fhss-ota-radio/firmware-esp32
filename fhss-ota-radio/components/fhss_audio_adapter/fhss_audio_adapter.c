@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 
 #include "fhss_audio_packet.h"
+#include "fhss_config_store.h"
 #include "fhss_service.h"
 #include "audio_codec.h"
 
@@ -34,6 +35,7 @@
 #define CC1101_SPI_CLOCK_HZ 100000
 
 #define FHSS_AUDIO_TX_DRAIN_TIMEOUT_MS 600U
+#define FHSS_AUDIO_END_REPEAT_COUNT 3U
 #define OTA_FIXED_CHANNEL 0U
 
 /* 재배정 이력(2026-08-17):
@@ -49,6 +51,12 @@
  *   최악 획득 시간은 이제 무관(랑데부 채널 고정 리슨 방식이라 채널 수와
  *   상관없음 — fhss_service.c rx_task 참고). */
 #define FHSS_AUDIO_HOP_CHANNEL_COUNT 100U
+#define FHSS_OTA_RX_QUEUE_DEPTH 16U
+
+typedef struct {
+    uint8_t data[RF_TRANSPORT_MAX_PACKET_LENGTH];
+    uint8_t length;
+} fhss_ota_rx_item_t;
 
 static const char *TAG = "fhss_audio_adapter";
 static uint8_t s_hop_channels[FHSS_AUDIO_HOP_CHANNEL_COUNT];
@@ -60,13 +68,19 @@ typedef struct {
     size_t frame_lengths[FHSS_AUDIO_PACKET_MAX_FRAMES];
     size_t frame_count;
     uint16_t tx_sequence;
+    uint16_t tx_session_id;
     uint16_t expected_rx_sequence;
     uint32_t tx_packet_count;
     uint32_t rx_packet_count;
     bool have_rx_sequence;
+    bool have_last_rx_end;
+    uint16_t last_rx_end_session_id;
+    uint16_t last_rx_end_sequence;
     bool initialized;
     bool tx_active;
     bool ota_active;
+    bool ota_fhss_active;
+    QueueHandle_t ota_rx_queue;
     SemaphoreHandle_t radio_mutex;
 } fhss_audio_adapter_state_t;
 
@@ -78,6 +92,11 @@ static void on_service_event(fhss_service_event_t event, void *context)
     switch (event) {
     case FHSS_SERVICE_EVENT_SYNC_ACQUIRED:
         ESP_LOGI(TAG, "SYNC_ACQUIRED");
+        if (s_adapter.config.event_callback != NULL) {
+            s_adapter.config.event_callback(
+                FHSS_AUDIO_ADAPTER_EVENT_SYNC_ACQUIRED,
+                s_adapter.config.callback_context);
+        }
         break;
     case FHSS_SERVICE_EVENT_SYNC_LOST:
         ESP_LOGW(TAG, "SYNC_LOST");
@@ -100,19 +119,52 @@ static void on_service_event(fhss_service_event_t event, void *context)
     }
 }
 
-static void on_service_data(
+static fhss_service_data_action_t on_service_data(
     const uint8_t *data,
     size_t length,
     void *context
 )
 {
     (void)context;
+    if (s_adapter.ota_fhss_active) {
+        if (length > 0U && length <= RF_TRANSPORT_MAX_PACKET_LENGTH &&
+            s_adapter.ota_rx_queue != NULL) {
+            fhss_ota_rx_item_t item = { .length = (uint8_t)length };
+            memcpy(item.data, data, length);
+            (void)xQueueSend(s_adapter.ota_rx_queue, &item, 0U);
+        }
+        return FHSS_SERVICE_DATA_CONTINUE;
+    }
+    fhss_audio_end_packet_t end = {0};
+    if (fhss_audio_end_packet_unpack(data, length, &end) ==
+        FHSS_AUDIO_PACKET_STATUS_OK) {
+        const bool duplicate = s_adapter.have_last_rx_end &&
+            end.session_id == s_adapter.last_rx_end_session_id &&
+            end.final_sequence == s_adapter.last_rx_end_sequence;
+        if (!duplicate) {
+            s_adapter.have_last_rx_end = true;
+            s_adapter.last_rx_end_session_id = end.session_id;
+            s_adapter.last_rx_end_sequence = end.final_sequence;
+            s_adapter.have_rx_sequence = false;
+            ESP_LOGI(TAG, "TALKSPURT_END RX: session=%u final_sequence=%u",
+                     end.session_id, end.final_sequence);
+            if (s_adapter.config.event_callback != NULL) {
+                s_adapter.config.event_callback(
+                    FHSS_AUDIO_ADAPTER_EVENT_TALKSPURT_ENDED,
+                    s_adapter.config.callback_context);
+            }
+        }
+        /* Repeated END packets must also return the radio to rendezvous mode,
+         * but only the first copy is forwarded to the application FSM. */
+        return FHSS_SERVICE_DATA_SESSION_END;
+    }
+
     fhss_audio_packet_view_t packet = {0};
     if (fhss_audio_packet_unpack(data, length, &packet) !=
         FHSS_AUDIO_PACKET_STATUS_OK) {
         ESP_LOGW(TAG, "dropping invalid audio packet: length=%u",
                  (unsigned)length);
-        return;
+        return FHSS_SERVICE_DATA_CONTINUE;
     }
 
     if (s_adapter.have_rx_sequence &&
@@ -144,6 +196,7 @@ static void on_service_data(
                      packet.sequence, (unsigned)i);
         }
     }
+    return FHSS_SERVICE_DATA_CONTINUE;
 }
 
 static bool send_buffered_frames(uint8_t flags)
@@ -191,6 +244,35 @@ static bool send_buffered_frames(uint8_t flags)
     return true;
 }
 
+static bool send_end_packets(void)
+{
+    const fhss_audio_end_packet_t end = {
+        .session_id = s_adapter.tx_session_id,
+        .final_sequence = s_adapter.tx_sequence == 0U
+            ? FHSS_AUDIO_END_NO_AUDIO_SEQUENCE
+            : (uint16_t)(s_adapter.tx_sequence - 1U),
+        .reason = FHSS_AUDIO_END_REASON_PTT_RELEASE,
+    };
+    uint8_t packet[FHSS_AUDIO_END_PACKET_SIZE] = {0};
+    size_t packet_length = 0U;
+    if (fhss_audio_end_packet_pack(
+            &end, packet, sizeof(packet), &packet_length) !=
+        FHSS_AUDIO_PACKET_STATUS_OK) {
+        return false;
+    }
+    for (uint32_t i = 0U; i < FHSS_AUDIO_END_REPEAT_COUNT; ++i) {
+        if (!fhss_service_send_data(
+                &s_adapter.service, packet, packet_length)) {
+            ESP_LOGW(TAG, "END TX queue full: copy=%lu",
+                     (unsigned long)(i + 1U));
+            return false;
+        }
+    }
+    ESP_LOGI(TAG, "TALKSPURT_END TX: session=%u final_sequence=%u copies=%u",
+             end.session_id, end.final_sequence, FHSS_AUDIO_END_REPEAT_COUNT);
+    return true;
+}
+
 bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
 {
     if (config == NULL || config->rx_frame_callback == NULL) {
@@ -199,17 +281,28 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
     memset(&s_adapter, 0, sizeof(s_adapter));
     s_adapter.config = *config;
     s_adapter.radio_mutex = xSemaphoreCreateMutex();
-    if (s_adapter.radio_mutex == NULL) {
+    s_adapter.ota_rx_queue = xQueueCreate(
+        FHSS_OTA_RX_QUEUE_DEPTH, sizeof(fhss_ota_rx_item_t));
+    if (s_adapter.radio_mutex == NULL || s_adapter.ota_rx_queue == NULL) {
         return false;
     }
+
+    ota_fhss_config_fields_t active_config = {0};
+    const bool have_active_config =
+        fhss_config_store_init() == ESP_OK &&
+        fhss_config_store_load_active(&active_config) == ESP_OK &&
+        active_config.channel_count <= FHSS_AUDIO_HOP_CHANNEL_COUNT;
+    const size_t configured_channel_count = have_active_config
+        ? active_config.channel_count
+        : FHSS_AUDIO_HOP_CHANNEL_COUNT;
 
     /* 채널 0(OTA 팀 예약)은 제외. 랑데부(인덱스 0)는 채널 0과 가장 가까운
      * 1로 둬 안테나/PA 매칭 중심(433.92MHz)에서 거의 안 벗어나게 하고,
      * 나머지 인덱스 1~99에는 2~100을 순서대로 채워 대역을 1~100으로
      * 제한한다(위 파일 상단 주석의 3차 재배정 참고). */
-    s_hop_channels[0] = 1U;
-    for (size_t i = 1U; i < FHSS_AUDIO_HOP_CHANNEL_COUNT; ++i) {
-        s_hop_channels[i] = (uint8_t)(i + 1U);
+    for (size_t i = 0U; i < configured_channel_count; ++i) {
+        s_hop_channels[i] = (uint8_t)(
+            (have_active_config ? active_config.first_channel : 1U) + i);
     }
 
     const fhss_service_config_t service_config = {
@@ -225,15 +318,33 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
             .enable_gdo0_interrupt = true,
         },
         .channels = s_hop_channels,
-        .channel_count = sizeof(s_hop_channels) / sizeof(s_hop_channels[0]),
-        .slot_duration_us = 300000U,
-        .channel_switch_guard_us = 5000U,
+        .channel_count = configured_channel_count,
+        /* Channel 0 belongs to OTA. Both peers use this shared seed to derive
+         * the same deterministic audio hopping order. */
+        .hop_seed = have_active_config
+            ? active_config.seed : OTA_FHSS_DEFAULT_SEED,
+        .generation = have_active_config ? active_config.generation : 0U,
+        .reserved_channel = have_active_config
+            ? active_config.reserved_channel : 0U,
+        .slot_duration_us = have_active_config
+            ? active_config.slot_duration_us : 300000U,
+        .channel_switch_guard_us = have_active_config
+            ? active_config.channel_switch_guard_us : 5000U,
         /* 재배정(2026-08-17): 판정 허용 오차를 channel_switch_guard_us(5ms)
          * 재사용에서 분리 — 실제 GDO0 ISR 지연/스케줄링 지터 흡수엔 5ms가
          * 타이트해서, 패킷은 정상 수신됐는데 타이밍만 창을 벗어나 MISS로
          * 판정되는 사례가 있었음(fhss_service.h 주석 참고). */
         .timing_window_margin_us = 20000U,
         .sync_offset_us = 0U,
+        /* Adaptive first-order phase correction. Sub-500us variation is
+         * treated as jitter; larger in-window drift is corrected gradually. */
+        .correction_deadband_us = 500U,
+        .correction_fast_threshold_us = 2000U,
+        .correction_slow_divisor = 8U,
+        .correction_fast_divisor = 2U,
+        /* Do not mistake a one-slot FreeRTOS/SPI scheduling delay for clock
+         * drift; cap one observation and converge over several valid SYNCs. */
+        .correction_max_step_us = 500U,
         /* 재배정(2026-08-17): SEARCHING이 채널 전체를 훑던 시절엔 137ms를
          * 짧게 잡아야 TX 300ms 주기와 위상이 안 맞고(여러 채널을 골고루
          * 훑으려고) 했는데, 지금은 랑데부 채널(0) 하나만 고정으로 듣는다
@@ -248,6 +359,7 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
         .receive_timeout_ms = 80U,
         .acquire_count = 3U,
         .loss_count = 5U,
+        .recovery_entry_miss_count = 2U,
         .diagnostics_interval_ms = 5000U,
         .event_callback = on_service_event,
         .data_callback = on_service_data,
@@ -259,7 +371,10 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
         return false;
     }
     s_adapter.initialized = true;
-    ESP_LOGI(TAG, "ready: RX standby, GDO0=GPIO%d", CC1101_GDO0_GPIO);
+    ESP_LOGI(TAG, "ready: RX standby, GDO0=GPIO%d generation=%lu source=%s",
+             CC1101_GDO0_GPIO,
+             (unsigned long)service_config.generation,
+             have_active_config ? "nvs-active" : "factory-default");
     return true;
 }
 
@@ -271,6 +386,10 @@ bool fhss_audio_adapter_begin_tx(void)
     s_adapter.frame_count = 0U;
     s_adapter.tx_sequence = 0U;
     s_adapter.tx_packet_count = 0U;
+    s_adapter.tx_session_id++;
+    if (s_adapter.tx_session_id == 0U) {
+        s_adapter.tx_session_id = 1U;
+    }
     if (!fhss_service_set_role(&s_adapter.service, FHSS_SERVICE_ROLE_TX)) {
         return false;
     }
@@ -301,7 +420,12 @@ bool fhss_audio_adapter_end_tx(void)
     if (!s_adapter.initialized || !s_adapter.tx_active) {
         return true;
     }
-    bool ok = send_buffered_frames(FHSS_AUDIO_PACKET_FLAG_END_OF_TALKSPURT);
+    /* Flush real audio first, then send a control-only END packet. The old
+     * audio flag could not represent a PTT release when no frame was pending. */
+    bool ok = send_buffered_frames(0U);
+    if (!send_end_packets()) {
+        ok = false;
+    }
     /* A short PTT press can end before the first 300 ms FHSS slot starts.
      * Wait for both the software queue and the CC1101 transaction instead of
      * using a fixed delay, otherwise the final talkspurt packet can be lost. */
@@ -339,6 +463,10 @@ bool fhss_audio_adapter_begin_ota(void)
              RF_TRANSPORT_STATUS_OK;
     }
     s_adapter.ota_active = ok;
+    s_adapter.ota_fhss_active = false;
+    if (s_adapter.ota_rx_queue != NULL) {
+        xQueueReset(s_adapter.ota_rx_queue);
+    }
     xSemaphoreGive(s_adapter.radio_mutex);
     if (!ok) {
         (void)fhss_service_set_role(
@@ -347,6 +475,54 @@ bool fhss_audio_adapter_begin_ota(void)
         return false;
     }
     ESP_LOGI(TAG, "OTA mode started on CHANNR=%u", OTA_FIXED_CHANNEL);
+    return true;
+}
+
+esp_err_t fhss_audio_adapter_activate_ota_fhss(
+    const ota_fhss_config_fields_t *config)
+{
+    if (!s_adapter.initialized || !s_adapter.ota_active || config == NULL ||
+        !ota_fhss_config_is_valid(config) || config->first_channel != 1U ||
+        config->rendezvous_channel != 1U || config->reserved_channel != 0U ||
+        config->channel_count > FHSS_AUDIO_HOP_CHANNEL_COUNT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (xSemaphoreTake(s_adapter.radio_mutex, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    for (size_t i = 0U; i < config->channel_count; ++i) {
+        s_hop_channels[i] = (uint8_t)(config->first_channel + i);
+    }
+    s_adapter.service.config.channels = s_hop_channels;
+    s_adapter.service.config.channel_count = config->channel_count;
+    s_adapter.service.config.hop_seed = config->seed;
+    s_adapter.service.config.generation = config->generation;
+    s_adapter.service.config.reserved_channel = config->reserved_channel;
+    s_adapter.service.config.slot_duration_us = config->slot_duration_us;
+    s_adapter.service.config.channel_switch_guard_us =
+        config->channel_switch_guard_us;
+    if (s_adapter.ota_rx_queue != NULL) {
+        xQueueReset(s_adapter.ota_rx_queue);
+    }
+    s_adapter.ota_fhss_active = true;
+    const bool ok = fhss_service_set_role(
+        &s_adapter.service, FHSS_SERVICE_ROLE_RX);
+    if (!ok) {
+        s_adapter.ota_fhss_active = false;
+        (void)rf_transport_set_channel(
+            &s_adapter.service.radio, OTA_FIXED_CHANNEL);
+        (void)rf_transport_start_receive(&s_adapter.service.radio);
+    }
+    xSemaphoreGive(s_adapter.radio_mutex);
+    return ok ? ESP_OK : ESP_FAIL;
+}
+
+bool fhss_audio_adapter_get_ota_fhss_generation(uint32_t *generation)
+{
+    if (!s_adapter.ota_fhss_active || generation == NULL) {
+        return false;
+    }
+    *generation = s_adapter.service.config.generation;
     return true;
 }
 
@@ -359,6 +535,7 @@ bool fhss_audio_adapter_end_ota(void)
         return false;
     }
     s_adapter.ota_active = false;
+    s_adapter.ota_fhss_active = false;
     const bool ok = fhss_service_set_role(
         &s_adapter.service, FHSS_SERVICE_ROLE_RX);
     xSemaphoreGive(s_adapter.radio_mutex);
@@ -378,6 +555,20 @@ fhss_audio_adapter_ota_rx_status_t fhss_audio_adapter_ota_receive(
     if (!s_adapter.ota_active || packet == NULL || out_length == NULL ||
         capacity == 0U || timeout_ms == 0U) {
         return FHSS_AUDIO_ADAPTER_OTA_RX_ERROR;
+    }
+    if (s_adapter.ota_fhss_active) {
+        fhss_ota_rx_item_t item = {0};
+        if (xQueueReceive(
+                s_adapter.ota_rx_queue, &item,
+                pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+            return FHSS_AUDIO_ADAPTER_OTA_RX_TIMEOUT;
+        }
+        if (item.length > capacity) {
+            return FHSS_AUDIO_ADAPTER_OTA_RX_ERROR;
+        }
+        memcpy(packet, item.data, item.length);
+        *out_length = item.length;
+        return FHSS_AUDIO_ADAPTER_OTA_RX_OK;
     }
     if (xSemaphoreTake(s_adapter.radio_mutex, portMAX_DELAY) != pdTRUE) {
         return FHSS_AUDIO_ADAPTER_OTA_RX_ERROR;
@@ -406,6 +597,9 @@ bool fhss_audio_adapter_ota_send(const uint8_t *packet, size_t length)
     if (!s_adapter.ota_active || packet == NULL || length == 0U ||
         length > RF_TRANSPORT_MAX_PACKET_LENGTH) {
         return false;
+    }
+    if (s_adapter.ota_fhss_active) {
+        return fhss_service_send_data(&s_adapter.service, packet, length);
     }
     if (xSemaphoreTake(s_adapter.radio_mutex, portMAX_DELAY) != pdTRUE) {
         return false;

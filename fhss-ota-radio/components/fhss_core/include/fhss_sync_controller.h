@@ -23,12 +23,24 @@ typedef struct {
     fhss_core_config_t core;
     fhss_slot_scheduler_config_t scheduler;
     uint32_t sync_offset_us;
+    uint32_t correction_deadband_us;
+    uint32_t correction_fast_threshold_us;
+    uint32_t correction_slow_divisor;
+    uint32_t correction_fast_divisor;
+    uint32_t correction_max_step_us;
 } fhss_sync_controller_config_t;
 
 typedef struct {
     fhss_core_t core;
     fhss_slot_scheduler_t scheduler;
     uint32_t sync_offset_us;
+    uint32_t correction_deadband_us;
+    uint32_t correction_fast_threshold_us;
+    uint32_t correction_slow_divisor;
+    uint32_t correction_fast_divisor;
+    uint32_t correction_max_step_us;
+    int64_t last_phase_correction_us;
+    int64_t accumulated_phase_correction_us;
     bool initialized;
 } fhss_sync_controller_t;
 
@@ -38,6 +50,17 @@ fhss_sync_controller_status_t fhss_sync_controller_init(
 );
 
 fhss_sync_controller_status_t fhss_sync_controller_process_rx(
+    fhss_sync_controller_t *controller,
+    const uint8_t *buffer,
+    size_t buffer_length,
+    int64_t rx_timestamp_us,
+    fhss_core_rx_result_t *out_result
+);
+
+/* Validate a SYNC packet and deliberately re-anchor the scheduler to its
+ * observed timestamp. This is only for bounded recovery after normal timing
+ * validation has degraded; initial acquisition still uses process_rx(). */
+fhss_sync_controller_status_t fhss_sync_controller_recover_rx(
     fhss_sync_controller_t *controller,
     const uint8_t *buffer,
     size_t buffer_length,

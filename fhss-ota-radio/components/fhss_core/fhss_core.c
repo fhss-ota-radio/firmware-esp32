@@ -41,16 +41,19 @@ fhss_core_status_t fhss_core_init(
      */
     fhss_core_t initialized_core = {
         .timing_config = config->timing,
+        .generation = config->generation,
         .initialized = false,
     };
 
 
     /* 2. Hop Sequence 초기화 */
     const fhss_hop_status_t hop_status =
-        fhss_hop_sequence_init(
+        fhss_hop_sequence_init_seeded(
             &initialized_core.hop_sequence,
             config->channels,
-            config->channel_count
+            config->channel_count,
+            config->hop_seed,
+            config->reserved_channel
         );
 
     if (hop_status != FHSS_HOP_STATUS_OK) {
@@ -122,6 +125,19 @@ fhss_core_status_t fhss_core_process_rx(
         );
 
     if (packet_status != FHSS_PACKET_STATUS_OK) {
+        return FHSS_CORE_STATUS_PACKET_ERROR;
+    }
+    if (result.packet.generation != core->generation) {
+        return FHSS_CORE_STATUS_PACKET_ERROR;
+    }
+    uint8_t expected_hop_index = 0U;
+    if (fhss_hop_sequence_get_index(
+            &core->hop_sequence,
+            result.packet.slot_number,
+            &expected_hop_index) != FHSS_HOP_STATUS_OK) {
+        return FHSS_CORE_STATUS_HOP_ERROR;
+    }
+    if (result.packet.hop_index != expected_hop_index) {
         return FHSS_CORE_STATUS_PACKET_ERROR;
     }
 

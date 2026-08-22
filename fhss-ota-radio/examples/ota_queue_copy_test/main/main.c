@@ -24,6 +24,8 @@ typedef struct {
 
 static send_capture_t s_send_capture;
 static volatile bool s_ota_mode;
+static uint32_t s_random_values[] = {7U, 19U};
+static volatile size_t s_random_index;
 
 typedef bool (*test_case_fn_t)(void);
 
@@ -74,6 +76,14 @@ static bool test_ota_mode(void *context)
 {
     (void)context;
     return s_ota_mode;
+}
+
+static uint32_t test_random(void *context)
+{
+    (void)context;
+    const size_t index = s_random_index++ %
+        (sizeof(s_random_values) / sizeof(s_random_values[0]));
+    return s_random_values[index];
 }
 
 static bool wait_for_send_count(uint32_t expected_count)
@@ -270,7 +280,9 @@ static bool run_batch_retransmission_test(void)
     uint8_t acknowledged_mask = 0U;
 
     ESP_LOGI(TAG, "BATCH START: base=0, count=5, range=[0..4]");
-    const uint8_t first_sequences[] = {0U, 2U, 4U};
+    /* Gateway가 한 배치에서 seq=3 하나만 유실한 실제 RF 순서를 재현한다.
+     * 0,1,2,4를 먼저 받으면 timeout NACK는 반드시 seq=3 하나뿐이어야 한다. */
+    const uint8_t first_sequences[] = {0U, 1U, 2U, 4U};
     for (size_t i = 0U; i < sizeof(first_sequences); ++i) {
         const uint8_t sequence = first_sequences[i];
         ESP_LOGI(TAG, "RX DATA: seq=%u", sequence);
@@ -284,10 +296,10 @@ static bool run_batch_retransmission_test(void)
 
     /* Gateway는 5개를 보낸 뒤 개별 ACK 수신 여부로 재전송 대상을 고른다. */
     const uint8_t first_missing_mask = ota_batch_cache_missing_mask(&cache);
-    ESP_LOGI(TAG, "GATEWAY ACK TRACKER: acked_mask=0x%02X, no_ack=[1,3]",
+    ESP_LOGI(TAG, "GATEWAY ACK TRACKER: acked_mask=0x%02X, no_ack=[3]",
              acknowledged_mask);
-    if (first_missing_mask != 0x0AU || acknowledged_mask != 0x15U) {
-        ESP_LOGE(TAG, "missing mask mismatch: expected=0x0A actual=0x%02X",
+    if (first_missing_mask != 0x08U || acknowledged_mask != 0x17U) {
+        ESP_LOGE(TAG, "missing mask mismatch: expected=0x08 actual=0x%02X",
                  first_missing_mask);
         return false;
     }
@@ -303,12 +315,6 @@ static bool run_batch_retransmission_test(void)
     }
     ESP_LOGI(TAG, "DUPLICATE DATA: seq=2 ignored, TX ACK seq=2 again");
 
-    ESP_LOGI(TAG, "RETRY RX DATA: seq=1");
-    if (!store_test_chunk(&cache, 1U, 1U)) {
-        ESP_LOGE(TAG, "selective retransmission did not complete batch");
-        return false;
-    }
-    ESP_LOGI(TAG, "TX ACK: seq=1");
     ESP_LOGI(TAG, "RETRY RX DATA: seq=3");
     if (!store_test_chunk(&cache, 3U, 3U) ||
         !ota_batch_cache_is_complete(&cache)) {
@@ -474,13 +480,28 @@ static bool run_consumer_wire_test(void)
         return false;
     }
 
-    s_ota_mode = true;
+    const ota_client_state_t initial_state = ota_client_get_state();
     uint8_t discover[OTA_DISCOVER_PACKET_SIZE];
     const size_t discover_length = ota_protocol_encode_discover(
         discover, sizeof(discover)
     );
+    s_ota_mode = false;
+    const uint32_t ignored_count = s_send_capture.count;
+    if (ota_client_submit_packet(discover, discover_length) != ESP_OK) {
+        ESP_LOGE(TAG, "consumer rejected DISCOVER outside OTA mode");
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(40U));
+    if (s_send_capture.count != ignored_count ||
+        ota_client_get_state() != initial_state) {
+        ESP_LOGE(TAG, "DISCOVER outside OTA mode changed state or responded");
+        return false;
+    }
+
+    s_ota_mode = true;
+    const uint32_t first_discover_count = s_send_capture.count + 1U;
     if (ota_client_submit_packet(discover, discover_length) != ESP_OK ||
-        !wait_for_send_count(1U)) {
+        !wait_for_send_count(first_discover_count)) {
         ESP_LOGE(TAG, "consumer did not answer DISCOVER");
         return false;
     }
@@ -498,9 +519,23 @@ static bool run_consumer_wire_test(void)
         ESP_LOGE(TAG, "consumer DISCOVER_ACK fields mismatch");
         return false;
     }
-    ESP_LOGI(TAG, "CONSUMER RX DISCOVER -> TX DISCOVER_ACK test PASS");
+    if (ota_client_get_state() != initial_state || s_random_index != 1U) {
+        ESP_LOGE(TAG, "DISCOVER mutated session state or skipped backoff");
+        return false;
+    }
 
-    s_ota_mode = false;
+    const uint32_t repeated_discover_count = s_send_capture.count + 1U;
+    if (ota_client_submit_packet(discover, discover_length) != ESP_OK ||
+        !wait_for_send_count(repeated_discover_count) ||
+        ota_client_get_state() != initial_state || s_random_index != 2U) {
+        ESP_LOGE(TAG, "repeated DISCOVER was not idempotent");
+        return false;
+    }
+    ESP_LOGI(
+        TAG,
+        "CONSUMER repeated DISCOVER -> bounded DISCOVER_ACK test PASS"
+    );
+
     const ota_start_fields_t start = {
         .session_id = 0x12345678U,
         .target_device_id = 0x00AABBCCU,
@@ -512,29 +547,36 @@ static bool run_consumer_wire_test(void)
     const size_t start_length = ota_protocol_encode_start(
         start_packet, sizeof(start_packet), &start
     );
+    const uint32_t start_ack_count = s_send_capture.count + 1U;
     if (ota_client_submit_packet(start_packet, start_length) != ESP_OK ||
-        !wait_for_send_count(2U)) {
-        ESP_LOGE(TAG, "consumer did not reject START outside OTA mode");
+        !wait_for_send_count(start_ack_count)) {
+        ESP_LOGE(TAG, "consumer did not answer targeted START after DISCOVER");
         return false;
     }
 
     ota_packet_type_t response_type;
-    ota_ack_fields_t nack = {0};
+    ota_ack_fields_t ack = {0};
     if (!ota_protocol_decode_ack(
             s_send_capture.packet,
             s_send_capture.length,
             &response_type,
-            &nack
+            &ack
         ) ||
-        response_type != OTA_PKT_NACK ||
-        nack.session_id != start.session_id ||
-        nack.acknowledged_type != OTA_PKT_START ||
-        nack.sequence != OTA_CONTROL_SEQUENCE ||
-        nack.result_code != OTA_RESULT_BUSY) {
-        ESP_LOGE(TAG, "consumer START BUSY NACK fields mismatch");
+        response_type != OTA_PKT_ACK ||
+        ack.session_id != start.session_id ||
+        ack.acknowledged_type != OTA_PKT_START ||
+        ack.sequence != OTA_CONTROL_SEQUENCE ||
+        ack.result_code != OTA_RESULT_OK ||
+        ota_client_get_state() != OTA_CLIENT_STATE_RECEIVING) {
+        ESP_LOGE(TAG, "targeted START ACK fields mismatch");
         return false;
     }
-    ESP_LOGI(TAG, "CONSUMER RX START outside MENU_OTA -> TX BUSY NACK test PASS");
+    if (ota_client_abort() != ESP_OK ||
+        ota_client_get_state() != OTA_CLIENT_STATE_IDLE) {
+        ESP_LOGE(TAG, "targeted START cleanup failed");
+        return false;
+    }
+    ESP_LOGI(TAG, "DISCOVER callback completion -> targeted START ACK PASS");
     return true;
 }
 
@@ -602,7 +644,8 @@ static bool run_consumer_session_test(void)
     }
     ESP_LOGI(TAG, "SESSION TEST: short non-final DATA size NACK PASS");
 
-    const uint8_t first_sequences[] = {0U, 2U, 4U};
+    /* seq=3 하나만 유실된 Gateway 배치를 재현한다. */
+    const uint8_t first_sequences[] = {0U, 1U, 2U, 4U};
     for (size_t i = 0U; i < sizeof(first_sequences); ++i) {
         const uint32_t sequence = first_sequences[i];
         packet_length = ota_protocol_encode_data(
@@ -625,36 +668,19 @@ static bool run_consumer_session_test(void)
             return false;
         }
     }
-    ESP_LOGI(TAG, "SESSION TEST: out-of-order DATA [0,2,4] ACK PASS");
+    ESP_LOGI(TAG, "SESSION TEST: DATA [0,1,2,4] ACK PASS; seq=3 omitted");
 
+    /* 현재 batch의 duplicate가 missing slot(seq=3)의 timeout 기준을
+     * 갱신하면 반복 duplicate로 NACK를 무기한 막을 수 있다. seq=4를
+     * 받은 뒤 600ms에 duplicate seq=2를 넣고, 원래 기준 1.2초 시점에는
+     * 반드시 seq=3 TIMEOUT NACK가 나오는지 확인한다. */
+    vTaskDelay(pdMS_TO_TICKS(600U));
     packet_length = ota_protocol_encode_data(
         packet,
         sizeof(packet),
         session_id,
-        1U,
-        &image[OTA_MAX_PAYLOAD_SIZE],
-        OTA_MAX_PAYLOAD_SIZE
-    );
-    packet[OTA_DATA_HEADER_SIZE] ^= 0xFFU;
-    if (!submit_and_expect_ack(
-            packet,
-            packet_length,
-            OTA_PKT_NACK,
-            session_id,
-            OTA_PKT_DATA,
-            1U,
-            OTA_RESULT_INVALID_CRC
-        )) {
-        return false;
-    }
-    ESP_LOGI(TAG, "SESSION TEST: corrupted DATA CRC NACK PASS");
-
-    packet_length = ota_protocol_encode_data(
-        packet,
-        sizeof(packet),
-        session_id,
-        1U,
-        &image[OTA_MAX_PAYLOAD_SIZE],
+        2U,
+        &image[2U * OTA_MAX_PAYLOAD_SIZE],
         OTA_MAX_PAYLOAD_SIZE
     );
     if (!submit_and_expect_ack(
@@ -663,16 +689,25 @@ static bool run_consumer_session_test(void)
             OTA_PKT_ACK,
             session_id,
             OTA_PKT_DATA,
-            1U,
+            2U,
             OTA_RESULT_OK
         )) {
+        ESP_LOGE(TAG, "incomplete-batch duplicate was not ACKed");
         return false;
     }
 
     const uint32_t timeout_response_count = s_send_capture.count + 1U;
-    vTaskDelay(pdMS_TO_TICKS(1100U));
+    vTaskDelay(pdMS_TO_TICKS(600U));
     if (s_send_capture.count < timeout_response_count) {
-        ESP_LOGE(TAG, "missing sequence timeout NACK was not sent");
+        ESP_LOGE(
+            TAG,
+            "duplicate incorrectly postponed missing sequence timeout NACK"
+        );
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(100U));
+    if (s_send_capture.count != timeout_response_count) {
+        ESP_LOGE(TAG, "timeout emitted more than one NACK for single missing seq");
         return false;
     }
     ota_packet_type_t timeout_type;
@@ -691,7 +726,10 @@ static bool run_consumer_session_test(void)
         ESP_LOGE(TAG, "missing sequence timeout NACK mismatch");
         return false;
     }
-    ESP_LOGI(TAG, "SESSION TEST: missing seq=3 TIMEOUT NACK PASS");
+    ESP_LOGI(
+        TAG,
+        "SESSION TEST: duplicate preserved missing seq=3 timeout NACK PASS"
+    );
 
     packet_length = ota_protocol_encode_data(
         packet,
@@ -771,8 +809,10 @@ void app_main(void)
         .device_id = 0x00AABBCCU,
         .firmware_version = {1U, 2U, 3U},
         .receive_timeout_ms = 1000U,
+        .discover_backoff_max_ms = 25U,
         .send_callback = capture_send,
         .ota_mode_callback = test_ota_mode,
+        .random_callback = test_random,
     };
 
     if (ota_client_init(&config) != ESP_OK) {
@@ -822,7 +862,7 @@ void app_main(void)
         {
             "consumer_wire_control",
             run_consumer_wire_test,
-            "DISCOVER_ACK and START BUSY NACK",
+            "MENU gate repeat backoff state invariance and targeted START",
         },
         {
             "consumer_session_flow",

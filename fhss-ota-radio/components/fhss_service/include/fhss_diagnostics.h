@@ -30,6 +30,17 @@ typedef struct {
     int64_t timing_error_max_us;
     int64_t timing_error_sum_us;
     int64_t last_valid_timestamp_us;
+    uint32_t recovery_entry_count;
+    uint32_t recovery_success_count;
+    uint32_t hard_research_count;
+    uint32_t max_consecutive_misses;
+    uint32_t recovery_duration_sample_count;
+    int64_t recovery_duration_sum_us;
+    int64_t recovery_duration_max_us;
+    uint32_t correction_applied_count;
+    int64_t correction_abs_sum_us;
+    int64_t correction_abs_max_us;
+    int64_t recovery_started_timestamp_us;
 } fhss_diagnostics_t;
 
 typedef fhss_diagnostics_t fhss_diagnostics_snapshot_t;
@@ -56,4 +67,21 @@ void fhss_diagnostics_record_timeout(
 );
 void fhss_diagnostics_record_sync_acquired(fhss_diagnostics_t *diagnostics);
 void fhss_diagnostics_record_sync_lost(fhss_diagnostics_t *diagnostics);
+void fhss_diagnostics_record_miss(
+    fhss_diagnostics_t *diagnostics,
+    uint32_t consecutive_misses
+);
+void fhss_diagnostics_record_recovery_entry(
+    fhss_diagnostics_t *diagnostics,
+    int64_t timestamp_us
+);
+void fhss_diagnostics_record_recovery_success(
+    fhss_diagnostics_t *diagnostics,
+    int64_t timestamp_us
+);
+void fhss_diagnostics_record_hard_research(fhss_diagnostics_t *diagnostics);
+void fhss_diagnostics_record_correction(
+    fhss_diagnostics_t *diagnostics,
+    int64_t correction_us
+);
 

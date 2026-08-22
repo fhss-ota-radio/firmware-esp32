@@ -11,6 +11,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_system.h"
 
 #include "audio_codec.h"
@@ -18,6 +19,7 @@
 #include "device_id.h"
 #include "display_ui.h"
 #include "fhss_audio_adapter.h"
+#include "fhss_config_store.h"
 #include "fhss_audio_pcm_test.h"
 #include "firmware_version.h"
 #include "ota_client.h"
@@ -27,6 +29,12 @@
 #include "status_led.h"
 
 static const char *TAG = "fsm";
+
+#define OTA_DISCOVER_BACKOFF_MAX_MS 100U
+
+static uint32_t ota_discovery_random_callback(void *context);
+static esp_err_t ota_fhss_activate_callback(
+    const ota_fhss_config_fields_t *config, void *context);
 
 /* 마이크가 없어도 codec -> FHSS -> CC1101 -> codec -> speaker 전체 경로를
  * 실기기에서 확인하기 위한 임시 모드다. 0이면 기존 마이크 캡처를 사용한다. */
@@ -68,8 +76,14 @@ static volatile bool s_ota_ready_to_reboot;
 static TaskHandle_t s_ota_reboot_task;
 
 #define OTA_RADIO_RX_TIMEOUT_MS 40U
-#define OTA_RESPONSE_WAIT_MS    150U
+#define OTA_RESPONSE_WAIT_MS    250U
 #define OTA_REBOOT_DELAY_MS     250U
+
+_Static_assert(
+    OTA_DISCOVER_BACKOFF_MAX_MS + OTA_RADIO_RX_TIMEOUT_MS <
+        OTA_RESPONSE_WAIT_MS,
+    "DISCOVER backoff must leave time for response TX and RX re-arm"
+);
 
 static void ota_reboot_task(void *arg)
 {
@@ -216,14 +230,36 @@ static bool on_fhss_rx_audio_frame(const uint8_t *frame, size_t length, void *co
     return fsm_post_rx_audio_frame(frame, length);
 }
 
-/* 정상적인 슬롯 보정은 FHSS 내부에서 처리하고, 완전히 추종을 놓치거나 RF 계층이
- * 복구 불가능할 때만 팀 FSM의 전역 안전장치 이벤트로 변환한다. */
+/* 정상적인 슬롯 보정은 FHSS 내부에서 처리한다. TALKSPURT_ENDED만 RX_AUDIO를
+ * 즉시 정상 종료하기 위해 RX_DONE으로 변환한다. 이 연결이 없으면 PTT를 놓은 뒤
+ * 수신 측이 1초 무음 timeout까지 기다리고 이후 SYNC_LOST로 오인할 수 있다. */
 static void on_fhss_audio_event(fhss_audio_adapter_event_t event, void *context)
 {
     (void)context;
-    fsm_post_event(event == FHSS_AUDIO_ADAPTER_EVENT_SYNC_LOST
-        ? FSM_EVENT_SYNC_LOST
-        : FSM_EVENT_ERROR);
+    switch (event) {
+    case FHSS_AUDIO_ADAPTER_EVENT_SYNC_ACQUIRED: {
+        uint32_t generation = 0U;
+        if (fhss_audio_adapter_get_ota_fhss_generation(&generation)) {
+            const esp_err_t err = fhss_config_store_activate(generation);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "failed to promote synchronized FHSS generation: %s",
+                         esp_err_to_name(err));
+                fsm_post_event(FSM_EVENT_ERROR);
+            }
+        }
+        break;
+    }
+    case FHSS_AUDIO_ADAPTER_EVENT_SYNC_LOST:
+        fsm_post_event(FSM_EVENT_SYNC_LOST);
+        break;
+    case FHSS_AUDIO_ADAPTER_EVENT_TALKSPURT_ENDED:
+        fsm_post_event(FSM_EVENT_RX_DONE);
+        break;
+    case FHSS_AUDIO_ADAPTER_EVENT_ERROR:
+    default:
+        fsm_post_event(FSM_EVENT_ERROR);
+        break;
+    }
 }
 
 /* 상태별 이름/이벤트별 이름: 로그 및 OLED 표시용 */
@@ -466,6 +502,14 @@ static display_ui_menu_item_t menu_item_from_fsm_state(fsm_state_t state)
 
 static void on_menu_select(rotary_encoder_menu_t selected, void *ctx)
 {
+    (void)ctx;
+    /* ERROR 화면에서는 메뉴 선택보다 복구가 우선이다. 기존에는 RETRY를
+     * 발생시키는 입력 경로가 없어 사용자가 ERROR 화면에 영구 고정됐다. */
+    if (fsm_get_state() == FSM_STATE_ERROR) {
+        fsm_post_event(FSM_EVENT_RETRY);
+        return;
+    }
+
     fsm_event_t event;
     switch (selected) {
         case ROTARY_ENCODER_MENU_COMM: event = FSM_EVENT_MENU_SELECT_COMM; break;
@@ -647,6 +691,8 @@ static bool s_boot_init_done;
 /* 상태별 진입 동작. 실제 하드웨어 제어는 각 담당(TODO)이 채운다. */
 static void on_enter_boot_init(void)
 {
+    const bool retrying_after_error = s_boot_init_done;
+
     char id_hex[DEVICE_ID_LEN * 2 + 1];
     device_id_get_hex(id_hex, sizeof(id_hex));
     ESP_LOGI(TAG, "device id: %s", id_hex);
@@ -700,9 +746,12 @@ static void on_enter_boot_init(void)
                 FIRMWARE_VERSION_PATCH,
             },
             .receive_timeout_ms = 500U,
+            .discover_backoff_max_ms = OTA_DISCOVER_BACKOFF_MAX_MS,
             .send_callback = ota_radio_send_callback,
             .event_callback = fsm_ota_event_callback,
             .ota_mode_callback = fsm_ota_mode_callback,
+            .random_callback = ota_discovery_random_callback,
+            .fhss_activate_callback = ota_fhss_activate_callback,
             .callback_context = NULL,
         };
         if (ota_client_init(&ota_config) != ESP_OK ||
@@ -712,6 +761,13 @@ static void on_enter_boot_init(void)
         }
 
         s_boot_init_done = true;
+    }
+
+    /* 최초 부팅의 INIT_DONE은 app_main()이 보낸다. ERROR 복구로 BOOT_INIT에
+     * 다시 들어온 경우에는 app_main()이 재실행되지 않으므로 여기서 후속
+     * 전이를 예약하지 않으면 BOOT_INIT에 영구 고정된다. */
+    if (retrying_after_error) {
+        fsm_post_event(FSM_EVENT_INIT_DONE);
     }
 }
 /* MENU_COMM: 통신 대기(기본 메뉴). TX_AUDIO/RX_AUDIO는 여기서만 나가고
@@ -865,6 +921,12 @@ static void on_enter_error(void)
     if (!stop_ota_radio()) {
         ESP_LOGW(TAG, "failed to stop OTA radio while entering ERROR");
     }
+    const ota_client_state_t ota_state = ota_client_get_state();
+    if ((ota_state == OTA_CLIENT_STATE_RECEIVING ||
+         ota_state == OTA_CLIENT_STATE_ERROR) &&
+        ota_client_abort() != ESP_OK) {
+        ESP_LOGW(TAG, "failed to abort OTA session while entering ERROR");
+    }
     /* ERROR에서도 RF TX 세션을 반드시 닫아 producer가 멈춘 뒤 큐가 차며
      * SUBMIT_FAIL이 반복되는 현상을 막고, 상대 수신 가능한 시작 상태로 복귀한다. */
     if (!fhss_audio_adapter_end_tx()) {
@@ -1004,6 +1066,20 @@ bool fsm_ota_mode_callback(void *context)
 {
     (void)context;
     return fsm_get_state() == FSM_STATE_MENU_OTA;
+}
+
+static uint32_t ota_discovery_random_callback(void *context)
+{
+    (void)context;
+    return esp_random();
+}
+
+static esp_err_t ota_fhss_activate_callback(
+    const ota_fhss_config_fields_t *config,
+    void *context)
+{
+    (void)context;
+    return fhss_audio_adapter_activate_ota_fhss(config);
 }
 
 void fsm_ota_event_callback(

@@ -18,9 +18,24 @@ typedef enum {
     RECEIVE_RESULT_RADIO_ERROR,
     RECEIVE_RESULT_SYNC_ERROR,
     RECEIVE_RESULT_DATA,
+    RECEIVE_RESULT_SESSION_END,
 } receive_result_t;
 
 #define FHSS_SERVICE_TX_QUEUE_DEPTH 8U
+/* Channel switching and SYNC transmission have hard slot deadlines. Keep the
+ * radio service above temporary task-stats logging (priority 10) and audio
+ * producer/consumer tasks (priority 3), which may run for several ms. */
+#define FHSS_SERVICE_TASK_PRIORITY 12U
+/* A maximum audio packet occupies roughly 13 ms on air at 38.4 kBaud once
+ * CC1101 framing is included. Do not start DATA close enough to the next
+ * channel-switch deadline that it can delay the following slot's SYNC. */
+#define FHSS_SERVICE_DATA_TX_AIRTIME_GUARD_US 20000LL
+/* Controlled A/B experiment hook. Enabling it makes the selected TRACKING
+ * observations appear late without perturbing RF airtime. Keep it disabled
+ * in normal firmware; the documented experiment used period 10. */
+#define FHSS_SERVICE_TEST_DELAY_ENABLED 0U
+#define FHSS_SERVICE_TEST_DELAY_PERIOD  10U
+#define FHSS_SERVICE_TEST_DELAY_US     19000LL
 
 typedef struct {
     uint8_t data[RF_TRANSPORT_MAX_PACKET_LENGTH];
@@ -33,6 +48,9 @@ static bool reset_controller(fhss_service_t *service)
         .core = {
             .channels = service->config.channels,
             .channel_count = service->config.channel_count,
+            .hop_seed = service->config.hop_seed,
+            .generation = service->config.generation,
+            .reserved_channel = service->config.reserved_channel,
             .timing = {
                 .early_margin_us = service->config.timing_window_margin_us,
                 .late_margin_us = service->config.timing_window_margin_us,
@@ -48,10 +66,24 @@ static bool reset_controller(fhss_service_t *service)
                 service->config.channel_switch_guard_us,
         },
         .sync_offset_us = service->config.sync_offset_us,
+        .correction_deadband_us = service->config.correction_deadband_us,
+        .correction_fast_threshold_us =
+            service->config.correction_fast_threshold_us,
+        .correction_slow_divisor =
+            service->config.correction_slow_divisor,
+        .correction_fast_divisor =
+            service->config.correction_fast_divisor,
+        .correction_max_step_us =
+            service->config.correction_max_step_us,
     };
-    return fhss_sync_controller_init(
-               &service->controller,
-               &controller_config) == FHSS_CONTROLLER_STATUS_OK;
+    const bool initialized = fhss_sync_controller_init(
+                                 &service->controller,
+                                 &controller_config) ==
+                             FHSS_CONTROLLER_STATUS_OK;
+    if (initialized) {
+        service->test_tracking_sync_count = 0U;
+    }
+    return initialized;
 }
 
 static void diagnostics_lock(fhss_service_t *service)
@@ -66,6 +98,7 @@ static void diagnostics_unlock(fhss_service_t *service)
 
 static void log_diagnostics(fhss_service_t *service, int64_t now_us)
 {
+    static bool csv_header_logged;
     fhss_diagnostics_snapshot_t snapshot = {0};
     if (!fhss_service_get_diagnostics(service, &snapshot)) {
         return;
@@ -77,6 +110,14 @@ static void log_diagnostics(fhss_service_t *service, int64_t now_us)
     const int64_t last_valid_age_ms = snapshot.last_valid_timestamp_us > 0
         ? (now_us - snapshot.last_valid_timestamp_us) / 1000
         : -1;
+    const int64_t recovery_average_us =
+        snapshot.recovery_duration_sample_count > 0U
+        ? snapshot.recovery_duration_sum_us /
+            snapshot.recovery_duration_sample_count
+        : 0;
+    const int64_t correction_average_us = snapshot.correction_applied_count > 0U
+        ? snapshot.correction_abs_sum_us / snapshot.correction_applied_count
+        : 0;
     ESP_LOGI(TAG,
              "DIAG state=%s valid=%lu crc_fail=%lu timeout=%lu "
              "acquired=%lu lost=%lu timing_us[min/avg/max]=%lld/%lld/%lld "
@@ -91,6 +132,53 @@ static void log_diagnostics(fhss_service_t *service, int64_t now_us)
              (long long)average_us,
              (long long)snapshot.timing_error_max_us,
              (long long)last_valid_age_ms);
+
+    ESP_LOGI(TAG,
+             "DIAG recovery[entry/success/research]=%lu/%lu/%lu "
+             "max_misses=%lu recovery_us[avg/max]=%lld/%lld "
+             "correction[applied/avg_abs/max_abs]=%lu/%lld/%lld",
+             (unsigned long)snapshot.recovery_entry_count,
+             (unsigned long)snapshot.recovery_success_count,
+             (unsigned long)snapshot.hard_research_count,
+             (unsigned long)snapshot.max_consecutive_misses,
+             (long long)recovery_average_us,
+             (long long)snapshot.recovery_duration_max_us,
+             (unsigned long)snapshot.correction_applied_count,
+             (long long)correction_average_us,
+             (long long)snapshot.correction_abs_max_us);
+
+    /* Stable comma-separated output lets a long monitor capture be imported
+     * directly into a spreadsheet for before/after algorithm comparison. */
+    if (!csv_header_logged) {
+        ESP_LOGI(TAG,
+                 "FHSS_CSV_HEADER,uptime_ms,state,valid,crc_fail,timeout,"
+                 "acquired,lost,timing_min_us,timing_avg_us,timing_max_us,"
+                 "recovery_entry,recovery_success,hard_research,max_misses,"
+                 "recovery_avg_us,recovery_max_us,correction_applied,"
+                 "correction_avg_abs_us,correction_max_abs_us");
+        csv_header_logged = true;
+    }
+    ESP_LOGI(TAG,
+             "FHSS_CSV,%lld,%s,%lu,%lu,%lu,%lu,%lu,%lld,%lld,%lld,%lu,%lu,%lu,%lu,%lld,%lld,%lu,%lld,%lld",
+             (long long)(now_us / 1000),
+             fhss_fsm_state_name(service->fsm.state),
+             (unsigned long)snapshot.rx_valid_count,
+             (unsigned long)snapshot.crc_fail_count,
+             (unsigned long)snapshot.timeout_count,
+             (unsigned long)snapshot.sync_acquired_count,
+             (unsigned long)snapshot.sync_lost_count,
+             (long long)snapshot.timing_error_min_us,
+             (long long)average_us,
+             (long long)snapshot.timing_error_max_us,
+             (unsigned long)snapshot.recovery_entry_count,
+             (unsigned long)snapshot.recovery_success_count,
+             (unsigned long)snapshot.hard_research_count,
+             (unsigned long)snapshot.max_consecutive_misses,
+             (long long)recovery_average_us,
+             (long long)snapshot.recovery_duration_max_us,
+             (unsigned long)snapshot.correction_applied_count,
+             (long long)correction_average_us,
+             (long long)snapshot.correction_abs_max_us);
 
     /* 재배정(2026-08-17): 채널이 3개일 땐 채널별 DIAG 3줄이 볼만했는데,
      * 150개로 늘면서 5초마다 150줄씩 찍혀 로그가 안 읽히는 수준이 됨.
@@ -188,7 +276,7 @@ static rf_transport_status_t send_sync(
 
     const fhss_sync_packet_t packet = {
         .version = FHSS_SYNC_PACKET_VERSION,
-        .type = FHSS_PACKET_TYPE_SYNC,
+        .generation = service->config.generation,
         .sequence = sequence,
         .hop_index = hop_index,
         .slot_number = slot,
@@ -205,8 +293,11 @@ static rf_transport_status_t send_sync(
 static void drain_tx_data_until(fhss_service_t *service, int64_t deadline_us)
 {
     fhss_service_tx_item_t item;
-    while (esp_timer_get_time() < deadline_us) {
-        const int64_t remaining_us = deadline_us - esp_timer_get_time();
+    const int64_t latest_data_start_us =
+        deadline_us - FHSS_SERVICE_DATA_TX_AIRTIME_GUARD_US;
+    while (esp_timer_get_time() < latest_data_start_us) {
+        const int64_t remaining_us =
+            latest_data_start_us - esp_timer_get_time();
         TickType_t wait_ticks = pdMS_TO_TICKS(
             remaining_us > 20000 ? 20U : (uint32_t)(remaining_us / 1000));
         if (wait_ticks == 0U) {
@@ -218,7 +309,9 @@ static void drain_tx_data_until(fhss_service_t *service, int64_t deadline_us)
                 wait_ticks) != pdTRUE) {
             continue;
         }
-        if (esp_timer_get_time() >= deadline_us) {
+        if (esp_timer_get_time() >= latest_data_start_us) {
+            /* Preserve the frame for the next slot. Dropping it here would
+             * turn a scheduling guard into avoidable audio packet loss. */
             (void)xQueueSendToFront(
                 (QueueHandle_t)service->tx_queue, &item, 0U);
             return;
@@ -236,6 +329,28 @@ static void drain_tx_data_until(fhss_service_t *service, int64_t deadline_us)
             &service->radio, 20U, &ignored_timestamp_us);
         service->tx_in_flight = false;
     }
+}
+
+static void send_one_queued_data(fhss_service_t *service, int64_t deadline_us)
+{
+    if (esp_timer_get_time() >=
+        deadline_us - FHSS_SERVICE_DATA_TX_AIRTIME_GUARD_US) {
+        return;
+    }
+    fhss_service_tx_item_t item;
+    if (xQueueReceive(
+            (QueueHandle_t)service->tx_queue, &item, 0U) != pdTRUE) {
+        return;
+    }
+    service->tx_in_flight = true;
+    if (rf_transport_send_packet(&service->radio, item.data, item.length) !=
+        RF_TRANSPORT_STATUS_OK) {
+        (void)xQueueSendToFront(
+            (QueueHandle_t)service->tx_queue, &item, 0U);
+        ESP_LOGW(TAG, "response TX failed: length=%u", item.length);
+    }
+    service->tx_in_flight = false;
+    (void)rf_transport_start_receive(&service->radio);
 }
 
 static void tx_task(fhss_service_t *service)
@@ -336,30 +451,61 @@ static receive_result_t receive_one(
     if (!fhss_sync_packet_has_valid_magic(packet.payload, packet.length)) {
         if (service->fsm.state != FHSS_FSM_STATE_SEARCHING &&
             service->config.data_callback != NULL) {
-            service->config.data_callback(
+            const fhss_service_data_action_t action =
+                service->config.data_callback(
                 packet.payload,
                 packet.length,
                 service->config.event_context);
+            if (action == FHSS_SERVICE_DATA_SESSION_END) {
+                *out_rx_timestamp_us = rx_timestamp_us;
+                return RECEIVE_RESULT_SESSION_END;
+            }
         }
         *out_rx_timestamp_us = rx_timestamp_us;
         return RECEIVE_RESULT_DATA;
     }
 
-    if (fhss_sync_controller_process_rx(
-            &service->controller,
-            packet.payload,
-            packet.length,
-            rx_timestamp_us,
-            out_result) != FHSS_CONTROLLER_STATUS_OK) {
+    int64_t controller_timestamp_us = rx_timestamp_us;
+    if (FHSS_SERVICE_TEST_DELAY_ENABLED != 0U &&
+        service->fsm.state == FHSS_FSM_STATE_TRACKING) {
+        service->test_tracking_sync_count++;
+        if ((service->test_tracking_sync_count %
+             FHSS_SERVICE_TEST_DELAY_PERIOD) == 0U) {
+            controller_timestamp_us += FHSS_SERVICE_TEST_DELAY_US;
+            ESP_LOGW(TAG,
+                     "A/B FAULT: sync_sample=%lu injected_delay=%lld us",
+                     (unsigned long)service->test_tracking_sync_count,
+                     (long long)FHSS_SERVICE_TEST_DELAY_US);
+        }
+    }
+
+    const fhss_sync_controller_status_t sync_status =
+        service->fsm.state == FHSS_FSM_STATE_RECOVERY
+            ? fhss_sync_controller_recover_rx(
+                &service->controller,
+                packet.payload,
+                packet.length,
+                controller_timestamp_us,
+                out_result)
+            : fhss_sync_controller_process_rx(
+                &service->controller,
+                packet.payload,
+                packet.length,
+                controller_timestamp_us,
+                out_result);
+    if (sync_status != FHSS_CONTROLLER_STATUS_OK) {
         return RECEIVE_RESULT_SYNC_ERROR;
     }
 
     ESP_LOGI(TAG,
-             "SYNC RX: state=%s slot=%lu channel=%u error=%lld us timestamp=%lld",
+             "SYNC RX: state=%s slot=%lu channel=%u error=%lld us "
+             "correction=%lld us accumulated=%lld us timestamp=%lld",
              fhss_fsm_state_name(service->fsm.state),
              (unsigned long)out_result->packet.slot_number,
              out_result->channel,
              (long long)out_result->timing.timing_error_us,
+             (long long)service->controller.last_phase_correction_us,
+             (long long)service->controller.accumulated_phase_correction_us,
              (long long)rx_timestamp_us);
     *out_rx_timestamp_us = rx_timestamp_us;
     return RECEIVE_RESULT_OK;
@@ -379,6 +525,9 @@ static void record_receive_result(
             result->channel,
             result->timing.timing_error_us,
             rx_timestamp_us);
+        fhss_diagnostics_record_correction(
+            &service->diagnostics,
+            service->controller.last_phase_correction_us);
     } else if (receive_result == RECEIVE_RESULT_CRC_FAIL) {
         fhss_diagnostics_record_crc_fail(
             &service->diagnostics, service->current_channel);
@@ -394,6 +543,19 @@ static void handle_sync_result(
     const fhss_core_rx_result_t *result
 )
 {
+    service->consecutive_sync_misses = 0U;
+    service->recovery_probe_index = 0U;
+    if (service->fsm.state == FHSS_FSM_STATE_RECOVERY) {
+        ESP_LOGI(TAG,
+                 "RECOVERY succeeded: slot=%lu channel=%u; tracking resumed",
+                 (unsigned long)result->packet.slot_number,
+                 result->channel);
+        diagnostics_lock(service);
+        fhss_diagnostics_record_recovery_success(
+            &service->diagnostics, esp_timer_get_time());
+        diagnostics_unlock(service);
+        fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_SYNC_RECOVERED);
+    }
     if (service->fsm.state == FHSS_FSM_STATE_SEARCHING &&
         result->timing.result == FHSS_TIMING_INSIDE_WINDOW) {
         fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_FIRST_SYNC);
@@ -408,6 +570,7 @@ static void handle_sync_result(
     if (result->sync_event == FHSS_SYNC_EVENT_LOST) {
         diagnostics_lock(service);
         fhss_diagnostics_record_sync_lost(&service->diagnostics);
+        fhss_diagnostics_record_hard_research(&service->diagnostics);
         diagnostics_unlock(service);
         fhss_slot_scheduler_clear_reference(&service->controller.scheduler);
         fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_SYNC_LOST);
@@ -419,6 +582,11 @@ static void handle_miss(fhss_service_t *service)
 {
     const bool was_synchronizing =
         service->fsm.state == FHSS_FSM_STATE_SYNCHRONIZING;
+    service->consecutive_sync_misses++;
+    diagnostics_lock(service);
+    fhss_diagnostics_record_miss(
+        &service->diagnostics, service->consecutive_sync_misses);
+    diagnostics_unlock(service);
     fhss_sync_event_t event = FHSS_SYNC_EVENT_NONE;
     fhss_sync_state_t state = FHSS_SYNC_STATE_SEARCHING;
     if (fhss_sync_controller_handle_timeout(
@@ -430,16 +598,78 @@ static void handle_miss(fhss_service_t *service)
     if (event == FHSS_SYNC_EVENT_LOST) {
         diagnostics_lock(service);
         fhss_diagnostics_record_sync_lost(&service->diagnostics);
+        fhss_diagnostics_record_hard_research(&service->diagnostics);
         diagnostics_unlock(service);
         fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_SYNC_LOST);
         report_event(service, FHSS_SERVICE_EVENT_SYNC_LOST);
+        service->consecutive_sync_misses = 0U;
+        service->recovery_probe_index = 0U;
     } else if (was_synchronizing) {
         fhss_slot_scheduler_clear_reference(&service->controller.scheduler);
         fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_SYNC_LOST);
+        service->consecutive_sync_misses = 0U;
+    } else if (service->fsm.state == FHSS_FSM_STATE_TRACKING &&
+               service->consecutive_sync_misses >=
+                   service->config.recovery_entry_miss_count) {
+        /* Keep the scheduler reference. RECOVERY probes nearby slot channels
+         * before the hard loss_count threshold is allowed to clear it. */
+        fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_SYNC_DEGRADED);
+        service->recovery_probe_index = 0U;
+        diagnostics_lock(service);
+        fhss_diagnostics_record_recovery_entry(
+            &service->diagnostics, esp_timer_get_time());
+        diagnostics_unlock(service);
+        ESP_LOGW(TAG,
+                 "RECOVERY entered after %lu consecutive sync misses",
+                 (unsigned long)service->consecutive_sync_misses);
     }
 }
 
-static void drain_rx_data_until(
+static uint32_t get_recovery_probe_slot(
+    fhss_service_t *service,
+    uint32_t predicted_slot
+)
+{
+    /* Probe the predicted channel first, then one slot behind and one ahead.
+     * Repeating this bounded pattern covers the common +/- one-slot slip while
+     * the original scheduler clock continues to advance. */
+    static const int8_t offsets[] = {0, -1, 1};
+    const int8_t offset = offsets[
+        service->recovery_probe_index % (sizeof(offsets) / sizeof(offsets[0]))];
+    service->recovery_probe_index++;
+
+    if (offset < 0 && predicted_slot == 0U) {
+        return predicted_slot;
+    }
+    return offset < 0
+        ? predicted_slot - 1U
+        : predicted_slot + (uint32_t)offset;
+}
+
+static bool handle_session_end(fhss_service_t *service)
+{
+    /* A peer ended the talkspurt normally. Clear the old timing reference and
+     * return to the common rendezvous channel without counting fake misses or
+     * escalating the application through SYNC_LOST. */
+    fhss_fsm_init(&service->fsm);
+    if (!reset_controller(service) ||
+        !fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_START_RX)) {
+        report_event(service, FHSS_SERVICE_EVENT_ERROR);
+        return false;
+    }
+    service->consecutive_sync_misses = 0U;
+    service->recovery_probe_index = 0U;
+    service->test_tracking_sync_count = 0U;
+    if (!select_channel(service, 0U)) {
+        report_event(service, FHSS_SERVICE_EVENT_ERROR);
+        return false;
+    }
+    ESP_LOGI(TAG, "peer talkspurt ended; rendezvous RX resumed on channel=%u",
+             service->current_channel);
+    return true;
+}
+
+static bool drain_rx_data_until(
     fhss_service_t *service,
     int64_t switch_time_us
 )
@@ -450,8 +680,13 @@ static void drain_rx_data_until(
     for (;;) {
         const int64_t remaining_us = switch_time_us - esp_timer_get_time();
         if (remaining_us <= 1000) {
-            return;
+            return false;
         }
+
+        /* A slave may need to return OTA ACK/NACK on the current hop channel.
+         * Serialize those responses in this radio-owning task instead of
+         * letting ota_client touch the CC1101 concurrently. */
+        send_one_queued_data(service, switch_time_us);
 
         /* 재배정(2026-08-17): 20ms 상한이 49바이트 페이로드(38.4kBaud 기준
          * 순수 전송시간만 약 10~13ms) + GDO0 감지~태스크 기상 지연 + SPI
@@ -483,6 +718,9 @@ static void drain_rx_data_until(
         if (receive_result == RECEIVE_RESULT_DATA) {
             continue;
         }
+        if (receive_result == RECEIVE_RESULT_SESSION_END) {
+            return handle_session_end(service);
+        }
         if (receive_result == RECEIVE_RESULT_OK) {
             /* Tolerate a repeated SYNC while draining without losing the
              * opportunity to refresh the scheduler reference. */
@@ -497,7 +735,7 @@ static void drain_rx_data_until(
 
         ESP_LOGW(TAG, "RX data drain stopped: result=%d channel=%u",
                  receive_result, service->current_channel);
-        return;
+        return false;
     }
 }
 
@@ -562,9 +800,19 @@ static void rx_task(fhss_service_t *service)
             continue;
         }
 
-        drain_rx_data_until(service, switch_time_us);
+        if (drain_rx_data_until(service, switch_time_us)) {
+            continue;
+        }
         delay_until_us(switch_time_us);
-        if (!select_channel(service, next_slot)) {
+        uint32_t channel_slot = next_slot;
+        if (service->fsm.state == FHSS_FSM_STATE_RECOVERY) {
+            channel_slot = get_recovery_probe_slot(service, next_slot);
+            ESP_LOGI(TAG,
+                     "RECOVERY probe: predicted_slot=%lu candidate_slot=%lu",
+                     (unsigned long)next_slot,
+                     (unsigned long)channel_slot);
+        }
+        if (!select_channel(service, channel_slot)) {
             report_event(service, FHSS_SERVICE_EVENT_ERROR);
             continue;
         }
@@ -581,6 +829,8 @@ static void rx_task(fhss_service_t *service)
             service, receive_result, &result, rx_timestamp_us);
         if (receive_result == RECEIVE_RESULT_OK) {
             handle_sync_result(service, &result);
+        } else if (receive_result == RECEIVE_RESULT_SESSION_END) {
+            (void)handle_session_end(service);
         } else if (receive_result == RECEIVE_RESULT_DATA) {
             /* Data packets do not advance the sync miss counter. */
         } else if (receive_result == RECEIVE_RESULT_TIMEOUT ||
@@ -615,7 +865,14 @@ bool fhss_service_init(
 {
     if (service == NULL || config == NULL || config->channels == NULL ||
         config->channel_count == 0U || config->slot_duration_us == 0U ||
-        config->search_dwell_ms == 0U || config->receive_timeout_ms == 0U) {
+        config->search_dwell_ms == 0U || config->receive_timeout_ms == 0U ||
+        config->correction_slow_divisor == 0U ||
+        config->correction_fast_divisor == 0U ||
+        config->correction_max_step_us == 0U ||
+        config->correction_deadband_us >
+            config->correction_fast_threshold_us ||
+        config->recovery_entry_miss_count == 0U ||
+        config->recovery_entry_miss_count >= config->loss_count) {
         return false;
     }
 
@@ -699,7 +956,7 @@ bool fhss_service_start(fhss_service_t *service)
             "fhss_service",
             8192U,
             service,
-            6U,
+            FHSS_SERVICE_TASK_PRIORITY,
             &task) != pdPASS) {
         fhss_fsm_handle(&service->fsm, FHSS_FSM_EVENT_STOP);
         return false;
@@ -777,6 +1034,10 @@ bool fhss_service_set_role(
     }
     service->config.role = role;
     service->tx_in_flight = false;
+    /* A role change starts a new radio session. Do not let stale RX recovery
+     * progress force the new session into RECOVERY or SEARCHING early. */
+    service->consecutive_sync_misses = 0U;
+    service->recovery_probe_index = 0U;
     if (role == FHSS_SERVICE_ROLE_RX) {
         xQueueReset((QueueHandle_t)service->tx_queue);
     }
@@ -791,7 +1052,6 @@ bool fhss_service_send_data(
 {
     if (service == NULL || data == NULL || length == 0U ||
         length > RF_TRANSPORT_MAX_PACKET_LENGTH ||
-        service->config.role != FHSS_SERVICE_ROLE_TX ||
         service->tx_queue == NULL) {
         return false;
     }

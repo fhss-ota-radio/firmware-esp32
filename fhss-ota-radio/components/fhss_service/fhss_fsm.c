@@ -48,6 +48,20 @@ bool fhss_fsm_handle(fhss_fsm_t *fsm, fhss_fsm_event_t event)
         }
         break;
     case FHSS_FSM_STATE_TRACKING:
+        if (event == FHSS_FSM_EVENT_SYNC_DEGRADED) {
+            fsm->state = FHSS_FSM_STATE_RECOVERY;
+            return true;
+        }
+        if (event == FHSS_FSM_EVENT_SYNC_LOST) {
+            fsm->state = FHSS_FSM_STATE_SEARCHING;
+            return true;
+        }
+        break;
+    case FHSS_FSM_STATE_RECOVERY:
+        if (event == FHSS_FSM_EVENT_SYNC_RECOVERED) {
+            fsm->state = FHSS_FSM_STATE_TRACKING;
+            return true;
+        }
         if (event == FHSS_FSM_EVENT_SYNC_LOST) {
             fsm->state = FHSS_FSM_STATE_SEARCHING;
             return true;
@@ -68,6 +82,7 @@ const char *fhss_fsm_state_name(fhss_fsm_state_t state)
     case FHSS_FSM_STATE_SEARCHING: return "SEARCHING";
     case FHSS_FSM_STATE_SYNCHRONIZING: return "SYNCHRONIZING";
     case FHSS_FSM_STATE_TRACKING: return "TRACKING";
+    case FHSS_FSM_STATE_RECOVERY: return "RECOVERY";
     case FHSS_FSM_STATE_TRANSMITTING: return "TRANSMITTING";
     default: return "UNKNOWN";
     }

@@ -17,12 +17,21 @@ typedef enum {
 typedef struct {
     const uint8_t *channels;
     size_t channel_count;
+    uint32_t seed;
+    uint8_t permutation[UINT8_MAX + 1U];
     uint8_t initialized;
 } fhss_hop_sequence_t;
 
 fhss_hop_status_t fhss_hop_sequence_init(fhss_hop_sequence_t *sequence,
                                           const uint8_t *channels,
                                           size_t channel_count);
+fhss_hop_status_t fhss_hop_sequence_init_seeded(
+    fhss_hop_sequence_t *sequence,
+    const uint8_t *channels,
+    size_t channel_count,
+    uint32_t seed,
+    uint8_t reserved_channel
+);
 fhss_hop_status_t fhss_hop_sequence_get_index(const fhss_hop_sequence_t *sequence,
                                                uint32_t slot_number,
                                                uint8_t *out_index);

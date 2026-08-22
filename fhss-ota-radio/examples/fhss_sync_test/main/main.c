@@ -16,7 +16,8 @@
 #define CC1101_GDO0_GPIO GPIO_NUM_9
 
 static const char *TAG = "fhss_sync_test";
-static const uint8_t s_hop_channels[] = {0U, 10U, 20U};
+/* Channel 0 is reserved for OTA; channel 1 is the audio rendezvous channel. */
+static const uint8_t s_hop_channels[] = {1U, 10U, 20U};
 static fhss_service_t s_fhss_service;
 
 static void on_fhss_event(fhss_service_event_t event, void *context)
@@ -56,13 +57,21 @@ void app_main(void)
         },
         .channels = s_hop_channels,
         .channel_count = sizeof(s_hop_channels) / sizeof(s_hop_channels[0]),
+        .hop_seed = 0x46485353U,
+        .generation = 0U,
+        .reserved_channel = 0U,
         .slot_duration_us = 300000U,
         .channel_switch_guard_us = 5000U,
         .sync_offset_us = 0U,
+        .correction_deadband_us = 500U,
+        .correction_fast_threshold_us = 2000U,
+        .correction_slow_divisor = 8U,
+        .correction_fast_divisor = 2U,
         .search_dwell_ms = 137U,
         .receive_timeout_ms = 80U,
         .acquire_count = 3U,
         .loss_count = 5U,
+        .recovery_entry_miss_count = 2U,
         .diagnostics_interval_ms = 5000U,
         .event_callback = on_fhss_event,
         .event_context = NULL,
