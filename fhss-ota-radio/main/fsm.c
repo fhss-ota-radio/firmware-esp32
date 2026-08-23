@@ -155,6 +155,7 @@ static void ota_radio_task(void *arg)
 {
     (void)arg;
     uint8_t packet[OTA_CLIENT_MAX_PACKET_LENGTH];
+    uint32_t consecutive_timeouts = 0U;
     while (!s_ota_radio_should_stop) {
         size_t packet_length = 0U;
         const fhss_audio_adapter_ota_rx_status_t status =
@@ -164,6 +165,7 @@ static void ota_radio_task(void *arg)
                 &packet_length,
                 OTA_RADIO_RX_TIMEOUT_MS);
         if (status == FHSS_AUDIO_ADAPTER_OTA_RX_OK) {
+            consecutive_timeouts = 0U;
             if (s_ota_response_done != NULL) {
                 (void)xSemaphoreTake(s_ota_response_done, 0U);
             }
@@ -181,6 +183,7 @@ static void ota_radio_task(void *arg)
                     pdMS_TO_TICKS(OTA_RESPONSE_WAIT_MS));
             }
         } else if (status == FHSS_AUDIO_ADAPTER_OTA_RX_CRC_ERROR) {
+            consecutive_timeouts = 0U;
             ESP_LOGW(TAG, "OTA RF packet dropped: CC1101 CRC failed");
         } else if (status == FHSS_AUDIO_ADAPTER_OTA_RX_ERROR &&
                    !s_ota_radio_should_stop) {
@@ -188,6 +191,16 @@ static void ota_radio_task(void *arg)
             fsm_post_event(FSM_EVENT_ERROR);
             break;
         } else {
+            consecutive_timeouts++;
+            if ((consecutive_timeouts % 50U) == 0U) {
+                ESP_LOGI(
+                    "OTA_DIAG",
+                    "LISTEN no-packet count=%" PRIu32
+                    " window_ms=%" PRIu32 " fsm=%s",
+                    consecutive_timeouts,
+                    consecutive_timeouts * OTA_RADIO_RX_TIMEOUT_MS,
+                    fsm_state_name(fsm_get_state()));
+            }
             /* Allow timeout-driven NACK processing to acquire the radio mutex. */
             vTaskDelay(1U);
         }

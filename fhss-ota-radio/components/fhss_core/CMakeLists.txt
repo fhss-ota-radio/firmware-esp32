@@ -12,4 +12,5 @@ idf_component_register(
         "include"
     REQUIRES
         ota_protocol
+        log
 )
