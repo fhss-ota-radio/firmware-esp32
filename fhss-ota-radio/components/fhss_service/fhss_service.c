@@ -8,6 +8,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "fhss_ota_diagnostics.h"
 
 static const char *TAG = "fhss_service";
 
@@ -287,7 +288,13 @@ static rf_transport_status_t send_sync(
             &packet, buffer, sizeof(buffer), &length) != FHSS_PACKET_STATUS_OK) {
         return RF_TRANSPORT_STATUS_INVALID_ARG;
     }
-    return rf_transport_send_packet(&service->radio, buffer, (uint8_t)length);
+    fhss_ota_diag_log_packet(
+        "TX", "FHSS_SYNC", service->current_channel, buffer, length);
+    const rf_transport_status_t status = rf_transport_send_packet(
+        &service->radio, buffer, (uint8_t)length);
+    fhss_ota_diag_log_tx_result(
+        "FHSS_SYNC", service->current_channel, (int)status, length);
+    return status;
 }
 
 static void drain_tx_data_until(fhss_service_t *service, int64_t deadline_us)
@@ -317,8 +324,15 @@ static void drain_tx_data_until(fhss_service_t *service, int64_t deadline_us)
             return;
         }
         service->tx_in_flight = true;
-        if (rf_transport_send_packet(&service->radio, item.data, item.length) !=
-            RF_TRANSPORT_STATUS_OK) {
+        fhss_ota_diag_log_packet(
+            "TX", "FHSS_DATA", service->current_channel,
+            item.data, item.length);
+        const rf_transport_status_t send_status = rf_transport_send_packet(
+            &service->radio, item.data, item.length);
+        fhss_ota_diag_log_tx_result(
+            "FHSS_DATA", service->current_channel,
+            (int)send_status, item.length);
+        if (send_status != RF_TRANSPORT_STATUS_OK) {
             service->tx_in_flight = false;
             ESP_LOGW(TAG, "audio/data TX failed: length=%u", item.length);
             report_event(service, FHSS_SERVICE_EVENT_ERROR);
@@ -343,8 +357,15 @@ static void send_one_queued_data(fhss_service_t *service, int64_t deadline_us)
         return;
     }
     service->tx_in_flight = true;
-    if (rf_transport_send_packet(&service->radio, item.data, item.length) !=
-        RF_TRANSPORT_STATUS_OK) {
+    fhss_ota_diag_log_packet(
+        "TX", "FHSS_RESPONSE", service->current_channel,
+        item.data, item.length);
+    const rf_transport_status_t send_status = rf_transport_send_packet(
+        &service->radio, item.data, item.length);
+    fhss_ota_diag_log_tx_result(
+        "FHSS_RESPONSE", service->current_channel,
+        (int)send_status, item.length);
+    if (send_status != RF_TRANSPORT_STATUS_OK) {
         (void)xQueueSendToFront(
             (QueueHandle_t)service->tx_queue, &item, 0U);
         ESP_LOGW(TAG, "response TX failed: length=%u", item.length);
@@ -444,6 +465,12 @@ static receive_result_t receive_one(
             &packet) != RF_TRANSPORT_STATUS_OK) {
         return RECEIVE_RESULT_RADIO_ERROR;
     }
+    fhss_ota_diag_log_rx_result(
+        "FHSS", service->current_channel, 0, packet.crc_ok,
+        packet.rssi_dbm, packet.lqi, packet.length);
+    fhss_ota_diag_log_packet(
+        "RX", "FHSS", service->current_channel,
+        packet.payload, packet.length);
     if (!packet.crc_ok) {
         return RECEIVE_RESULT_CRC_FAIL;
     }
@@ -622,6 +649,22 @@ static void handle_miss(fhss_service_t *service)
         ESP_LOGW(TAG,
                  "RECOVERY entered after %lu consecutive sync misses",
                  (unsigned long)service->consecutive_sync_misses);
+    }
+}
+
+static void handle_invalid_sync(fhss_service_t *service)
+{
+    ESP_LOGW(TAG, "invalid SYNC dropped: state=%s channel=%u",
+             fhss_fsm_state_name(service->fsm.state),
+             service->current_channel);
+
+    /* During acquisition, a malformed or incompatible peer packet must not
+     * erase already validated samples and must not escalate to product ERROR.
+     * Once tracking, the same packet means the expected valid SYNC was missed,
+     * so feed it into the normal bounded recovery/loss policy. */
+    if (service->fsm.state == FHSS_FSM_STATE_TRACKING ||
+        service->fsm.state == FHSS_FSM_STATE_RECOVERY) {
+        handle_miss(service);
     }
 }
 
@@ -836,10 +879,15 @@ static void rx_task(fhss_service_t *service)
         } else if (receive_result == RECEIVE_RESULT_TIMEOUT ||
                    receive_result == RECEIVE_RESULT_CRC_FAIL) {
             handle_miss(service);
+        } else if (receive_result == RECEIVE_RESULT_SYNC_ERROR) {
+            handle_invalid_sync(service);
+        } else if (receive_result == RECEIVE_RESULT_RADIO_ERROR) {
+            ESP_LOGE(TAG, "CC1101 RX failure on channel=%u",
+                     service->current_channel);
+            report_event(service, FHSS_SERVICE_EVENT_ERROR);
         } else {
             ESP_LOGW(TAG, "RX processing error: result=%d channel=%u",
                      receive_result, service->current_channel);
-            report_event(service, FHSS_SERVICE_EVENT_ERROR);
         }
     }
 }

@@ -11,6 +11,7 @@
 
 #include "fhss_audio_packet.h"
 #include "fhss_config_store.h"
+#include "fhss_ota_diagnostics.h"
 #include "fhss_service.h"
 #include "audio_codec.h"
 
@@ -582,8 +583,17 @@ fhss_audio_adapter_ota_rx_status_t fhss_audio_adapter_ota_receive(
     }
     if (status != RF_TRANSPORT_STATUS_OK || received.length == 0U ||
         received.length > capacity) {
+        fhss_ota_diag_log_rx_result(
+            "FIXED", OTA_FIXED_CHANNEL, (int)status, received.crc_ok,
+            received.rssi_dbm, received.lqi, received.length);
         return FHSS_AUDIO_ADAPTER_OTA_RX_ERROR;
     }
+    fhss_ota_diag_log_rx_result(
+        "FIXED", OTA_FIXED_CHANNEL, (int)status, received.crc_ok,
+        received.rssi_dbm, received.lqi, received.length);
+    fhss_ota_diag_log_packet(
+        "RX", "FIXED", OTA_FIXED_CHANNEL,
+        received.payload, received.length);
     if (!received.crc_ok) {
         return FHSS_AUDIO_ADAPTER_OTA_RX_CRC_ERROR;
     }
@@ -599,7 +609,15 @@ bool fhss_audio_adapter_ota_send(const uint8_t *packet, size_t length)
         return false;
     }
     if (s_adapter.ota_fhss_active) {
-        return fhss_service_send_data(&s_adapter.service, packet, length);
+        fhss_ota_diag_log_packet(
+            "TX_QUEUE", "FHSS", s_adapter.service.current_channel,
+            packet, length);
+        const bool queued = fhss_service_send_data(
+            &s_adapter.service, packet, length);
+        fhss_ota_diag_log_tx_result(
+            "FHSS_QUEUE", s_adapter.service.current_channel,
+            queued ? 0 : -1, length);
+        return queued;
     }
     if (xSemaphoreTake(s_adapter.radio_mutex, portMAX_DELAY) != pdTRUE) {
         return false;
@@ -609,6 +627,10 @@ bool fhss_audio_adapter_ota_send(const uint8_t *packet, size_t length)
     const rf_transport_status_t rx_status = rf_transport_start_receive(
         &s_adapter.service.radio);
     xSemaphoreGive(s_adapter.radio_mutex);
+    fhss_ota_diag_log_packet(
+        "TX", "FIXED", OTA_FIXED_CHANNEL, packet, length);
+    fhss_ota_diag_log_tx_result(
+        "FIXED", OTA_FIXED_CHANNEL, (int)send_status, length);
     return send_status == RF_TRANSPORT_STATUS_OK &&
            rx_status == RF_TRANSPORT_STATUS_OK;
 }

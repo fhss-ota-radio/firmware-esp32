@@ -280,17 +280,28 @@ static void ota_consumer_handle_fhss_config(
 {
     ota_fhss_config_fields_t fields = {0};
     if (!ota_protocol_decode_fhss_config(packet, packet_length, &fields)) {
+        ESP_LOGW(TAG, "FHSS_CONFIG rejected: wire decode failed, bytes=%u",
+                 (unsigned)packet_length);
         return;
     }
     if (!ota_consumer_target_matches(context, fields.target_device_id)) {
+        ESP_LOGW(TAG,
+                 "FHSS_CONFIG ignored: target=%08" PRIX32
+                 " local=%08" PRIX32,
+                 fields.target_device_id, context->config.device_id);
         return;
     }
     if (!ota_consumer_is_ota_mode(context)) {
+        ESP_LOGW(TAG, "FHSS_CONFIG rejected: device is not in OTA FSM mode");
         (void)ota_consumer_send_nack(
             context, fields.session_id, OTA_PKT_FHSS_CONFIG,
             OTA_CONTROL_SEQUENCE, OTA_RESULT_BUSY);
         return;
     }
+    ESP_LOGI(TAG,
+             "FHSS_CONFIG pending verified: session=%" PRIu32
+             " generation=%" PRIu32 " seed=%08" PRIX32,
+             fields.session_id, fields.generation, fields.seed);
     const esp_err_t err = fhss_config_store_save_pending(&fields);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "FHSS_CONFIG pending save failed: %s",
@@ -316,15 +327,27 @@ static void ota_consumer_handle_fhss_activate(
     ota_fhss_activate_fields_t activate = {0};
     if (!ota_protocol_decode_fhss_activate(
             packet, packet_length, &activate)) {
+        ESP_LOGW(TAG, "FHSS_ACTIVATE rejected: wire decode failed, bytes=%u",
+                 (unsigned)packet_length);
         return;
     }
     if (!ota_consumer_target_matches(context, activate.target_device_id)) {
+        ESP_LOGW(TAG,
+                 "FHSS_ACTIVATE ignored: target=%08" PRIX32
+                 " local=%08" PRIX32,
+                 activate.target_device_id, context->config.device_id);
         return;
     }
     ota_fhss_config_fields_t pending = {0};
     if (fhss_config_store_load_pending(&pending) != ESP_OK ||
         pending.generation != activate.generation ||
         pending.session_id != activate.session_id) {
+        ESP_LOGW(TAG,
+                 "FHSS_ACTIVATE rejected: pending(session=%" PRIu32
+                 ",gen=%" PRIu32 ") rx(session=%" PRIu32
+                 ",gen=%" PRIu32 ")",
+                 pending.session_id, pending.generation,
+                 activate.session_id, activate.generation);
         (void)ota_consumer_send_nack(
             context, activate.session_id, OTA_PKT_FHSS_ACTIVATE,
             OTA_CONTROL_SEQUENCE, OTA_RESULT_INVALID_SEQUENCE);
@@ -340,6 +363,9 @@ static void ota_consumer_handle_fhss_activate(
     }
     ota_consumer_emit_event(
         context, OTA_CLIENT_EVENT_FHSS_ACTIVATING, ESP_OK);
+    ESP_LOGI(TAG,
+             "FHSS_ACTIVATE ACK sent; switching to rendezvous=%u generation=%" PRIu32,
+             pending.rendezvous_channel, pending.generation);
     if (context->config.fhss_activate_callback == NULL ||
         context->config.fhss_activate_callback(
             &pending, context->config.callback_context) != ESP_OK) {
