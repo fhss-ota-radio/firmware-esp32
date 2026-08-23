@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>FHSS Live Channel Monitor</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #0f172a; color: #f8fafc; }
+    header { padding: 18px 28px; border-bottom: 1px solid #334155; display:flex; justify-content:space-between; align-items:center; }
+    h1 { margin:0; font-size:24px; } .sub { color:#94a3b8; font-size:13px; }
+    main { padding:22px 28px; max-width:1400px; margin:auto; }
+    .controls,.cards { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px; }
+    .panel,.card { background:#172033; border:1px solid #334155; border-radius:12px; padding:16px; }
+    button { border:0; border-radius:8px; padding:10px 16px; font-weight:700; cursor:pointer; color:#07111f; }
+    .tx button { background:#38bdf8; } .rx button { background:#fb7185; }
+    .status { margin-left:12px; color:#94a3b8; }
+    .value { font:700 38px ui-monospace,monospace; margin:7px 0; }
+    .tx .value { color:#38bdf8; } .rx .value { color:#fb7185; }
+    .match { text-align:center; font-size:22px; font-weight:800; padding:12px; border-radius:10px; margin-bottom:16px; }
+    .ok { background:#14532d; color:#86efac; } .bad { background:#7f1d1d; color:#fecaca; } .waiting { background:#334155; color:#cbd5e1; }
+    canvas { width:100%; height:440px; background:#0b1220; border-radius:12px; border:1px solid #334155; }
+    pre { max-height:150px; overflow:auto; color:#94a3b8; font-size:11px; white-space:pre-wrap; }
+    .legend span { margin-right:20px; } .dot { display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px; }
+    @media(max-width:800px){.controls,.cards{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+<header><div><h1>FHSS Live Channel Monitor</h1><div class="sub">ESP32-S3 + CC1101 · 실시간 slot/channel 시각화</div></div><div id="clock"></div></header>
+<main>
+  <section class="controls">
+    <div class="panel tx"><button id="connectTx">TX 포트 연결</button><span id="txStatus" class="status">연결 안 됨</span></div>
+    <div class="panel rx"><button id="connectRx">RX 포트 연결</button><span id="rxStatus" class="status">연결 안 됨</span></div>
+  </section>
+  <section class="cards">
+    <div class="card tx"><div>TX 현재 채널</div><div id="txChannel" class="value">--</div><div id="txSlot" class="sub">slot --</div></div>
+    <div class="card rx"><div>RX 현재 채널</div><div id="rxChannel" class="value">--</div><div id="rxSlot" class="sub">slot --</div></div>
+  </section>
+  <div id="match" class="match waiting">두 포트를 연결하면 동기 상태를 비교합니다</div>
+  <div class="legend"><span><i class="dot" style="background:#38bdf8"></i>TX</span><span><i class="dot" style="background:#fb7185"></i>RX</span></div>
+  <canvas id="chart" width="1300" height="440"></canvas>
+  <section class="controls" style="margin-top:16px"><pre id="txLog" class="panel"></pre><pre id="rxLog" class="panel"></pre></section>
+</main>
+<script>
+const devices = { tx:{color:'#38bdf8',points:[],slot:null,channel:null}, rx:{color:'#fb7185',points:[],slot:null,channel:null} };
+const pattern = /(?:channel selected:|SYNC RX:.*)\s*(?:state=\S+\s+)?slot=(\d+)\s+channel=(\d+)/;
+const canvas=document.getElementById('chart'), ctx=canvas.getContext('2d');
+
+function update(role, line) {
+  const m=line.match(pattern); if(!m) return;
+  const d=devices[role]; d.slot=Number(m[1]); d.channel=Number(m[2]);
+  d.points.push({slot:d.slot,channel:d.channel,time:performance.now()});
+  if(d.points.length>60)d.points.shift();
+  document.getElementById(role+'Channel').textContent='CH '+d.channel;
+  document.getElementById(role+'Slot').textContent='slot '+d.slot;
+  updateMatch(); draw();
+}
+function updateMatch(){
+  const a=devices.tx,b=devices.rx,el=document.getElementById('match');
+  if(a.slot===null||b.slot===null){el.className='match waiting';return;}
+  const same=a.slot===b.slot&&a.channel===b.channel;
+  el.className='match '+(same?'ok':'bad');
+  el.textContent=same?'SYNCHRONIZED — 같은 slot / channel':'DIFFERENT — TX '+a.slot+'/'+a.channel+' · RX '+b.slot+'/'+b.channel;
+}
+function draw(){
+  const w=canvas.width,h=canvas.height,L=58,R=22,T=20,B=42; ctx.clearRect(0,0,w,h);ctx.fillStyle='#0b1220';ctx.fillRect(0,0,w,h);
+  ctx.font='12px system-ui';ctx.strokeStyle='#334155';ctx.fillStyle='#94a3b8';ctx.lineWidth=1;
+  for(let c=0;c<=100;c+=20){const y=T+(100-c)/100*(h-T-B);ctx.beginPath();ctx.moveTo(L,y);ctx.lineTo(w-R,y);ctx.stroke();ctx.fillText(c,22,y+4)}
+  const all=[...devices.tx.points,...devices.rx.points], maxSlot=all.length?Math.max(...all.map(p=>p.slot)):60, minSlot=Math.max(0,maxSlot-59), range=Math.max(1,maxSlot-minSlot);
+  for(let s=Math.ceil(minSlot/10)*10;s<=maxSlot;s+=10){const x=L+(s-minSlot)/range*(w-L-R);ctx.beginPath();ctx.moveTo(x,T);ctx.lineTo(x,h-B);ctx.stroke();ctx.fillText(s,x-8,h-17)}
+  ctx.fillText('CC1101 CHANNR',8,13);ctx.fillText('slot',w-45,h-17);
+  for(const role of ['tx','rx']){const d=devices[role], pts=d.points.filter(p=>p.slot>=minSlot);ctx.strokeStyle=d.color;ctx.fillStyle=d.color;ctx.lineWidth=3;ctx.beginPath();pts.forEach((p,i)=>{const x=L+(p.slot-minSlot)/range*(w-L-R),y=T+(100-p.channel)/100*(h-T-B);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke();pts.forEach(p=>{const x=L+(p.slot-minSlot)/range*(w-L-R),y=T+(100-p.channel)/100*(h-T-B);ctx.beginPath();ctx.arc(x,y,4,0,Math.PI*2);ctx.fill()})}
+}
+async function connect(role){
+  if(!('serial' in navigator)){alert('Chrome 또는 Edge에서 localhost로 여세요. Web Serial API가 필요합니다.');return;}
+  const port=await navigator.serial.requestPort(); await port.open({baudRate:115200});
+  document.getElementById(role+'Status').textContent='115200 baud 연결됨';
+  const decoder=new TextDecoderStream(); port.readable.pipeTo(decoder.writable); const reader=decoder.readable.getReader(); let buf='';
+  try{while(true){const {value,done}=await reader.read();if(done)break;buf+=value;const lines=buf.split(/\r?\n/);buf=lines.pop();for(const line of lines){update(role,line);const log=document.getElementById(role+'Log');log.textContent=(line+'\n'+log.textContent).slice(0,5000)}}}finally{reader.releaseLock()}
+}
+document.getElementById('connectTx').onclick=()=>connect('tx').catch(e=>alert(e));
+document.getElementById('connectRx').onclick=()=>connect('rx').catch(e=>alert(e));
+setInterval(()=>document.getElementById('clock').textContent=new Date().toLocaleTimeString(),1000);draw();
+</script>
+</body>
+</html>

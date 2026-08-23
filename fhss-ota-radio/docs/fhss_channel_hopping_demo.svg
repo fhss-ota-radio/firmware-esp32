@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="440" viewBox="0 0 1000 440">
+  <rect width="1000" height="440" fill="#0f172a"/>
+  <text x="500" y="30" fill="#f8fafc" font-family="sans-serif" font-size="21" text-anchor="middle" font-weight="bold">FHSS Channel Hopping — First 30 Slots</text>
+  <text x="500" y="53" fill="#94a3b8" font-family="sans-serif" font-size="13" text-anchor="middle">seed=0x46485353 · slot=300 ms · CHANNR 1–100 · rendezvous=1</text>
+
+  <g stroke="#334155" stroke-width="1">
+    <line x1="70" y1="70" x2="930" y2="70"/><line x1="70" y1="140" x2="930" y2="140"/>
+    <line x1="70" y1="210" x2="930" y2="210"/><line x1="70" y1="280" x2="930" y2="280"/>
+    <line x1="70" y1="350" x2="930" y2="350"/>
+    <line x1="70" y1="70" x2="70" y2="350"/><line x1="215" y1="70" x2="215" y2="350"/>
+    <line x1="360" y1="70" x2="360" y2="350"/><line x1="505" y1="70" x2="505" y2="350"/>
+    <line x1="650" y1="70" x2="650" y2="350"/><line x1="795" y1="70" x2="795" y2="350"/>
+    <line x1="930" y1="70" x2="930" y2="350"/>
+  </g>
+
+  <g fill="#cbd5e1" font-family="sans-serif" font-size="12">
+    <text x="58" y="354" text-anchor="end">0</text><text x="58" y="284" text-anchor="end">25</text>
+    <text x="58" y="214" text-anchor="end">50</text><text x="58" y="144" text-anchor="end">75</text>
+    <text x="58" y="74" text-anchor="end">100</text>
+    <text x="70" y="374" text-anchor="middle">0</text><text x="215" y="374" text-anchor="middle">5</text>
+    <text x="360" y="374" text-anchor="middle">10</text><text x="505" y="374" text-anchor="middle">15</text>
+    <text x="650" y="374" text-anchor="middle">20</text><text x="795" y="374" text-anchor="middle">25</text>
+    <text x="911" y="374" text-anchor="middle">29</text>
+    <text x="500" y="410" text-anchor="middle" font-size="14">Slot number (1 slot = 300 ms)</text>
+    <text x="18" y="210" text-anchor="middle" font-size="14" transform="rotate(-90 18 210)">CC1101 CHANNR</text>
+  </g>
+
+  <polyline points="70,347.2 99,148.4 128,92.4 157,271.6 186,260.4 215,162.4 244,210.0 273,201.6 302,288.4 331,302.4 360,330.4 389,246.4 418,159.6 447,274.4 476,109.2 505,207.2 534,221.2 563,126.0 592,257.6 621,72.8 650,173.6 679,254.8 708,187.6 737,299.6 766,182.0 795,263.2 824,179.2 853,280.0 882,81.2 911,128.8" fill="none" stroke="#38bdf8" stroke-width="3" stroke-linejoin="round"/>
+  <g fill="#f8fafc" stroke="#0ea5e9" stroke-width="2">
+    <circle cx="70" cy="347.2" r="5"/><circle cx="99" cy="148.4" r="4"/><circle cx="128" cy="92.4" r="4"/>
+    <circle cx="157" cy="271.6" r="4"/><circle cx="186" cy="260.4" r="4"/><circle cx="215" cy="162.4" r="4"/>
+    <circle cx="244" cy="210" r="4"/><circle cx="273" cy="201.6" r="4"/><circle cx="302" cy="288.4" r="4"/>
+    <circle cx="331" cy="302.4" r="4"/><circle cx="360" cy="330.4" r="4"/><circle cx="389" cy="246.4" r="4"/>
+    <circle cx="418" cy="159.6" r="4"/><circle cx="447" cy="274.4" r="4"/><circle cx="476" cy="109.2" r="4"/>
+    <circle cx="505" cy="207.2" r="4"/><circle cx="534" cy="221.2" r="4"/><circle cx="563" cy="126" r="4"/>
+    <circle cx="592" cy="257.6" r="4"/><circle cx="621" cy="72.8" r="4"/><circle cx="650" cy="173.6" r="4"/>
+    <circle cx="679" cy="254.8" r="4"/><circle cx="708" cy="187.6" r="4"/><circle cx="737" cy="299.6" r="4"/>
+    <circle cx="766" cy="182" r="4"/><circle cx="795" cy="263.2" r="4"/><circle cx="824" cy="179.2" r="4"/>
+    <circle cx="853" cy="280" r="4"/><circle cx="882" cy="81.2" r="4"/><circle cx="911" cy="128.8" r="4"/>
+  </g>
+  <text x="78" y="337" fill="#fbbf24" font-family="sans-serif" font-size="12">rendezvous CH 1</text>
+</svg>
