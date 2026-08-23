@@ -76,16 +76,24 @@ static SemaphoreHandle_t s_ota_response_done;
 static volatile bool s_ota_ready_to_reboot;
 static TaskHandle_t s_ota_reboot_task;
 static TimerHandle_t s_ota_fhss_sync_timer;
+static TimerHandle_t s_ota_fhss_resync_timer;
 
 #define OTA_RADIO_RX_TIMEOUT_MS 40U
 #define OTA_RESPONSE_WAIT_MS    250U
 #define OTA_REBOOT_DELAY_MS     250U
 #define OTA_FHSS_SYNC_TIMEOUT_MS 5000U
+#define OTA_FHSS_RESYNC_GRACE_MS 3000U
 
 static void ota_fhss_sync_timeout_callback(TimerHandle_t timer)
 {
     (void)timer;
     fsm_post_event(FSM_EVENT_FHSS_SYNC_TIMEOUT);
+}
+
+static void ota_fhss_resync_timeout_callback(TimerHandle_t timer)
+{
+    (void)timer;
+    fsm_post_event(FSM_EVENT_OTA_FHSS_RESYNC_TIMEOUT);
 }
 
 _Static_assert(
@@ -312,6 +320,7 @@ static const char *s_event_names[FSM_EVENT_COUNT] = {
     [FSM_EVENT_FHSS_ACTIVATE] = "FHSS_ACTIVATE",
     [FSM_EVENT_SYNC_ACQUIRED] = "SYNC_ACQUIRED",
     [FSM_EVENT_FHSS_SYNC_TIMEOUT] = "FHSS_SYNC_TIMEOUT",
+    [FSM_EVENT_OTA_FHSS_RESYNC_TIMEOUT] = "OTA_FHSS_RESYNC_TIMEOUT",
     [FSM_EVENT_PTT_PRESS]      = "PTT_PRESS",
     [FSM_EVENT_PTT_RELEASE]    = "PTT_RELEASE",
     [FSM_EVENT_RX_FRAME]       = "RX_FRAME",
@@ -792,7 +801,7 @@ static void on_enter_boot_init(void)
                 FIRMWARE_VERSION_MINOR,
                 FIRMWARE_VERSION_PATCH,
             },
-            .receive_timeout_ms = 500U,
+            .receive_timeout_ms = 3000U,
             .discover_backoff_max_ms = OTA_DISCOVER_BACKOFF_MAX_MS,
             .send_callback = ota_radio_send_callback,
             .event_callback = fsm_ota_event_callback,
@@ -1034,6 +1043,11 @@ static void fsm_transition_to(fsm_state_t next_state)
         s_ota_fhss_sync_timer != NULL) {
         (void)xTimerStop(s_ota_fhss_sync_timer, 0U);
     }
+    if (s_state == FSM_STATE_OTA_RECEIVING &&
+        next_state != FSM_STATE_OTA_RECEIVING &&
+        s_ota_fhss_resync_timer != NULL) {
+        (void)xTimerStop(s_ota_fhss_resync_timer, 0U);
+    }
     ESP_LOGI(TAG, "%s -> %s", s_state_names[s_state], s_state_names[next_state]);
     s_state = next_state;
     if (s_enter_actions[s_state] != NULL) {
@@ -1062,6 +1076,24 @@ static void fsm_task(void *arg)
             fsm_transition_to(FSM_STATE_ERROR);
             continue;
         }
+        if (event == FSM_EVENT_SYNC_ACQUIRED &&
+            s_state == FSM_STATE_OTA_RECEIVING) {
+            if (s_ota_fhss_resync_timer != NULL) {
+                (void)xTimerStop(s_ota_fhss_resync_timer, 0U);
+            }
+            ESP_LOGI(TAG, "OTA FHSS synchronization recovered; session preserved");
+            continue;
+        }
+        if (event == FSM_EVENT_OTA_FHSS_RESYNC_TIMEOUT) {
+            if (s_state == FSM_STATE_OTA_RECEIVING) {
+                ESP_LOGW(TAG, "OTA FHSS resync grace expired; aborting session");
+                if (ota_client_abort() != ESP_OK) {
+                    ESP_LOGW(TAG, "failed to abort OTA after resync timeout");
+                }
+                fsm_transition_to(FSM_STATE_MENU_OTA);
+            }
+            continue;
+        }
         if (event == FSM_EVENT_SYNC_LOST &&
             s_state != FSM_STATE_BOOT_INIT &&
             s_state != FSM_STATE_ERROR) {
@@ -1070,9 +1102,20 @@ static void fsm_task(void *arg)
                 s_state == FSM_STATE_OTA_FHSS_SYNCING ||
                 s_state == FSM_STATE_OTA_FHSS_READY ||
                 s_state == FSM_STATE_OTA_RECEIVING;
-            if (s_state == FSM_STATE_OTA_RECEIVING &&
-                ota_client_abort() != ESP_OK) {
-                ESP_LOGW(TAG, "failed to abort OTA after FHSS SYNC loss");
+            if (s_state == FSM_STATE_OTA_RECEIVING) {
+                if (s_ota_fhss_resync_timer == NULL ||
+                    xTimerReset(s_ota_fhss_resync_timer, 0U) != pdPASS) {
+                    ESP_LOGE(TAG, "failed to arm OTA FHSS resync grace");
+                    if (ota_client_abort() != ESP_OK) {
+                        ESP_LOGW(TAG, "failed to abort OTA after FHSS SYNC loss");
+                    }
+                    fsm_transition_to(FSM_STATE_MENU_OTA);
+                } else {
+                    ESP_LOGW(TAG,
+                             "OTA FHSS SYNC lost; preserving session for %u ms resync grace",
+                             (unsigned)OTA_FHSS_RESYNC_GRACE_MS);
+                }
+                continue;
             }
             fsm_transition_to(
                 ota_fhss_state ? FSM_STATE_MENU_OTA : FSM_STATE_MENU_COMM);
@@ -1105,8 +1148,15 @@ bool fsm_init(void)
         pdFALSE,
         NULL,
         ota_fhss_sync_timeout_callback);
+    s_ota_fhss_resync_timer = xTimerCreate(
+        "ota_fhss_resync",
+        pdMS_TO_TICKS(OTA_FHSS_RESYNC_GRACE_MS),
+        pdFALSE,
+        NULL,
+        ota_fhss_resync_timeout_callback);
     if (s_event_queue == NULL || s_rx_audio_queue == NULL ||
-        s_ota_response_done == NULL || s_ota_fhss_sync_timer == NULL) {
+        s_ota_response_done == NULL || s_ota_fhss_sync_timer == NULL ||
+        s_ota_fhss_resync_timer == NULL) {
         ESP_LOGE(TAG, "failed to allocate FSM queues/semaphore");
         return false;
     }
