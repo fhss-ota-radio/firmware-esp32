@@ -81,7 +81,28 @@ static TimerHandle_t s_ota_fhss_resync_timer;
 #define OTA_RADIO_RX_TIMEOUT_MS 40U
 #define OTA_RESPONSE_WAIT_MS    250U
 #define OTA_REBOOT_DELAY_MS     250U
-#define OTA_FHSS_SYNC_TIMEOUT_MS 5000U
+/*
+ * [2026-08-24 정정: 5000 -> 10000] OTA_FHSS_SYNCING에서 SYNC_ACQUIRED까지
+ * 허용하는 시간. 5초는 최악의 경우 부족하다는 게 실기기 로그로 확인됐다:
+ *
+ *   ACTIVATE 직후 이쪽은 랑데부 채널(보통 1번)에 고정된 채 SYNC를
+ *   기다리는데, Gateway는 이미 8채널을 순회 중이라 1번 채널로 돌아오는
+ *   건 8슬롯(300ms x 8 = 2.4초)마다 한 번뿐이다. 여기에 획득에 필요한
+ *   연속 3 SYNC(0.9초)를 더하면 최악 3.3초. 정상 경로만 따져도 5초에
+ *   여유가 1.7초밖에 없고, 그 사이 Gateway의 DATA가 한 번이라도 SYNC
+ *   수신을 밀어내면(아직 획득 전이라 관용 없이 랑데부로 되돌아감)
+ *   바로 5초를 넘겨 세션이 폐기된다.
+ *
+ *   148 실기기 로그(2026-08-24)에서 정확히 이 순서로 재현됐다 — 타임아웃이
+ *   41711ms에 터졌고, 세션이 폐기되어 DATA가 멈추자마자 42095ms에
+ *   SYNC_ACQUIRED가 떴다. 즉 400ms만 더 버텼으면 성공했을 상황이었다.
+ *   상세: gateway-ota/docs/note/design-notes-gateway-ota-es.md 54절.
+ *
+ * Gateway 쪽에서도 전송 시작 전 대기(kSyncSettleMs)를 2초 -> 4초로 올려서
+ * 근본 원인(동기화 전에 DATA를 쏘는 것)을 같이 막았고, 이 값은 그래도
+ * 남는 지터를 흡수하는 안전망이다.
+ */
+#define OTA_FHSS_SYNC_TIMEOUT_MS 10000U
 #define OTA_FHSS_RESYNC_GRACE_MS 3000U
 
 static void ota_fhss_sync_timeout_callback(TimerHandle_t timer)
