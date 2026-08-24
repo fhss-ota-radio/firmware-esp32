@@ -17,6 +17,16 @@ typedef enum {
     RECEIVE_RESULT_TIMEOUT,
     RECEIVE_RESULT_CRC_FAIL,
     RECEIVE_RESULT_RADIO_ERROR,
+    /* [2026-08-24 추가] receive_one()의 rf_transport_receive_packet() 타임아웃
+     * 전용 결과값. 예전엔 이것도 RECEIVE_RESULT_RADIO_ERROR로 묶여서
+     * drain_rx_data_until()이 "진짜 하드웨어 오류"로 오인해 그 슬롯의 나머지
+     * DATA를 통째로 포기했다 — 근데 실제로는 동기워드는 정상 감지됐고
+     * (rf_transport_wait_rx_timestamp 성공) 그냥 본문 읽기가 빠듯했을 뿐이라
+     * 하드웨어는 멀쩡하다. 이 결과는 TIMEOUT/CRC_FAIL과 같은 취급을 받아야
+     * 한다 — drain 계속, tracking에서는 handle_miss()만. 자세한 재현 로그는
+     * design-notes-gateway-ota-es.md 50절, notion-fhss-ack-channel-drop 문서
+     * 참고. */
+    RECEIVE_RESULT_BODY_TIMEOUT,
     RECEIVE_RESULT_SYNC_ERROR,
     RECEIVE_RESULT_DATA,
     RECEIVE_RESULT_SESSION_END,
@@ -463,7 +473,10 @@ static receive_result_t receive_one(
             &service->radio,
             packet_timeout_ms,
             &packet) != RF_TRANSPORT_STATUS_OK) {
-        return RECEIVE_RESULT_RADIO_ERROR;
+        /* [2026-08-24] 동기워드는 이미 잡았는데(위 wait_rx_timestamp 성공)
+         * 본문을 다 못 읽고 여기서 타임아웃 — 하드웨어 오류가 아니라 그냥
+         * 처리 시간이 빠듯했던 것뿐이므로 RADIO_ERROR와 구분한다. */
+        return RECEIVE_RESULT_BODY_TIMEOUT;
     }
     fhss_ota_diag_log_rx_result(
         "FHSS", service->current_channel, 0, packet.crc_ok,
@@ -558,7 +571,8 @@ static void record_receive_result(
     } else if (receive_result == RECEIVE_RESULT_CRC_FAIL) {
         fhss_diagnostics_record_crc_fail(
             &service->diagnostics, service->current_channel);
-    } else if (receive_result == RECEIVE_RESULT_TIMEOUT) {
+    } else if (receive_result == RECEIVE_RESULT_TIMEOUT ||
+               receive_result == RECEIVE_RESULT_BODY_TIMEOUT) {
         fhss_diagnostics_record_timeout(
             &service->diagnostics, service->current_channel);
     }
@@ -741,7 +755,15 @@ static bool drain_rx_data_until(
          * 루프가 그 슬롯 데이터를 통째로 포기하고 있었음. 40ms로 올려도
          * 위 remaining_us 캡 때문에 슬롯 경계(switch_time_us)를 넘기진
          * 않음 — 슬롯 뒷부분(전환 임박)에서는 remaining_us 자체가 이 상한보다
-         * 먼저 작아져서 자연히 더 짧게 잡힌다. */
+         * 먼저 작아져서 자연히 더 짧게 잡힌다.
+         *
+         * [2026-08-24 후속] 이 타임아웃이 여기서 드레인을 끊어버리는 사이
+         * DATA 처리 + ACK 송신이 밀려서, ACK가 DATA를 받은 채널이 아니라
+         * 다음 홉 채널에서 나가 Gateway가 못 듣는 문제로 이어졌다(실기기
+         * 재현: design-notes-gateway-ota-es.md 50절). 근본 수정은
+         * RECEIVE_RESULT_RADIO_ERROR를 "진짜 무선 오류"와 "본문 읽기
+         * 타임아웃"(RECEIVE_RESULT_BODY_TIMEOUT)으로 분리해서, 후자는
+         * TIMEOUT/CRC_FAIL처럼 드레인을 계속하도록 함 — 아래 분기 참고. */
         uint32_t timeout_ms = (uint32_t)((remaining_us + 999) / 1000);
         if (timeout_ms > 40U) {
             timeout_ms = 40U;
@@ -773,6 +795,14 @@ static bool drain_rx_data_until(
         if (receive_result == RECEIVE_RESULT_TIMEOUT ||
             receive_result == RECEIVE_RESULT_CRC_FAIL) {
             /* Optional DATA absence is not a missed synchronization slot. */
+            continue;
+        }
+        if (receive_result == RECEIVE_RESULT_BODY_TIMEOUT) {
+            /* [2026-08-24] 동기워드는 잡았지만 본문 읽기가 빠듯했던 경우 —
+             * 진짜 무선 오류가 아니므로 예전처럼 이 슬롯 전체를 포기하지
+             * 않고 남은 시간 동안 드레인을 계속한다. 이게 바로 DATA 뒤에
+             * 오는 ACK가 다음 홉 채널로 밀려서 유실되던 원인이었다
+             * (design-notes 50절 / notion-fhss-ack-channel-drop 문서). */
             continue;
         }
 
@@ -826,6 +856,9 @@ static void rx_task(fhss_service_t *service)
                        receive_result == RECEIVE_RESULT_SYNC_ERROR) {
                 ESP_LOGW(TAG, "RX processing error: result=%d channel=%u",
                          receive_result, service->current_channel);
+            } else if (receive_result == RECEIVE_RESULT_BODY_TIMEOUT) {
+                /* SEARCHING 단계에서도 진짜 오류가 아니므로 조용히 다음
+                 * 시도로 넘어간다 (드레인 루프와 동일한 취급). */
             }
             continue;
         }
@@ -877,7 +910,12 @@ static void rx_task(fhss_service_t *service)
         } else if (receive_result == RECEIVE_RESULT_DATA) {
             /* Data packets do not advance the sync miss counter. */
         } else if (receive_result == RECEIVE_RESULT_TIMEOUT ||
-                   receive_result == RECEIVE_RESULT_CRC_FAIL) {
+                   receive_result == RECEIVE_RESULT_CRC_FAIL ||
+                   receive_result == RECEIVE_RESULT_BODY_TIMEOUT) {
+            /* [2026-08-24] BODY_TIMEOUT을 TIMEOUT/CRC_FAIL과 같은 취급으로
+             * 옮김 — 예전엔 RECEIVE_RESULT_RADIO_ERROR로 묶여서 아래
+             * report_event(FHSS_SERVICE_EVENT_ERROR)까지 타면서 그냥
+             * 처리시간이 빠듯했던 것뿐인데 심각한 오류로 취급됐었다. */
             handle_miss(service);
         } else if (receive_result == RECEIVE_RESULT_SYNC_ERROR) {
             handle_invalid_sync(service);
