@@ -46,6 +46,11 @@ git submodule update --init --recursive
 
 이 폴더는 실제 소스가 아니라 "xiph/speex의 어느 커밋을 쓸지" 가리키는 포인터만 저장소에 커밋돼 있는 구조라, 각자 clone한 뒤 한 번씩 위 명령을 실행해야 합니다 (누가 먼저 실행했는지와 무관하게 매 clone마다 필요).
 
+**⚠️ `components/fhss_audio_adapter/secret_seed.txt` 없으면 빌드 실패** — FHSS hop_seed를 HMAC-SHA256으로 파생할 때 쓰는 팀 공유 비밀. `EMBED_TXTFILES`로 펌웨어에 박아 넣는 파일이라 git에는 안 올라가 있음(gitignore 대상). `components/fhss_audio_adapter/secret_seed.txt.example`를 참고해서 팀 공유 채널로 받은 실제 값으로 `secret_seed.txt`를 직접 만들 것.
+
+- 형식: 8자리 16진수 한 줄(예: `4B434349`) — gateway-ota(`OTA_System/firmware_seeds/*.txt`)와 완전히 같은 형식이라 같은 파일을 그대로 복사해 쓸 수 있음
+- 형식이 안 맞으면 빌드는 되지만 런타임에 `ESP_LOGE`로 경고 후 내장 기본값으로 폴백 — 다른 기기와 홉이 안 맞을 수 있음
+
 ## 핵심 기능
 - I2S 마이크/스피커 입출력, PTT 제어
 - Speex Narrowband(8kHz) 음성 압축/해제

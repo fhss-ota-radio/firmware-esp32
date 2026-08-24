@@ -1,5 +1,7 @@
 #include "fhss_audio_adapter.h"
 
+#include <ctype.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "driver/gpio.h"
@@ -65,13 +67,64 @@ typedef struct {
 static const char *TAG = "fhss_audio_adapter";
 static uint8_t s_hop_channels[FHSS_AUDIO_HOP_CHANNEL_COUNT];
 
-/* 두 무전기에 동일하게 박혀 있어야 하는 팀 공유 비밀. 지금은 소스 상수라
- * secret_seed/public_seed 조합 구조가 도청 방지 효과는 아직 없음(둘 다
- * 사실상 공개) — README TODO에 적어둔 대로 추후 NVS, 더 나아가 eFuse
- * 읽기보호 블록(esp_hmac_calculate() HW 주변장치)으로 옮길 여지를 남긴다.
- * 그 전환 시에도 derive_session_hop_seed()의 HMAC-SHA256 구조 자체는 그대로
- * 재사용 가능하도록(키 소스만 교체) 설계했다. */
-static const uint8_t s_secret_seed[4] = {0x4B, 0x43, 0x43, 0x49};
+/* 두 무전기(+게이트웨이)에 동일하게 박혀 있어야 하는 팀 공유 비밀.
+ * 2026-08-24: 소스 하드코딩 대신 EMBED_TXTFILES로 컴포넌트 루트의
+ * secret_seed.txt(gitignore 대상, 빌드 전 각자 준비 — firmware-esp32/README.md
+ * "빌드 전 준비" 참고)를 펌웨어에 박아 넣고 fhss_audio_adapter_init()에서
+ * 한 번 디코딩한다. gateway-ota core/hopseed.cpp의 parseHexSecretSeed()와
+ * 정확히 같은 형식(8자리 16진수, 공백 무시, "0x" 접두사 허용)이라 같은
+ * secret_seed.txt 파일을 두 레포에 그대로 복사해 쓸 수 있다.
+ * 여전히 "빌드에 박힌 값"이라 도청 방지 효과는 없음(flash를 읽으면 그대로
+ * 나옴) — README TODO에 적어둔 대로 추후 NVS, 더 나아가 eFuse 읽기보호
+ * 블록(esp_hmac_calculate() HW 주변장치)으로 옮길 여지를 남긴다. 그 전환
+ * 시에도 derive_session_hop_seed()의 HMAC-SHA256 구조 자체는 그대로 재사용
+ * 가능하도록(키 소스만 교체) 설계했다. */
+static uint8_t s_secret_seed[4] = {0x4B, 0x43, 0x43, 0x49};
+
+extern const uint8_t secret_seed_txt_start[] asm("_binary_secret_seed_txt_start");
+extern const uint8_t secret_seed_txt_end[] asm("_binary_secret_seed_txt_end");
+
+/* secret_seed_txt_start를 8자리 16진수로 파싱한다(gateway-ota
+ * core/hopseed.cpp의 parseHexSecretSeed()와 동일 규칙). EMBED_TXTFILES는
+ * 파일 뒤에 널 종단자를 붙여 넣어주므로 C 문자열처럼 다룰 수 있다. */
+static bool decode_secret_seed_from_embedded_txt(uint8_t out[4])
+{
+    const char *text = (const char *)secret_seed_txt_start;
+    const size_t raw_len = (size_t)(secret_seed_txt_end - secret_seed_txt_start);
+
+    char trimmed[16];
+    size_t trimmed_len = 0U;
+    for (size_t i = 0U; i < raw_len && text[i] != '\0'; ++i) {
+        if (isspace((unsigned char)text[i])) {
+            continue;
+        }
+        if (trimmed_len >= sizeof(trimmed) - 1U) {
+            return false; /* 8자리 16진수보다 김 — 형식 오류 */
+        }
+        trimmed[trimmed_len++] = text[i];
+    }
+    trimmed[trimmed_len] = '\0';
+
+    const char *digits = trimmed;
+    if (trimmed_len >= 2U && trimmed[0] == '0' &&
+        (trimmed[1] == 'x' || trimmed[1] == 'X')) {
+        digits += 2U;
+        trimmed_len -= 2U;
+    }
+    if (trimmed_len != 8U) {
+        return false;
+    }
+    for (size_t i = 0U; i < 8U; ++i) {
+        if (!isxdigit((unsigned char)digits[i])) {
+            return false;
+        }
+    }
+    for (size_t i = 0U; i < 4U; ++i) {
+        const char byte_str[3] = {digits[i * 2U], digits[i * 2U + 1U], '\0'};
+        out[i] = (uint8_t)strtol(byte_str, NULL, 16);
+    }
+    return true;
+}
 
 #define SHA256_BLOCK_SIZE 64U
 #define SHA256_DIGEST_SIZE 32U
@@ -412,6 +465,12 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
 {
     if (config == NULL || config->rx_frame_callback == NULL) {
         return false;
+    }
+    if (!decode_secret_seed_from_embedded_txt(s_secret_seed)) {
+        /* s_secret_seed는 이미 컴파일 시점 기본값(KCCI)으로 초기화돼
+         * 있으므로 그대로 둔다 — 무전 자체는 계속 동작하되, 팀 공유값과
+         * 다를 수 있어 다른 기기와 홉이 안 맞을 수 있다는 것만 알린다. */
+        ESP_LOGE(TAG, "secret_seed.txt 형식이 올바르지 않음 — 내장 기본값 사용");
     }
     memset(&s_adapter, 0, sizeof(s_adapter));
     s_adapter.config = *config;

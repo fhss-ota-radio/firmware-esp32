@@ -80,3 +80,8 @@ Desktop.ini
 *.workspace # General workspace files, can be from various tools
 *.suo       # Visual Studio Solution User Options
 *.sln.docstates # Visual Studio
+
+# FHSS 팀 공유 비밀(HMAC-SHA256 hop_seed 파생용). EMBED_TXTFILES로 빌드에
+# 박혀서 커밋 대상이 아님 — components/fhss_audio_adapter/secret_seed.txt.example
+# 참고해서 각자 준비(README.md "빌드 전 준비" 참고).
+/components/fhss_audio_adapter/secret_seed.txt
