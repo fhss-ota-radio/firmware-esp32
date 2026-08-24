@@ -103,7 +103,33 @@ static TimerHandle_t s_ota_fhss_resync_timer;
  * 남는 지터를 흡수하는 안전망이다.
  */
 #define OTA_FHSS_SYNC_TIMEOUT_MS 10000U
-#define OTA_FHSS_RESYNC_GRACE_MS 3000U
+/*
+ * [2026-08-24 정정: 3000 -> 10000] 전송 중 SYNC를 잃었을 때 세션을 버리지
+ * 않고 재동기화를 기다려주는 시간.
+ *
+ * 3초는 위 OTA_FHSS_SYNC_TIMEOUT_MS와 정확히 같은 계산 착오였다 —
+ * 재동기화도 최초 획득과 똑같은 경로를 탄다:
+ *
+ *   SYNC_LOST -> 스케줄러 기준점 폐기 -> 랑데부 채널(1번) 고정 대기
+ *   -> Gateway가 8슬롯 만에 그 채널로 돌아옴(300ms x 8 = 2.4초)
+ *   -> 연속 3 SYNC로 획득(0.9초)  =  최악 3.3초
+ *
+ * 3000ms는 이 3.3초보다 짧아서 원리적으로 부족하다. 148 실기기
+ * 로그(2026-08-24)에서 27%(2190청크)까지 17분간 정상 전송하다가
+ * 이것 때문에 중단됐고, 차이는 겨우 30ms였다:
+ *
+ *   1047933  SYNC_LOST                   유예 시작
+ *   1047934~1049944  slot=0 channel=1    랑데부에서 2.0초 대기
+ *   1049976  SYNC RX: state=SEARCHING    첫 SYNC (획득 완료 예상 ~1050900)
+ *   1050933  resync grace expired        30ms 차이로 세션 폐기
+ *
+ * 최악 3.3초에 넉넉한 여유를 두어 SYNC_TIMEOUT과 같은 10초로 맞춘다.
+ * 두 값이 같은 물리적 제약(랑데부 복귀 주기 + 획득 슬롯 수)에서 나오므로
+ * 따로 둘 이유가 없다.
+ *
+ * 관련: gateway-ota/docs/note/design-notes-gateway-ota-es.md 56절
+ */
+#define OTA_FHSS_RESYNC_GRACE_MS 10000U
 
 static void ota_fhss_sync_timeout_callback(TimerHandle_t timer)
 {
