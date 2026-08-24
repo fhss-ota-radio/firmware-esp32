@@ -4,13 +4,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "ota_protocol.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define FHSS_SYNC_PACKET_MAGIC       0x46485353UL
-#define FHSS_SYNC_PACKET_VERSION     2U
-#define FHSS_SYNC_PACKET_LENGTH      17U
+#define FHSS_SYNC_PACKET_VERSION     OTA_FHSS_SYNC_VERSION
+#define FHSS_SYNC_PACKET_LENGTH      OTA_FHSS_SYNC_PACKET_SIZE
 
 typedef enum {
     FHSS_PACKET_TYPE_SYNC = 1,
@@ -26,16 +27,17 @@ typedef enum {
     FHSS_PACKET_STATUS_BUFFER_TOO_SMALL,
 } fhss_packet_status_t;
 
+/* public_seed(HMAC 파생용)는 이 구조체에 없다 — 이 패킷은 ota_protocol(팀
+ * 공유 서브모듈)의 ota_fhss_sync_fields_t를 그대로 위임해서 인코딩/디코딩
+ * 하므로, 서브모듈에 필드를 추가하는 PR 없이는 여기 넣을 수 없다.
+ * public_seed는 대신 fhss_audio_packet의 별도 announce 패킷(서브모듈 밖,
+ * 우리 쪽에서만 정의)으로 전달한다 — fhss_audio_adapter.c 참고. */
 typedef struct {
     uint8_t version;
-    fhss_packet_type_t type;
+    uint32_t generation;
     uint16_t sequence;
     uint8_t hop_index;
     uint32_t slot_number;
-    /* TX가 세션마다 새로 생성해 평문으로 실어 보내는 값. secret_seed(양쪽에
-     * 미리 공유된 비밀 키)와 HMAC-SHA256으로 조합해 그 세션만의 hop_seed를
-     * 만드는 데 쓴다 — 이 값 자체는 공개돼도 안전하다. */
-    uint32_t public_seed;
 } fhss_sync_packet_t;
 
 /**

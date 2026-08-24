@@ -10,6 +10,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "freertos/timers.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_system.h"
@@ -19,6 +20,7 @@
 #include "device_id.h"
 #include "display_ui.h"
 #include "fhss_audio_adapter.h"
+#include "fhss_config_store.h"
 #include "fhss_audio_pcm_test.h"
 #include "firmware_version.h"
 #include "ota_client.h"
@@ -32,6 +34,8 @@ static const char *TAG = "fsm";
 #define OTA_DISCOVER_BACKOFF_MAX_MS 100U
 
 static uint32_t ota_discovery_random_callback(void *context);
+static esp_err_t ota_fhss_activate_callback(
+    const ota_fhss_config_fields_t *config, void *context);
 
 /* 마이크가 없어도 codec -> FHSS -> CC1101 -> codec -> speaker 전체 경로를
  * 실기기에서 확인하기 위한 임시 모드다. 0이면 기존 마이크 캡처를 사용한다. */
@@ -71,10 +75,26 @@ static volatile bool s_ota_radio_should_stop;
 static SemaphoreHandle_t s_ota_response_done;
 static volatile bool s_ota_ready_to_reboot;
 static TaskHandle_t s_ota_reboot_task;
+static TimerHandle_t s_ota_fhss_sync_timer;
+static TimerHandle_t s_ota_fhss_resync_timer;
 
 #define OTA_RADIO_RX_TIMEOUT_MS 40U
 #define OTA_RESPONSE_WAIT_MS    250U
 #define OTA_REBOOT_DELAY_MS     250U
+#define OTA_FHSS_SYNC_TIMEOUT_MS 5000U
+#define OTA_FHSS_RESYNC_GRACE_MS 3000U
+
+static void ota_fhss_sync_timeout_callback(TimerHandle_t timer)
+{
+    (void)timer;
+    fsm_post_event(FSM_EVENT_FHSS_SYNC_TIMEOUT);
+}
+
+static void ota_fhss_resync_timeout_callback(TimerHandle_t timer)
+{
+    (void)timer;
+    fsm_post_event(FSM_EVENT_OTA_FHSS_RESYNC_TIMEOUT);
+}
 
 _Static_assert(
     OTA_DISCOVER_BACKOFF_MAX_MS + OTA_RADIO_RX_TIMEOUT_MS <
@@ -143,6 +163,7 @@ static void ota_radio_task(void *arg)
 {
     (void)arg;
     uint8_t packet[OTA_CLIENT_MAX_PACKET_LENGTH];
+    uint32_t consecutive_timeouts = 0U;
     while (!s_ota_radio_should_stop) {
         size_t packet_length = 0U;
         const fhss_audio_adapter_ota_rx_status_t status =
@@ -152,6 +173,7 @@ static void ota_radio_task(void *arg)
                 &packet_length,
                 OTA_RADIO_RX_TIMEOUT_MS);
         if (status == FHSS_AUDIO_ADAPTER_OTA_RX_OK) {
+            consecutive_timeouts = 0U;
             if (s_ota_response_done != NULL) {
                 (void)xSemaphoreTake(s_ota_response_done, 0U);
             }
@@ -169,6 +191,7 @@ static void ota_radio_task(void *arg)
                     pdMS_TO_TICKS(OTA_RESPONSE_WAIT_MS));
             }
         } else if (status == FHSS_AUDIO_ADAPTER_OTA_RX_CRC_ERROR) {
+            consecutive_timeouts = 0U;
             ESP_LOGW(TAG, "OTA RF packet dropped: CC1101 CRC failed");
         } else if (status == FHSS_AUDIO_ADAPTER_OTA_RX_ERROR &&
                    !s_ota_radio_should_stop) {
@@ -176,6 +199,16 @@ static void ota_radio_task(void *arg)
             fsm_post_event(FSM_EVENT_ERROR);
             break;
         } else {
+            consecutive_timeouts++;
+            if ((consecutive_timeouts % 50U) == 0U) {
+                ESP_LOGI(
+                    "OTA_DIAG",
+                    "LISTEN no-packet count=%" PRIu32
+                    " window_ms=%" PRIu32 " fsm=%s",
+                    consecutive_timeouts,
+                    consecutive_timeouts * OTA_RADIO_RX_TIMEOUT_MS,
+                    fsm_state_name(fsm_get_state()));
+            }
             /* Allow timeout-driven NACK processing to acquire the radio mutex. */
             vTaskDelay(1U);
         }
@@ -234,6 +267,20 @@ static void on_fhss_audio_event(fhss_audio_adapter_event_t event, void *context)
 {
     (void)context;
     switch (event) {
+    case FHSS_AUDIO_ADAPTER_EVENT_SYNC_ACQUIRED: {
+        uint32_t generation = 0U;
+        if (fhss_audio_adapter_get_ota_fhss_generation(&generation)) {
+            const esp_err_t err = fhss_config_store_activate(generation);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "failed to promote synchronized FHSS generation: %s",
+                         esp_err_to_name(err));
+                fsm_post_event(FSM_EVENT_ERROR);
+                break;
+            }
+            fsm_post_event(FSM_EVENT_SYNC_ACQUIRED);
+        }
+        break;
+    }
     case FHSS_AUDIO_ADAPTER_EVENT_SYNC_LOST:
         fsm_post_event(FSM_EVENT_SYNC_LOST);
         break;
@@ -253,6 +300,9 @@ static const char *s_state_names[FSM_STATE_COUNT] = {
     [FSM_STATE_MENU_COMM]     = "MENU_COMM",
     [FSM_STATE_MENU_IDLE]     = "MENU_IDLE",
     [FSM_STATE_MENU_OTA]      = "MENU_OTA",
+    [FSM_STATE_OTA_FHSS_CONFIGURED] = "OTA_FHSS_CONFIGURED",
+    [FSM_STATE_OTA_FHSS_SYNCING] = "OTA_FHSS_SYNCING",
+    [FSM_STATE_OTA_FHSS_READY] = "OTA_FHSS_READY",
     [FSM_STATE_TX_AUDIO]      = "TX_AUDIO",
     [FSM_STATE_RX_AUDIO]      = "RX_AUDIO",
     [FSM_STATE_OTA_RECEIVING] = "OTA_RECEIVING",
@@ -266,6 +316,11 @@ static const char *s_event_names[FSM_EVENT_COUNT] = {
     [FSM_EVENT_MENU_SELECT_COMM] = "MENU_SELECT_COMM",
     [FSM_EVENT_MENU_SELECT_IDLE] = "MENU_SELECT_IDLE",
     [FSM_EVENT_MENU_SELECT_OTA]  = "MENU_SELECT_OTA",
+    [FSM_EVENT_FHSS_CONFIG_READY] = "FHSS_CONFIG_READY",
+    [FSM_EVENT_FHSS_ACTIVATE] = "FHSS_ACTIVATE",
+    [FSM_EVENT_SYNC_ACQUIRED] = "SYNC_ACQUIRED",
+    [FSM_EVENT_FHSS_SYNC_TIMEOUT] = "FHSS_SYNC_TIMEOUT",
+    [FSM_EVENT_OTA_FHSS_RESYNC_TIMEOUT] = "OTA_FHSS_RESYNC_TIMEOUT",
     [FSM_EVENT_PTT_PRESS]      = "PTT_PRESS",
     [FSM_EVENT_PTT_RELEASE]    = "PTT_RELEASE",
     [FSM_EVENT_RX_FRAME]       = "RX_FRAME",
@@ -325,7 +380,20 @@ static const fsm_transition_t s_transitions[] = {
 
     { FSM_STATE_MENU_OTA,      FSM_EVENT_MENU_SELECT_COMM, FSM_STATE_MENU_COMM },
     { FSM_STATE_MENU_OTA,      FSM_EVENT_MENU_SELECT_IDLE, FSM_STATE_MENU_IDLE },
-    { FSM_STATE_MENU_OTA,      FSM_EVENT_OTA_START,      FSM_STATE_OTA_RECEIVING },
+    { FSM_STATE_MENU_OTA,      FSM_EVENT_FHSS_CONFIG_READY, FSM_STATE_OTA_FHSS_CONFIGURED },
+
+    { FSM_STATE_OTA_FHSS_CONFIGURED, FSM_EVENT_FHSS_CONFIG_READY, FSM_STATE_OTA_FHSS_CONFIGURED },
+    { FSM_STATE_OTA_FHSS_CONFIGURED, FSM_EVENT_FHSS_ACTIVATE, FSM_STATE_OTA_FHSS_SYNCING },
+    { FSM_STATE_OTA_FHSS_CONFIGURED, FSM_EVENT_MENU_SELECT_COMM, FSM_STATE_MENU_COMM },
+    { FSM_STATE_OTA_FHSS_CONFIGURED, FSM_EVENT_MENU_SELECT_IDLE, FSM_STATE_MENU_IDLE },
+
+    { FSM_STATE_OTA_FHSS_SYNCING, FSM_EVENT_SYNC_ACQUIRED, FSM_STATE_OTA_FHSS_READY },
+    { FSM_STATE_OTA_FHSS_SYNCING, FSM_EVENT_FHSS_SYNC_TIMEOUT, FSM_STATE_MENU_OTA },
+
+    { FSM_STATE_OTA_FHSS_READY, FSM_EVENT_OTA_START, FSM_STATE_OTA_RECEIVING },
+    { FSM_STATE_OTA_FHSS_READY, FSM_EVENT_SYNC_LOST, FSM_STATE_MENU_OTA },
+    { FSM_STATE_OTA_FHSS_READY, FSM_EVENT_MENU_SELECT_COMM, FSM_STATE_MENU_COMM },
+    { FSM_STATE_OTA_FHSS_READY, FSM_EVENT_MENU_SELECT_IDLE, FSM_STATE_MENU_IDLE },
 
     { FSM_STATE_TX_AUDIO,      FSM_EVENT_PTT_RELEASE,    FSM_STATE_MENU_COMM },
 
@@ -477,6 +545,9 @@ static display_ui_menu_item_t menu_item_from_fsm_state(fsm_state_t state)
         case FSM_STATE_MENU_IDLE:
             return DISPLAY_UI_MENU_IDLE;
         case FSM_STATE_MENU_OTA:
+        case FSM_STATE_OTA_FHSS_CONFIGURED:
+        case FSM_STATE_OTA_FHSS_SYNCING:
+        case FSM_STATE_OTA_FHSS_READY:
         case FSM_STATE_OTA_RECEIVING:
         case FSM_STATE_OTA_APPLYING:
             return DISPLAY_UI_MENU_OTA;
@@ -730,12 +801,13 @@ static void on_enter_boot_init(void)
                 FIRMWARE_VERSION_MINOR,
                 FIRMWARE_VERSION_PATCH,
             },
-            .receive_timeout_ms = 500U,
+            .receive_timeout_ms = 3000U,
             .discover_backoff_max_ms = OTA_DISCOVER_BACKOFF_MAX_MS,
             .send_callback = ota_radio_send_callback,
             .event_callback = fsm_ota_event_callback,
             .ota_mode_callback = fsm_ota_mode_callback,
             .random_callback = ota_discovery_random_callback,
+            .fhss_activate_callback = ota_fhss_activate_callback,
             .callback_context = NULL,
         };
         if (ota_client_init(&ota_config) != ESP_OK ||
@@ -826,10 +898,35 @@ static void on_enter_menu_ota(void)
     /* 글자 수는 화면 폭(8자)에 다 들어가지만, "대기 중"임을 시각적으로
      * 드러내려고 일부러 흐르는 문구로 표시(display_ui_set_status_scroll()). */
     display_ui_set_status_scroll("STANDBY");
+    /* Re-entering from SYNC loss/timeout must tear down the hopping service
+     * and re-arm the bootstrap listener on channel 0. */
+    if (!stop_ota_radio()) {
+        ESP_LOGW(TAG, "failed to reset OTA radio to bootstrap channel");
+    }
     if (!start_ota_radio()) {
         ESP_LOGE(TAG, "failed to start OTA channel listener");
         fsm_post_event(FSM_EVENT_ERROR);
     }
+}
+
+static void on_enter_ota_fhss_configured(void)
+{
+    display_ui_set_status_scroll("FHSS READY");
+}
+
+static void on_enter_ota_fhss_syncing(void)
+{
+    display_ui_set_status_scroll("FHSS SYNC");
+    if (s_ota_fhss_sync_timer == NULL ||
+        xTimerReset(s_ota_fhss_sync_timer, 0U) != pdPASS) {
+        ESP_LOGE(TAG, "failed to arm FHSS SYNC timeout");
+        fsm_post_event(FSM_EVENT_ERROR);
+    }
+}
+
+static void on_enter_ota_fhss_ready(void)
+{
+    display_ui_set_status_scroll("OTA FHSS READY");
 }
 static void on_enter_tx_audio(void)
 {
@@ -927,6 +1024,9 @@ static void (*const s_enter_actions[FSM_STATE_COUNT])(void) = {
     [FSM_STATE_MENU_COMM]     = on_enter_menu_comm,
     [FSM_STATE_MENU_IDLE]     = on_enter_menu_idle,
     [FSM_STATE_MENU_OTA]      = on_enter_menu_ota,
+    [FSM_STATE_OTA_FHSS_CONFIGURED] = on_enter_ota_fhss_configured,
+    [FSM_STATE_OTA_FHSS_SYNCING] = on_enter_ota_fhss_syncing,
+    [FSM_STATE_OTA_FHSS_READY] = on_enter_ota_fhss_ready,
     [FSM_STATE_TX_AUDIO]      = on_enter_tx_audio,
     [FSM_STATE_RX_AUDIO]      = on_enter_rx_audio,
     [FSM_STATE_OTA_RECEIVING] = on_enter_ota_receiving,
@@ -938,6 +1038,15 @@ static void fsm_transition_to(fsm_state_t next_state)
 {
     if (next_state == s_state) {
         return;
+    }
+    if (s_state == FSM_STATE_OTA_FHSS_SYNCING &&
+        s_ota_fhss_sync_timer != NULL) {
+        (void)xTimerStop(s_ota_fhss_sync_timer, 0U);
+    }
+    if (s_state == FSM_STATE_OTA_RECEIVING &&
+        next_state != FSM_STATE_OTA_RECEIVING &&
+        s_ota_fhss_resync_timer != NULL) {
+        (void)xTimerStop(s_ota_fhss_resync_timer, 0U);
     }
     ESP_LOGI(TAG, "%s -> %s", s_state_names[s_state], s_state_names[next_state]);
     s_state = next_state;
@@ -967,10 +1076,49 @@ static void fsm_task(void *arg)
             fsm_transition_to(FSM_STATE_ERROR);
             continue;
         }
+        if (event == FSM_EVENT_SYNC_ACQUIRED &&
+            s_state == FSM_STATE_OTA_RECEIVING) {
+            if (s_ota_fhss_resync_timer != NULL) {
+                (void)xTimerStop(s_ota_fhss_resync_timer, 0U);
+            }
+            ESP_LOGI(TAG, "OTA FHSS synchronization recovered; session preserved");
+            continue;
+        }
+        if (event == FSM_EVENT_OTA_FHSS_RESYNC_TIMEOUT) {
+            if (s_state == FSM_STATE_OTA_RECEIVING) {
+                ESP_LOGW(TAG, "OTA FHSS resync grace expired; aborting session");
+                if (ota_client_abort() != ESP_OK) {
+                    ESP_LOGW(TAG, "failed to abort OTA after resync timeout");
+                }
+                fsm_transition_to(FSM_STATE_MENU_OTA);
+            }
+            continue;
+        }
         if (event == FSM_EVENT_SYNC_LOST &&
             s_state != FSM_STATE_BOOT_INIT &&
             s_state != FSM_STATE_ERROR) {
-            fsm_transition_to(FSM_STATE_MENU_COMM);
+            const bool ota_fhss_state =
+                s_state == FSM_STATE_OTA_FHSS_CONFIGURED ||
+                s_state == FSM_STATE_OTA_FHSS_SYNCING ||
+                s_state == FSM_STATE_OTA_FHSS_READY ||
+                s_state == FSM_STATE_OTA_RECEIVING;
+            if (s_state == FSM_STATE_OTA_RECEIVING) {
+                if (s_ota_fhss_resync_timer == NULL ||
+                    xTimerReset(s_ota_fhss_resync_timer, 0U) != pdPASS) {
+                    ESP_LOGE(TAG, "failed to arm OTA FHSS resync grace");
+                    if (ota_client_abort() != ESP_OK) {
+                        ESP_LOGW(TAG, "failed to abort OTA after FHSS SYNC loss");
+                    }
+                    fsm_transition_to(FSM_STATE_MENU_OTA);
+                } else {
+                    ESP_LOGW(TAG,
+                             "OTA FHSS SYNC lost; preserving session for %u ms resync grace",
+                             (unsigned)OTA_FHSS_RESYNC_GRACE_MS);
+                }
+                continue;
+            }
+            fsm_transition_to(
+                ota_fhss_state ? FSM_STATE_MENU_OTA : FSM_STATE_MENU_COMM);
             continue;
         }
 
@@ -994,8 +1142,21 @@ bool fsm_init(void)
     s_event_queue = xQueueCreate(16, sizeof(fsm_event_t));
     s_rx_audio_queue = xQueueCreate(FSM_RX_AUDIO_QUEUE_DEPTH, sizeof(fsm_rx_audio_frame_t));
     s_ota_response_done = xSemaphoreCreateBinary();
+    s_ota_fhss_sync_timer = xTimerCreate(
+        "ota_fhss_sync",
+        pdMS_TO_TICKS(OTA_FHSS_SYNC_TIMEOUT_MS),
+        pdFALSE,
+        NULL,
+        ota_fhss_sync_timeout_callback);
+    s_ota_fhss_resync_timer = xTimerCreate(
+        "ota_fhss_resync",
+        pdMS_TO_TICKS(OTA_FHSS_RESYNC_GRACE_MS),
+        pdFALSE,
+        NULL,
+        ota_fhss_resync_timeout_callback);
     if (s_event_queue == NULL || s_rx_audio_queue == NULL ||
-        s_ota_response_done == NULL) {
+        s_ota_response_done == NULL || s_ota_fhss_sync_timer == NULL ||
+        s_ota_fhss_resync_timer == NULL) {
         ESP_LOGE(TAG, "failed to allocate FSM queues/semaphore");
         return false;
     }
@@ -1049,13 +1210,25 @@ const char *fsm_event_name(fsm_event_t event)
 bool fsm_ota_mode_callback(void *context)
 {
     (void)context;
-    return fsm_get_state() == FSM_STATE_MENU_OTA;
+    const fsm_state_t state = fsm_get_state();
+    return state == FSM_STATE_MENU_OTA ||
+           state == FSM_STATE_OTA_FHSS_CONFIGURED ||
+           state == FSM_STATE_OTA_FHSS_SYNCING ||
+           state == FSM_STATE_OTA_FHSS_READY;
 }
 
 static uint32_t ota_discovery_random_callback(void *context)
 {
     (void)context;
     return esp_random();
+}
+
+static esp_err_t ota_fhss_activate_callback(
+    const ota_fhss_config_fields_t *config,
+    void *context)
+{
+    (void)context;
+    return fhss_audio_adapter_activate_ota_fhss(config);
 }
 
 void fsm_ota_event_callback(
@@ -1068,6 +1241,16 @@ void fsm_ota_event_callback(
     (void)context;
 
     switch (event) {
+        case OTA_CLIENT_EVENT_FHSS_CONFIG_READY:
+            fsm_post_event(FSM_EVENT_FHSS_CONFIG_READY);
+            break;
+        case OTA_CLIENT_EVENT_FHSS_ACTIVATING:
+            fsm_post_event(FSM_EVENT_FHSS_ACTIVATE);
+            break;
+        case OTA_CLIENT_EVENT_FHSS_ACTIVATE_FAILED:
+            ESP_LOGE(TAG, "FHSS activation failed: %s", esp_err_to_name(error));
+            fsm_post_event(FSM_EVENT_FHSS_SYNC_TIMEOUT);
+            break;
         case OTA_CLIENT_EVENT_STARTED:
             fsm_post_event(FSM_EVENT_OTA_START);
             break;

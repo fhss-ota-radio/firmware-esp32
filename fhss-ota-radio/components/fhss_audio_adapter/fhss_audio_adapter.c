@@ -12,6 +12,8 @@
 #include "psa/crypto.h"
 
 #include "fhss_audio_packet.h"
+#include "fhss_config_store.h"
+#include "fhss_ota_diagnostics.h"
 #include "fhss_service.h"
 #include "audio_codec.h"
 
@@ -37,6 +39,7 @@
 
 #define FHSS_AUDIO_TX_DRAIN_TIMEOUT_MS 600U
 #define FHSS_AUDIO_END_REPEAT_COUNT 3U
+#define FHSS_AUDIO_SEED_ANNOUNCE_REPEAT_COUNT 3U
 #define OTA_FIXED_CHANNEL 0U
 
 /* 재배정 이력(2026-08-17):
@@ -52,6 +55,12 @@
  *   최악 획득 시간은 이제 무관(랑데부 채널 고정 리슨 방식이라 채널 수와
  *   상관없음 — fhss_service.c rx_task 참고). */
 #define FHSS_AUDIO_HOP_CHANNEL_COUNT 100U
+#define FHSS_OTA_RX_QUEUE_DEPTH 16U
+
+typedef struct {
+    uint8_t data[RF_TRANSPORT_MAX_PACKET_LENGTH];
+    uint8_t length;
+} fhss_ota_rx_item_t;
 
 static const char *TAG = "fhss_audio_adapter";
 static uint8_t s_hop_channels[FHSS_AUDIO_HOP_CHANNEL_COUNT];
@@ -155,9 +164,13 @@ typedef struct {
     bool have_last_rx_end;
     uint16_t last_rx_end_session_id;
     uint16_t last_rx_end_sequence;
+    bool have_last_rx_seed_announce;
+    uint16_t last_rx_seed_announce_session_id;
     bool initialized;
     bool tx_active;
     bool ota_active;
+    bool ota_fhss_active;
+    QueueHandle_t ota_rx_queue;
     SemaphoreHandle_t radio_mutex;
 } fhss_audio_adapter_state_t;
 
@@ -169,6 +182,11 @@ static void on_service_event(fhss_service_event_t event, void *context)
     switch (event) {
     case FHSS_SERVICE_EVENT_SYNC_ACQUIRED:
         ESP_LOGI(TAG, "SYNC_ACQUIRED");
+        if (s_adapter.config.event_callback != NULL) {
+            s_adapter.config.event_callback(
+                FHSS_AUDIO_ADAPTER_EVENT_SYNC_ACQUIRED,
+                s_adapter.config.callback_context);
+        }
         break;
     case FHSS_SERVICE_EVENT_SYNC_LOST:
         ESP_LOGW(TAG, "SYNC_LOST");
@@ -198,6 +216,29 @@ static fhss_service_data_action_t on_service_data(
 )
 {
     (void)context;
+    if (s_adapter.ota_fhss_active) {
+        if (length > 0U && length <= RF_TRANSPORT_MAX_PACKET_LENGTH &&
+            s_adapter.ota_rx_queue != NULL) {
+            fhss_ota_rx_item_t item = { .length = (uint8_t)length };
+            memcpy(item.data, data, length);
+            (void)xQueueSend(s_adapter.ota_rx_queue, &item, 0U);
+        }
+        return FHSS_SERVICE_DATA_CONTINUE;
+    }
+    fhss_audio_seed_announce_packet_t announce = {0};
+    if (fhss_audio_seed_announce_packet_unpack(data, length, &announce) ==
+        FHSS_AUDIO_PACKET_STATUS_OK) {
+        const bool duplicate = s_adapter.have_last_rx_seed_announce &&
+            announce.session_id == s_adapter.last_rx_seed_announce_session_id;
+        if (!duplicate) {
+            s_adapter.have_last_rx_seed_announce = true;
+            s_adapter.last_rx_seed_announce_session_id = announce.session_id;
+            (void)fhss_service_apply_public_seed(
+                &s_adapter.service, announce.public_seed);
+        }
+        return FHSS_SERVICE_DATA_CONTINUE;
+    }
+
     fhss_audio_end_packet_t end = {0};
     if (fhss_audio_end_packet_unpack(data, length, &end) ==
         FHSS_AUDIO_PACKET_STATUS_OK) {
@@ -307,6 +348,37 @@ static bool send_buffered_frames(uint8_t flags)
     return true;
 }
 
+/* SYNC 패킷(ota_protocol 공유 포맷)엔 public_seed를 실을 자리가 없어서,
+ * 세션 시작 직후 이 별도 announce 패킷으로 알린다 — END 패킷과 같은 이유로
+ * (무선 손실 대비) 반복 전송한다. RX가 이 값을 받아야 slot 1부터 정확한
+ * hop_seed를 쓸 수 있으므로 TX 역할 전환 직후 최우선으로 큐에 넣는다. */
+static bool send_seed_announce_packets(uint32_t public_seed)
+{
+    const fhss_audio_seed_announce_packet_t announce = {
+        .session_id = s_adapter.tx_session_id,
+        .public_seed = public_seed,
+    };
+    uint8_t packet[FHSS_AUDIO_SEED_ANNOUNCE_PACKET_SIZE] = {0};
+    size_t packet_length = 0U;
+    if (fhss_audio_seed_announce_packet_pack(
+            &announce, packet, sizeof(packet), &packet_length) !=
+        FHSS_AUDIO_PACKET_STATUS_OK) {
+        return false;
+    }
+    for (uint32_t i = 0U; i < FHSS_AUDIO_SEED_ANNOUNCE_REPEAT_COUNT; ++i) {
+        if (!fhss_service_send_data(
+                &s_adapter.service, packet, packet_length)) {
+            ESP_LOGW(TAG, "seed announce TX queue full: copy=%lu",
+                     (unsigned long)(i + 1U));
+            return false;
+        }
+    }
+    ESP_LOGI(TAG, "SEED_ANNOUNCE TX: session=%u public_seed=%lu copies=%u",
+             announce.session_id, (unsigned long)public_seed,
+             FHSS_AUDIO_SEED_ANNOUNCE_REPEAT_COUNT);
+    return true;
+}
+
 static bool send_end_packets(void)
 {
     const fhss_audio_end_packet_t end = {
@@ -344,17 +416,28 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
     memset(&s_adapter, 0, sizeof(s_adapter));
     s_adapter.config = *config;
     s_adapter.radio_mutex = xSemaphoreCreateMutex();
-    if (s_adapter.radio_mutex == NULL) {
+    s_adapter.ota_rx_queue = xQueueCreate(
+        FHSS_OTA_RX_QUEUE_DEPTH, sizeof(fhss_ota_rx_item_t));
+    if (s_adapter.radio_mutex == NULL || s_adapter.ota_rx_queue == NULL) {
         return false;
     }
+
+    ota_fhss_config_fields_t active_config = {0};
+    const bool have_active_config =
+        fhss_config_store_init() == ESP_OK &&
+        fhss_config_store_load_active(&active_config) == ESP_OK &&
+        active_config.channel_count <= FHSS_AUDIO_HOP_CHANNEL_COUNT;
+    const size_t configured_channel_count = have_active_config
+        ? active_config.channel_count
+        : FHSS_AUDIO_HOP_CHANNEL_COUNT;
 
     /* 채널 0(OTA 팀 예약)은 제외. 랑데부(인덱스 0)는 채널 0과 가장 가까운
      * 1로 둬 안테나/PA 매칭 중심(433.92MHz)에서 거의 안 벗어나게 하고,
      * 나머지 인덱스 1~99에는 2~100을 순서대로 채워 대역을 1~100으로
      * 제한한다(위 파일 상단 주석의 3차 재배정 참고). */
-    s_hop_channels[0] = 1U;
-    for (size_t i = 1U; i < FHSS_AUDIO_HOP_CHANNEL_COUNT; ++i) {
-        s_hop_channels[i] = (uint8_t)(i + 1U);
+    for (size_t i = 0U; i < configured_channel_count; ++i) {
+        s_hop_channels[i] = (uint8_t)(
+            (have_active_config ? active_config.first_channel : 1U) + i);
     }
 
     const fhss_service_config_t service_config = {
@@ -370,18 +453,24 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
             .enable_gdo0_interrupt = true,
         },
         .channels = s_hop_channels,
-        .channel_count = sizeof(s_hop_channels) / sizeof(s_hop_channels[0]),
-        /* Channel 0 belongs to OTA. 이 값은 아직 세션이 시작되기 전(RX가
-         * 랑데부 채널에서 첫 SYNC를 기다리는 동안)의 기본값일 뿐이다 —
-         * 랑데부 채널(index 0)은 시드와 무관하게 고정이라 실제로 쓰이지
-         * 않는다. 세션이 시작되면 TX가 생성한 public_seed로부터 매번 새로
-         * 파생된다(derive_hop_seed 참고). */
-        .hop_seed = 0x46485353U,
+        .channel_count = configured_channel_count,
+        /* Channel 0 belongs to OTA. 이 값은 세션이 시작되기 전(RX가 랑데부
+         * 채널에서 첫 SYNC를 기다리는 동안)의 초기값일 뿐이다 — 랑데부
+         * 채널(index 0)은 시드와 무관하게 고정이라 실제로 쓰이지 않는다.
+         * 세션이 시작되면 TX가 생성한 public_seed로부터 매번 새로
+         * 파생된다(derive_hop_seed/public_seed 참고) — OTA 설정으로 온
+         * seed는 그 파생이 일어나기 전까지의 초기값으로만 재사용한다. */
+        .hop_seed = have_active_config
+            ? active_config.seed : OTA_FHSS_DEFAULT_SEED,
         .public_seed = 0U,
         .derive_hop_seed = derive_session_hop_seed,
-        .reserved_channel = 0U,
-        .slot_duration_us = 300000U,
-        .channel_switch_guard_us = 5000U,
+        .generation = have_active_config ? active_config.generation : 0U,
+        .reserved_channel = have_active_config
+            ? active_config.reserved_channel : 0U,
+        .slot_duration_us = have_active_config
+            ? active_config.slot_duration_us : 300000U,
+        .channel_switch_guard_us = have_active_config
+            ? active_config.channel_switch_guard_us : 5000U,
         /* 재배정(2026-08-17): 판정 허용 오차를 channel_switch_guard_us(5ms)
          * 재사용에서 분리 — 실제 GDO0 ISR 지연/스케줄링 지터 흡수엔 5ms가
          * 타이트해서, 패킷은 정상 수신됐는데 타이밍만 창을 벗어나 MISS로
@@ -423,7 +512,10 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
         return false;
     }
     s_adapter.initialized = true;
-    ESP_LOGI(TAG, "ready: RX standby, GDO0=GPIO%d", CC1101_GDO0_GPIO);
+    ESP_LOGI(TAG, "ready: RX standby, GDO0=GPIO%d generation=%lu source=%s",
+             CC1101_GDO0_GPIO,
+             (unsigned long)service_config.generation,
+             have_active_config ? "nvs-active" : "factory-default");
     return true;
 }
 
@@ -443,8 +535,9 @@ bool fhss_audio_adapter_begin_tx(void)
     /* 이번 PTT 세션 전용 public_seed를 새로 뽑고, secret_seed와 HMAC으로
      * 조합해 이번 세션의 hop_seed를 만든다 — fhss_service_set_role()이
      * reset_controller()를 거쳐 이 값으로 hop_sequence를 새로 구성하므로
-     * 역할 전환 전에 미리 채워둬야 한다. RX 쪽은 이 public_seed를 SYNC
-     * 패킷으로 받아 fhss_service.c의 receive_one()에서 동일하게 파생한다. */
+     * 역할 전환 전에 미리 채워둬야 한다. RX는 SYNC가 아니라 별도 announce
+     * 패킷(아래 send_seed_announce_packets())으로 이 값을 받아 동일하게
+     * 파생한다 — SYNC는 ota_protocol 공유 포맷이라 필드를 못 늘림. */
     const uint32_t public_seed = esp_random();
     s_adapter.service.config.public_seed = public_seed;
     s_adapter.service.config.hop_seed =
@@ -452,6 +545,11 @@ bool fhss_audio_adapter_begin_tx(void)
 
     if (!fhss_service_set_role(&s_adapter.service, FHSS_SERVICE_ROLE_TX)) {
         return false;
+    }
+    /* SYNC(slot=0)보다 먼저 큐에 넣어 같은 슬롯 드레인 창에서 최대한 일찍
+     * 나가게 한다 — RX가 slot=1 채널을 계산하기 전에 도착해야 한다. */
+    if (!send_seed_announce_packets(public_seed)) {
+        ESP_LOGW(TAG, "seed announce send failed; RX may miss hop pattern");
     }
     s_adapter.tx_active = true;
     ESP_LOGI(TAG, "TX session started: public_seed=%lu",
@@ -524,6 +622,10 @@ bool fhss_audio_adapter_begin_ota(void)
              RF_TRANSPORT_STATUS_OK;
     }
     s_adapter.ota_active = ok;
+    s_adapter.ota_fhss_active = false;
+    if (s_adapter.ota_rx_queue != NULL) {
+        xQueueReset(s_adapter.ota_rx_queue);
+    }
     xSemaphoreGive(s_adapter.radio_mutex);
     if (!ok) {
         (void)fhss_service_set_role(
@@ -532,6 +634,63 @@ bool fhss_audio_adapter_begin_ota(void)
         return false;
     }
     ESP_LOGI(TAG, "OTA mode started on CHANNR=%u", OTA_FIXED_CHANNEL);
+    return true;
+}
+
+esp_err_t fhss_audio_adapter_activate_ota_fhss(
+    const ota_fhss_config_fields_t *config)
+{
+    if (!s_adapter.initialized || !s_adapter.ota_active || config == NULL ||
+        !ota_fhss_config_is_valid(config) || config->first_channel != 1U ||
+        config->rendezvous_channel != 1U || config->reserved_channel != 0U ||
+        config->channel_count > FHSS_AUDIO_HOP_CHANNEL_COUNT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (xSemaphoreTake(s_adapter.radio_mutex, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    for (size_t i = 0U; i < config->channel_count; ++i) {
+        s_hop_channels[i] = (uint8_t)(config->first_channel + i);
+    }
+    s_adapter.service.config.channels = s_hop_channels;
+    s_adapter.service.config.channel_count = config->channel_count;
+    /* 통일(2026-08-24): OTA로 받은 config->seed를 hop_seed로 직접 쓰지 않고
+     * public_seed로 재해석해 secret_seed와 HMAC-SHA256으로 조합한다 —
+     * 이렇게 하면 ota_protocol 와이어 포맷을 하나도 안 바꾸고도(게이트웨이가
+     * 이미 매번 새로 생성해 보내는 값이라 public_seed 역할에 그대로 맞음)
+     * OTA 홉도 오디오와 같은 HMAC 파생 경로를 탄다. 단, 게이트웨이/커널
+     * 드라이버도 이 값을 hop_seed로 직접 안 쓰고 같은 HMAC을 거치도록
+     * 맞춰야 실제로 동기가 맞는다 — 그쪽은 아직 이 변경을 모른다(후속 과제). */
+    s_adapter.service.config.hop_seed =
+        derive_session_hop_seed(config->seed, NULL);
+    s_adapter.service.config.public_seed = config->seed;
+    s_adapter.service.config.generation = config->generation;
+    s_adapter.service.config.reserved_channel = config->reserved_channel;
+    s_adapter.service.config.slot_duration_us = config->slot_duration_us;
+    s_adapter.service.config.channel_switch_guard_us =
+        config->channel_switch_guard_us;
+    if (s_adapter.ota_rx_queue != NULL) {
+        xQueueReset(s_adapter.ota_rx_queue);
+    }
+    s_adapter.ota_fhss_active = true;
+    const bool ok = fhss_service_set_role(
+        &s_adapter.service, FHSS_SERVICE_ROLE_RX);
+    if (!ok) {
+        s_adapter.ota_fhss_active = false;
+        (void)rf_transport_set_channel(
+            &s_adapter.service.radio, OTA_FIXED_CHANNEL);
+        (void)rf_transport_start_receive(&s_adapter.service.radio);
+    }
+    xSemaphoreGive(s_adapter.radio_mutex);
+    return ok ? ESP_OK : ESP_FAIL;
+}
+
+bool fhss_audio_adapter_get_ota_fhss_generation(uint32_t *generation)
+{
+    if (!s_adapter.ota_fhss_active || generation == NULL) {
+        return false;
+    }
+    *generation = s_adapter.service.config.generation;
     return true;
 }
 
@@ -544,6 +703,7 @@ bool fhss_audio_adapter_end_ota(void)
         return false;
     }
     s_adapter.ota_active = false;
+    s_adapter.ota_fhss_active = false;
     const bool ok = fhss_service_set_role(
         &s_adapter.service, FHSS_SERVICE_ROLE_RX);
     xSemaphoreGive(s_adapter.radio_mutex);
@@ -564,6 +724,20 @@ fhss_audio_adapter_ota_rx_status_t fhss_audio_adapter_ota_receive(
         capacity == 0U || timeout_ms == 0U) {
         return FHSS_AUDIO_ADAPTER_OTA_RX_ERROR;
     }
+    if (s_adapter.ota_fhss_active) {
+        fhss_ota_rx_item_t item = {0};
+        if (xQueueReceive(
+                s_adapter.ota_rx_queue, &item,
+                pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+            return FHSS_AUDIO_ADAPTER_OTA_RX_TIMEOUT;
+        }
+        if (item.length > capacity) {
+            return FHSS_AUDIO_ADAPTER_OTA_RX_ERROR;
+        }
+        memcpy(packet, item.data, item.length);
+        *out_length = item.length;
+        return FHSS_AUDIO_ADAPTER_OTA_RX_OK;
+    }
     if (xSemaphoreTake(s_adapter.radio_mutex, portMAX_DELAY) != pdTRUE) {
         return FHSS_AUDIO_ADAPTER_OTA_RX_ERROR;
     }
@@ -576,8 +750,17 @@ fhss_audio_adapter_ota_rx_status_t fhss_audio_adapter_ota_receive(
     }
     if (status != RF_TRANSPORT_STATUS_OK || received.length == 0U ||
         received.length > capacity) {
+        fhss_ota_diag_log_rx_result(
+            "FIXED", OTA_FIXED_CHANNEL, (int)status, received.crc_ok,
+            received.rssi_dbm, received.lqi, received.length);
         return FHSS_AUDIO_ADAPTER_OTA_RX_ERROR;
     }
+    fhss_ota_diag_log_rx_result(
+        "FIXED", OTA_FIXED_CHANNEL, (int)status, received.crc_ok,
+        received.rssi_dbm, received.lqi, received.length);
+    fhss_ota_diag_log_packet(
+        "RX", "FIXED", OTA_FIXED_CHANNEL,
+        received.payload, received.length);
     if (!received.crc_ok) {
         return FHSS_AUDIO_ADAPTER_OTA_RX_CRC_ERROR;
     }
@@ -592,6 +775,17 @@ bool fhss_audio_adapter_ota_send(const uint8_t *packet, size_t length)
         length > RF_TRANSPORT_MAX_PACKET_LENGTH) {
         return false;
     }
+    if (s_adapter.ota_fhss_active) {
+        fhss_ota_diag_log_packet(
+            "TX_QUEUE", "FHSS", s_adapter.service.current_channel,
+            packet, length);
+        const bool queued = fhss_service_send_data(
+            &s_adapter.service, packet, length);
+        fhss_ota_diag_log_tx_result(
+            "FHSS_QUEUE", s_adapter.service.current_channel,
+            queued ? 0 : -1, length);
+        return queued;
+    }
     if (xSemaphoreTake(s_adapter.radio_mutex, portMAX_DELAY) != pdTRUE) {
         return false;
     }
@@ -600,6 +794,10 @@ bool fhss_audio_adapter_ota_send(const uint8_t *packet, size_t length)
     const rf_transport_status_t rx_status = rf_transport_start_receive(
         &s_adapter.service.radio);
     xSemaphoreGive(s_adapter.radio_mutex);
+    fhss_ota_diag_log_packet(
+        "TX", "FIXED", OTA_FIXED_CHANNEL, packet, length);
+    fhss_ota_diag_log_tx_result(
+        "FIXED", OTA_FIXED_CHANNEL, (int)send_status, length);
     return send_status == RF_TRANSPORT_STATUS_OK &&
            rx_status == RF_TRANSPORT_STATUS_OK;
 }

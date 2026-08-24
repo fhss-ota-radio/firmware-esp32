@@ -7,6 +7,7 @@ idf_component_register(
         "include"
     REQUIRES
         fhss_core
+        fhss_ota_diagnostics
         rf_transport
         esp_timer
         freertos

@@ -10,4 +10,7 @@ idf_component_register(
 
     INCLUDE_DIRS
         "include"
+    REQUIRES
+        ota_protocol
+        log
 )

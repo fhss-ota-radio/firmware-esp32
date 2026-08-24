@@ -8,6 +8,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "fhss_ota_diagnostics.h"
 
 static const char *TAG = "fhss_service";
 
@@ -49,6 +50,7 @@ static bool reset_controller(fhss_service_t *service)
             .channels = service->config.channels,
             .channel_count = service->config.channel_count,
             .hop_seed = service->config.hop_seed,
+            .generation = service->config.generation,
             .reserved_channel = service->config.reserved_channel,
             .timing = {
                 .early_margin_us = service->config.timing_window_margin_us,
@@ -279,11 +281,10 @@ static rf_transport_status_t send_sync(
 
     const fhss_sync_packet_t packet = {
         .version = FHSS_SYNC_PACKET_VERSION,
-        .type = FHSS_PACKET_TYPE_SYNC,
+        .generation = service->config.generation,
         .sequence = sequence,
         .hop_index = hop_index,
         .slot_number = slot,
-        .public_seed = service->config.public_seed,
     };
     uint8_t buffer[FHSS_SYNC_PACKET_LENGTH] = {0};
     size_t length = 0U;
@@ -291,7 +292,13 @@ static rf_transport_status_t send_sync(
             &packet, buffer, sizeof(buffer), &length) != FHSS_PACKET_STATUS_OK) {
         return RF_TRANSPORT_STATUS_INVALID_ARG;
     }
-    return rf_transport_send_packet(&service->radio, buffer, (uint8_t)length);
+    fhss_ota_diag_log_packet(
+        "TX", "FHSS_SYNC", service->current_channel, buffer, length);
+    const rf_transport_status_t status = rf_transport_send_packet(
+        &service->radio, buffer, (uint8_t)length);
+    fhss_ota_diag_log_tx_result(
+        "FHSS_SYNC", service->current_channel, (int)status, length);
+    return status;
 }
 
 static void drain_tx_data_until(fhss_service_t *service, int64_t deadline_us)
@@ -321,8 +328,15 @@ static void drain_tx_data_until(fhss_service_t *service, int64_t deadline_us)
             return;
         }
         service->tx_in_flight = true;
-        if (rf_transport_send_packet(&service->radio, item.data, item.length) !=
-            RF_TRANSPORT_STATUS_OK) {
+        fhss_ota_diag_log_packet(
+            "TX", "FHSS_DATA", service->current_channel,
+            item.data, item.length);
+        const rf_transport_status_t send_status = rf_transport_send_packet(
+            &service->radio, item.data, item.length);
+        fhss_ota_diag_log_tx_result(
+            "FHSS_DATA", service->current_channel,
+            (int)send_status, item.length);
+        if (send_status != RF_TRANSPORT_STATUS_OK) {
             service->tx_in_flight = false;
             ESP_LOGW(TAG, "audio/data TX failed: length=%u", item.length);
             report_event(service, FHSS_SERVICE_EVENT_ERROR);
@@ -333,6 +347,35 @@ static void drain_tx_data_until(fhss_service_t *service, int64_t deadline_us)
             &service->radio, 20U, &ignored_timestamp_us);
         service->tx_in_flight = false;
     }
+}
+
+static void send_one_queued_data(fhss_service_t *service, int64_t deadline_us)
+{
+    if (esp_timer_get_time() >=
+        deadline_us - FHSS_SERVICE_DATA_TX_AIRTIME_GUARD_US) {
+        return;
+    }
+    fhss_service_tx_item_t item;
+    if (xQueueReceive(
+            (QueueHandle_t)service->tx_queue, &item, 0U) != pdTRUE) {
+        return;
+    }
+    service->tx_in_flight = true;
+    fhss_ota_diag_log_packet(
+        "TX", "FHSS_RESPONSE", service->current_channel,
+        item.data, item.length);
+    const rf_transport_status_t send_status = rf_transport_send_packet(
+        &service->radio, item.data, item.length);
+    fhss_ota_diag_log_tx_result(
+        "FHSS_RESPONSE", service->current_channel,
+        (int)send_status, item.length);
+    if (send_status != RF_TRANSPORT_STATUS_OK) {
+        (void)xQueueSendToFront(
+            (QueueHandle_t)service->tx_queue, &item, 0U);
+        ESP_LOGW(TAG, "response TX failed: length=%u", item.length);
+    }
+    service->tx_in_flight = false;
+    (void)rf_transport_start_receive(&service->radio);
 }
 
 static void tx_task(fhss_service_t *service)
@@ -426,6 +469,12 @@ static receive_result_t receive_one(
             &packet) != RF_TRANSPORT_STATUS_OK) {
         return RECEIVE_RESULT_RADIO_ERROR;
     }
+    fhss_ota_diag_log_rx_result(
+        "FHSS", service->current_channel, 0, packet.crc_ok,
+        packet.rssi_dbm, packet.lqi, packet.length);
+    fhss_ota_diag_log_packet(
+        "RX", "FHSS", service->current_channel,
+        packet.payload, packet.length);
     if (!packet.crc_ok) {
         return RECEIVE_RESULT_CRC_FAIL;
     }
@@ -445,38 +494,6 @@ static receive_result_t receive_one(
         }
         *out_rx_timestamp_us = rx_timestamp_us;
         return RECEIVE_RESULT_DATA;
-    }
-
-    /* TX가 이번 세션에 쓴 public_seed가 이전에 파생해둔 값과 다르면(새 PTT
-     * 세션 시작) hop_sequence를 그 자리에서 다시 만든다. 이 SYNC 패킷 자체의
-     * hop_index/channel 해석은 아래 process_rx/recover_rx가 새로 만든
-     * hop_sequence를 그대로 쓰게 된다 — slot 0(랑데부)는 시드와 무관하게
-     * channels[0]로 고정이라 이 타이밍에 걸려도 문제없다. */
-    if (service->config.derive_hop_seed != NULL) {
-        fhss_sync_packet_t peek_packet = {0};
-        if (fhss_sync_packet_decode(
-                packet.payload, packet.length, &peek_packet) ==
-                FHSS_PACKET_STATUS_OK &&
-            (!service->have_derived_public_seed ||
-             peek_packet.public_seed != service->last_derived_public_seed)) {
-            const uint32_t derived_hop_seed = service->config.derive_hop_seed(
-                peek_packet.public_seed, service->config.event_context);
-            if (fhss_hop_sequence_init_seeded(
-                    &service->controller.core.hop_sequence,
-                    service->config.channels,
-                    service->config.channel_count,
-                    derived_hop_seed,
-                    service->config.reserved_channel) == FHSS_HOP_STATUS_OK) {
-                service->last_derived_public_seed = peek_packet.public_seed;
-                service->have_derived_public_seed = true;
-                ESP_LOGI(TAG, "hop_seed re-derived: public_seed=%lu",
-                         (unsigned long)peek_packet.public_seed);
-            } else {
-                ESP_LOGE(TAG, "hop_sequence reinit failed for public_seed=%lu",
-                         (unsigned long)peek_packet.public_seed);
-                return RECEIVE_RESULT_SYNC_ERROR;
-            }
-        }
     }
 
     int64_t controller_timestamp_us = rx_timestamp_us;
@@ -639,6 +656,22 @@ static void handle_miss(fhss_service_t *service)
     }
 }
 
+static void handle_invalid_sync(fhss_service_t *service)
+{
+    ESP_LOGW(TAG, "invalid SYNC dropped: state=%s channel=%u",
+             fhss_fsm_state_name(service->fsm.state),
+             service->current_channel);
+
+    /* During acquisition, a malformed or incompatible peer packet must not
+     * erase already validated samples and must not escalate to product ERROR.
+     * Once tracking, the same packet means the expected valid SYNC was missed,
+     * so feed it into the normal bounded recovery/loss policy. */
+    if (service->fsm.state == FHSS_FSM_STATE_TRACKING ||
+        service->fsm.state == FHSS_FSM_STATE_RECOVERY) {
+        handle_miss(service);
+    }
+}
+
 static uint32_t get_recovery_probe_slot(
     fhss_service_t *service,
     uint32_t predicted_slot
@@ -696,6 +729,11 @@ static bool drain_rx_data_until(
         if (remaining_us <= 1000) {
             return false;
         }
+
+        /* A slave may need to return OTA ACK/NACK on the current hop channel.
+         * Serialize those responses in this radio-owning task instead of
+         * letting ota_client touch the CC1101 concurrently. */
+        send_one_queued_data(service, switch_time_us);
 
         /* 재배정(2026-08-17): 20ms 상한이 49바이트 페이로드(38.4kBaud 기준
          * 순수 전송시간만 약 10~13ms) + GDO0 감지~태스크 기상 지연 + SPI
@@ -845,10 +883,15 @@ static void rx_task(fhss_service_t *service)
         } else if (receive_result == RECEIVE_RESULT_TIMEOUT ||
                    receive_result == RECEIVE_RESULT_CRC_FAIL) {
             handle_miss(service);
+        } else if (receive_result == RECEIVE_RESULT_SYNC_ERROR) {
+            handle_invalid_sync(service);
+        } else if (receive_result == RECEIVE_RESULT_RADIO_ERROR) {
+            ESP_LOGE(TAG, "CC1101 RX failure on channel=%u",
+                     service->current_channel);
+            report_event(service, FHSS_SERVICE_EVENT_ERROR);
         } else {
             ESP_LOGW(TAG, "RX processing error: result=%d channel=%u",
                      receive_result, service->current_channel);
-            report_event(service, FHSS_SERVICE_EVENT_ERROR);
         }
     }
 }
@@ -1061,7 +1104,6 @@ bool fhss_service_send_data(
 {
     if (service == NULL || data == NULL || length == 0U ||
         length > RF_TRANSPORT_MAX_PACKET_LENGTH ||
-        service->config.role != FHSS_SERVICE_ROLE_TX ||
         service->tx_queue == NULL) {
         return false;
     }
@@ -1093,6 +1135,37 @@ bool fhss_service_wait_tx_idle(
 
     return uxQueueMessagesWaiting((QueueHandle_t)service->tx_queue) == 0U &&
            !service->tx_in_flight;
+}
+
+bool fhss_service_apply_public_seed(
+    fhss_service_t *service,
+    uint32_t public_seed
+)
+{
+    if (service == NULL || service->config.derive_hop_seed == NULL) {
+        return false;
+    }
+    if (service->have_derived_public_seed &&
+        public_seed == service->last_derived_public_seed) {
+        return true;
+    }
+    const uint32_t derived_hop_seed = service->config.derive_hop_seed(
+        public_seed, service->config.event_context);
+    if (fhss_hop_sequence_init_seeded(
+            &service->controller.core.hop_sequence,
+            service->config.channels,
+            service->config.channel_count,
+            derived_hop_seed,
+            service->config.reserved_channel) != FHSS_HOP_STATUS_OK) {
+        ESP_LOGE(TAG, "hop_sequence reinit failed for public_seed=%lu",
+                 (unsigned long)public_seed);
+        return false;
+    }
+    service->last_derived_public_seed = public_seed;
+    service->have_derived_public_seed = true;
+    ESP_LOGI(TAG, "hop_seed re-derived: public_seed=%lu",
+             (unsigned long)public_seed);
+    return true;
 }
 
 fhss_fsm_state_t fhss_service_get_state(const fhss_service_t *service)

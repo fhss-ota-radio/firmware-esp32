@@ -1,5 +1,11 @@
 #include "fhss_core.h"
 
+#include <inttypes.h>
+
+#include "esp_log.h"
+
+static const char *TAG = "fhss_core";
+
 #include <stddef.h>
 
 
@@ -41,6 +47,7 @@ fhss_core_status_t fhss_core_init(
      */
     fhss_core_t initialized_core = {
         .timing_config = config->timing,
+        .generation = config->generation,
         .initialized = false,
     };
 
@@ -124,6 +131,29 @@ fhss_core_status_t fhss_core_process_rx(
         );
 
     if (packet_status != FHSS_PACKET_STATUS_OK) {
+        ESP_LOGW(TAG, "SYNC rejected: decode status=%d bytes=%u",
+                 (int)packet_status, (unsigned)buffer_length);
+        return FHSS_CORE_STATUS_PACKET_ERROR;
+    }
+    if (result.packet.generation != core->generation) {
+        ESP_LOGW(TAG,
+                 "SYNC rejected: generation rx=%" PRIu32
+                 " expected=%" PRIu32,
+                 result.packet.generation, core->generation);
+        return FHSS_CORE_STATUS_PACKET_ERROR;
+    }
+    uint8_t expected_hop_index = 0U;
+    if (fhss_hop_sequence_get_index(
+            &core->hop_sequence,
+            result.packet.slot_number,
+            &expected_hop_index) != FHSS_HOP_STATUS_OK) {
+        return FHSS_CORE_STATUS_HOP_ERROR;
+    }
+    if (result.packet.hop_index != expected_hop_index) {
+        ESP_LOGW(TAG,
+                 "SYNC rejected: slot=%" PRIu32 " hop rx=%u expected=%u",
+                 result.packet.slot_number, result.packet.hop_index,
+                 expected_hop_index);
         return FHSS_CORE_STATUS_PACKET_ERROR;
     }
 
@@ -138,6 +168,10 @@ fhss_core_status_t fhss_core_process_rx(
         );
 
     if (timing_status != FHSS_TIMING_STATUS_OK) {
+        ESP_LOGW(TAG,
+                 "SYNC rejected: timing status=%d expected=%lld actual=%lld",
+                 (int)timing_status, (long long)expected_rx_time_us,
+                 (long long)actual_rx_time_us);
         return FHSS_CORE_STATUS_TIMING_ERROR;
     }
 

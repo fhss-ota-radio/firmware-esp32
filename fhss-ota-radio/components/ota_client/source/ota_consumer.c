@@ -3,12 +3,24 @@
 #include <inttypes.h>
 
 #include "esp_log.h"
+#include "fhss_config_store.h"
 #include "ota_protocol.h"
 
 #define OTA_CONSUMER_TASK_STACK_SIZE 4096U
 #define OTA_CONSUMER_TASK_PRIORITY   (tskIDLE_PRIORITY + 3U)
 
 static const char *TAG = "ota_consumer";
+
+static void ota_consumer_emit_event(
+    ota_client_context_t *context,
+    ota_client_event_t event,
+    esp_err_t error)
+{
+    if (context->config.event_callback != NULL) {
+        context->config.event_callback(
+            event, 0U, error, context->config.callback_context);
+    }
+}
 
 static bool ota_consumer_is_ota_mode(const ota_client_context_t *context)
 {
@@ -251,6 +263,119 @@ static void ota_consumer_handle_start(
         OTA_PKT_START,
         OTA_CONTROL_SEQUENCE
     );
+}
+
+static bool ota_consumer_target_matches(
+    const ota_client_context_t *context,
+    uint32_t target_device_id)
+{
+    return target_device_id == context->config.device_id ||
+           target_device_id == OTA_BROADCAST_DEVICE_ID;
+}
+
+static void ota_consumer_handle_fhss_config(
+    ota_client_context_t *context,
+    const uint8_t *packet,
+    size_t packet_length)
+{
+    ota_fhss_config_fields_t fields = {0};
+    if (!ota_protocol_decode_fhss_config(packet, packet_length, &fields)) {
+        ESP_LOGW(TAG, "FHSS_CONFIG rejected: wire decode failed, bytes=%u",
+                 (unsigned)packet_length);
+        return;
+    }
+    if (!ota_consumer_target_matches(context, fields.target_device_id)) {
+        ESP_LOGW(TAG,
+                 "FHSS_CONFIG ignored: target=%08" PRIX32
+                 " local=%08" PRIX32,
+                 fields.target_device_id, context->config.device_id);
+        return;
+    }
+    if (!ota_consumer_is_ota_mode(context)) {
+        ESP_LOGW(TAG, "FHSS_CONFIG rejected: device is not in OTA FSM mode");
+        (void)ota_consumer_send_nack(
+            context, fields.session_id, OTA_PKT_FHSS_CONFIG,
+            OTA_CONTROL_SEQUENCE, OTA_RESULT_BUSY);
+        return;
+    }
+    ESP_LOGI(TAG,
+             "FHSS_CONFIG pending verified: session=%" PRIu32
+             " generation=%" PRIu32 " seed=%08" PRIX32,
+             fields.session_id, fields.generation, fields.seed);
+    const esp_err_t err = fhss_config_store_save_pending(&fields);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "FHSS_CONFIG pending save failed: %s",
+                 esp_err_to_name(err));
+        (void)ota_consumer_send_nack(
+            context, fields.session_id, OTA_PKT_FHSS_CONFIG,
+            OTA_CONTROL_SEQUENCE, OTA_RESULT_VERIFY_FAILED);
+        return;
+    }
+    if (ota_consumer_send_ack(
+            context, fields.session_id, OTA_PKT_FHSS_CONFIG,
+            OTA_CONTROL_SEQUENCE) == ESP_OK) {
+        ota_consumer_emit_event(
+            context, OTA_CLIENT_EVENT_FHSS_CONFIG_READY, ESP_OK);
+    }
+}
+
+static void ota_consumer_handle_fhss_activate(
+    ota_client_context_t *context,
+    const uint8_t *packet,
+    size_t packet_length)
+{
+    ota_fhss_activate_fields_t activate = {0};
+    if (!ota_protocol_decode_fhss_activate(
+            packet, packet_length, &activate)) {
+        ESP_LOGW(TAG, "FHSS_ACTIVATE rejected: wire decode failed, bytes=%u",
+                 (unsigned)packet_length);
+        return;
+    }
+    if (!ota_consumer_target_matches(context, activate.target_device_id)) {
+        ESP_LOGW(TAG,
+                 "FHSS_ACTIVATE ignored: target=%08" PRIX32
+                 " local=%08" PRIX32,
+                 activate.target_device_id, context->config.device_id);
+        return;
+    }
+    ota_fhss_config_fields_t pending = {0};
+    if (fhss_config_store_load_pending(&pending) != ESP_OK ||
+        pending.generation != activate.generation ||
+        pending.session_id != activate.session_id) {
+        ESP_LOGW(TAG,
+                 "FHSS_ACTIVATE rejected: pending(session=%" PRIu32
+                 ",gen=%" PRIu32 ") rx(session=%" PRIu32
+                 ",gen=%" PRIu32 ")",
+                 pending.session_id, pending.generation,
+                 activate.session_id, activate.generation);
+        (void)ota_consumer_send_nack(
+            context, activate.session_id, OTA_PKT_FHSS_ACTIVATE,
+            OTA_CONTROL_SEQUENCE, OTA_RESULT_INVALID_SEQUENCE);
+        return;
+    }
+
+    /* The ACK must leave on bootstrap channel 0 before the callback switches
+     * the shared CC1101 to rendezvous channel 1. */
+    if (ota_consumer_send_ack(
+            context, activate.session_id, OTA_PKT_FHSS_ACTIVATE,
+            OTA_CONTROL_SEQUENCE) != ESP_OK) {
+        return;
+    }
+    ota_consumer_emit_event(
+        context, OTA_CLIENT_EVENT_FHSS_ACTIVATING, ESP_OK);
+    ESP_LOGI(TAG,
+             "FHSS_ACTIVATE ACK sent; switching to rendezvous=%u generation=%" PRIu32,
+             pending.rendezvous_channel, pending.generation);
+    if (context->config.fhss_activate_callback == NULL ||
+        context->config.fhss_activate_callback(
+            &pending, context->config.callback_context) != ESP_OK) {
+        ESP_LOGE(TAG, "FHSS activation failed after ACK; bootstrap recovery required");
+        ota_consumer_emit_event(
+            context, OTA_CLIENT_EVENT_FHSS_ACTIVATE_FAILED, ESP_FAIL);
+        return;
+    }
+    /* Keep it pending until the radio service proves this generation by
+     * acquiring valid SYNC packets. */
 }
 
 static ota_result_t ota_consumer_data_decode_error(
@@ -501,6 +626,17 @@ static void ota_consumer_process_packet(
             ota_consumer_handle_end(
                 context, queued_packet->data, queued_packet->length
             );
+            break;
+        case OTA_PKT_FHSS_CONFIG:
+            ota_consumer_handle_fhss_config(
+                context, queued_packet->data, queued_packet->length);
+            break;
+        case OTA_PKT_FHSS_ACTIVATE:
+            ota_consumer_handle_fhss_activate(
+                context, queued_packet->data, queued_packet->length);
+            break;
+        case OTA_PKT_FHSS_SYNC:
+            /* Runtime SYNC belongs to fhss_service, not the OTA consumer. */
             break;
         case OTA_PKT_ACK:
         case OTA_PKT_NACK:

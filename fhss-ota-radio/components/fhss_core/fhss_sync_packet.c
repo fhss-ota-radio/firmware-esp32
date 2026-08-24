@@ -1,54 +1,14 @@
 #include "fhss_sync_packet.h"
 
-/*
- * 무선 패킷의 다중 바이트 정수는 big-endian으로 저장한다.
- */
-
-static void write_u16_be(uint8_t *buffer, uint16_t value)
-{
-    buffer[0] = (uint8_t)((value >> 8) & 0xFFU);
-    buffer[1] = (uint8_t)(value & 0xFFU);
-}
-
-static void write_u32_be(uint8_t *buffer, uint32_t value)
-{
-    buffer[0] = (uint8_t)((value >> 24) & 0xFFU);
-    buffer[1] = (uint8_t)((value >> 16) & 0xFFU);
-    buffer[2] = (uint8_t)((value >> 8) & 0xFFU);
-    buffer[3] = (uint8_t)(value & 0xFFU);
-}
-
-static uint16_t read_u16_be(const uint8_t *buffer)
-{
-    return (uint16_t)(
-        ((uint16_t)buffer[0] << 8) |
-        (uint16_t)buffer[1]
-    );
-}
-
-static uint32_t read_u32_be(const uint8_t *buffer)
-{
-    return ((uint32_t)buffer[0] << 24) |
-           ((uint32_t)buffer[1] << 16) |
-           ((uint32_t)buffer[2] << 8) |
-           (uint32_t)buffer[3];
-}
-
-static bool is_valid_packet_type(fhss_packet_type_t type)
-{
-    return type == FHSS_PACKET_TYPE_SYNC;
-}
-
 bool fhss_sync_packet_has_valid_magic(
     const uint8_t *buffer,
     size_t buffer_length
 )
 {
-    if (buffer == NULL || buffer_length < sizeof(uint32_t)) {
-        return false;
-    }
-
-    return read_u32_be(buffer) == (uint32_t)FHSS_SYNC_PACKET_MAGIC;
+    return buffer != NULL &&
+           buffer_length == OTA_FHSS_SYNC_PACKET_SIZE &&
+           buffer[0] == (uint8_t)OTA_PKT_FHSS_SYNC &&
+           buffer[1] == OTA_FHSS_SYNC_VERSION;
 }
 
 fhss_packet_status_t fhss_sync_packet_encode(
@@ -58,55 +18,31 @@ fhss_packet_status_t fhss_sync_packet_encode(
     size_t *out_length
 )
 {
-    /*
-     * 실패했을 때 이전 길이값이 남지 않도록 먼저 0으로 초기화한다.
-     */
     if (out_length != NULL) {
         *out_length = 0U;
     }
-
     if (packet == NULL || buffer == NULL || out_length == NULL) {
         return FHSS_PACKET_STATUS_INVALID_ARG;
     }
-
-    if (buffer_capacity < FHSS_SYNC_PACKET_LENGTH) {
+    if (buffer_capacity < OTA_FHSS_SYNC_PACKET_SIZE) {
         return FHSS_PACKET_STATUS_BUFFER_TOO_SMALL;
     }
-
-    if (packet->version != FHSS_SYNC_PACKET_VERSION) {
+    if (packet->version != OTA_FHSS_SYNC_VERSION) {
         return FHSS_PACKET_STATUS_UNSUPPORTED_VERSION;
     }
 
-    if (!is_valid_packet_type(packet->type)) {
-        return FHSS_PACKET_STATUS_INVALID_TYPE;
-    }
-
-    /*
-     * Offset  Size  Field
-     * 0       4     Magic
-     * 4       1     Version
-     * 5       1     Packet Type
-     * 6       2     Sequence
-     * 8       1     Hop Index
-     * 9       4     Slot Number
-     * 13      4     Public Seed
-     */
-    write_u32_be(&buffer[0], (uint32_t)FHSS_SYNC_PACKET_MAGIC);
-
-    buffer[4] = packet->version;
-    buffer[5] = (uint8_t)packet->type;
-
-    write_u16_be(&buffer[6], packet->sequence);
-
-    buffer[8] = packet->hop_index;
-
-    write_u32_be(&buffer[9], packet->slot_number);
-
-    write_u32_be(&buffer[13], packet->public_seed);
-
-    *out_length = FHSS_SYNC_PACKET_LENGTH;
-
-    return FHSS_PACKET_STATUS_OK;
+    const ota_fhss_sync_fields_t fields = {
+        .sync_version = packet->version,
+        .generation = packet->generation,
+        .sequence = packet->sequence,
+        .hop_index = packet->hop_index,
+        .slot_number = packet->slot_number,
+    };
+    *out_length = ota_protocol_encode_fhss_sync(
+        buffer, buffer_capacity, &fields);
+    return *out_length == OTA_FHSS_SYNC_PACKET_SIZE
+        ? FHSS_PACKET_STATUS_OK
+        : FHSS_PACKET_STATUS_INVALID_TYPE;
 }
 
 fhss_packet_status_t fhss_sync_packet_decode(
@@ -118,42 +54,27 @@ fhss_packet_status_t fhss_sync_packet_decode(
     if (buffer == NULL || out_packet == NULL) {
         return FHSS_PACKET_STATUS_INVALID_ARG;
     }
-
-    if (buffer_length != FHSS_SYNC_PACKET_LENGTH) {
+    if (buffer_length != OTA_FHSS_SYNC_PACKET_SIZE) {
         return FHSS_PACKET_STATUS_INVALID_LENGTH;
     }
-
-    if (!fhss_sync_packet_has_valid_magic(buffer, buffer_length)) {
+    if (buffer[0] != (uint8_t)OTA_PKT_FHSS_SYNC) {
         return FHSS_PACKET_STATUS_INVALID_MAGIC;
     }
-
-    const uint8_t version = buffer[4];
-
-    if (version != FHSS_SYNC_PACKET_VERSION) {
+    if (buffer[1] != OTA_FHSS_SYNC_VERSION) {
         return FHSS_PACKET_STATUS_UNSUPPORTED_VERSION;
     }
 
-    const fhss_packet_type_t type =
-        (fhss_packet_type_t)buffer[5];
-
-    if (!is_valid_packet_type(type)) {
+    ota_fhss_sync_fields_t fields = {0};
+    if (!ota_protocol_decode_fhss_sync(buffer, buffer_length, &fields)) {
         return FHSS_PACKET_STATUS_INVALID_TYPE;
     }
-
-    /*
-     * 검증이 모두 끝난 뒤 임시 구조체를 완성한다.
-     * 오류가 발생했을 때 out_packet이 일부만 변경되는 것을 막는다.
-     */
-    const fhss_sync_packet_t decoded_packet = {
-        .version = version,
-        .type = type,
-        .sequence = read_u16_be(&buffer[6]),
-        .hop_index = buffer[8],
-        .slot_number = read_u32_be(&buffer[9]),
-        .public_seed = read_u32_be(&buffer[13]),
+    const fhss_sync_packet_t decoded = {
+        .version = fields.sync_version,
+        .generation = fields.generation,
+        .sequence = fields.sequence,
+        .hop_index = fields.hop_index,
+        .slot_number = fields.slot_number,
     };
-
-    *out_packet = decoded_packet;
-
+    *out_packet = decoded;
     return FHSS_PACKET_STATUS_OK;
 }
