@@ -83,5 +83,7 @@ Desktop.ini
 
 # FHSS 팀 공유 비밀(HMAC-SHA256 hop_seed 파생용). EMBED_TXTFILES로 빌드에
 # 박혀서 커밋 대상이 아님 — components/fhss_audio_adapter/secret_seed.txt.example
-# 참고해서 각자 준비(README.md "빌드 전 준비" 참고).
-/components/fhss_audio_adapter/secret_seed.txt
+# 참고해서 각자 준비(README.md "빌드 전 준비" 참고). *.txt로 폴더째 무시해서
+# secret_seed.txt뿐 아니라 사본/백업 파일("secret_seed (사본).txt" 등)도
+# 실수로 커밋되지 않게 함 — .example은 확장자가 .txt가 아니라 안 걸림.
+/components/fhss_audio_adapter/*.txt
