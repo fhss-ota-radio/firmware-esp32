@@ -27,6 +27,11 @@ typedef enum {
     FHSS_PACKET_STATUS_BUFFER_TOO_SMALL,
 } fhss_packet_status_t;
 
+/* public_seed(HMAC 파생용)는 이 구조체에 없다 — 이 패킷은 ota_protocol(팀
+ * 공유 서브모듈)의 ota_fhss_sync_fields_t를 그대로 위임해서 인코딩/디코딩
+ * 하므로, 서브모듈에 필드를 추가하는 PR 없이는 여기 넣을 수 없다.
+ * public_seed는 대신 fhss_audio_packet의 별도 announce 패킷(서브모듈 밖,
+ * 우리 쪽에서만 정의)으로 전달한다 — fhss_audio_adapter.c 참고. */
 typedef struct {
     uint8_t version;
     uint32_t generation;

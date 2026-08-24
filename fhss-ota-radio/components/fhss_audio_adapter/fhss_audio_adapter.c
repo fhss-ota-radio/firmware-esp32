@@ -1,13 +1,17 @@
 #include "fhss_audio_adapter.h"
 
+#include <ctype.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "psa/crypto.h"
 
 #include "fhss_audio_packet.h"
 #include "fhss_config_store.h"
@@ -37,6 +41,7 @@
 
 #define FHSS_AUDIO_TX_DRAIN_TIMEOUT_MS 600U
 #define FHSS_AUDIO_END_REPEAT_COUNT 3U
+#define FHSS_AUDIO_SEED_ANNOUNCE_REPEAT_COUNT 3U
 #define OTA_FIXED_CHANNEL 0U
 
 /* 재배정 이력(2026-08-17):
@@ -62,6 +67,141 @@ typedef struct {
 static const char *TAG = "fhss_audio_adapter";
 static uint8_t s_hop_channels[FHSS_AUDIO_HOP_CHANNEL_COUNT];
 
+/* 두 무전기(+게이트웨이)에 동일하게 박혀 있어야 하는 팀 공유 비밀.
+ * 2026-08-24: 소스 하드코딩 대신 EMBED_TXTFILES로 컴포넌트 루트의
+ * secret_seed.txt(gitignore 대상, 빌드 전 각자 준비 — firmware-esp32/README.md
+ * "빌드 전 준비" 참고)를 펌웨어에 박아 넣고 fhss_audio_adapter_init()에서
+ * 한 번 디코딩한다. gateway-ota core/hopseed.cpp의 parseHexSecretSeed()와
+ * 정확히 같은 형식(8자리 16진수, 공백 무시, "0x" 접두사 허용)이라 같은
+ * secret_seed.txt 파일을 두 레포에 그대로 복사해 쓸 수 있다.
+ * 여전히 "빌드에 박힌 값"이라 도청 방지 효과는 없음(flash를 읽으면 그대로
+ * 나옴) — README TODO에 적어둔 대로 추후 NVS, 더 나아가 eFuse 읽기보호
+ * 블록(esp_hmac_calculate() HW 주변장치)으로 옮길 여지를 남긴다. 그 전환
+ * 시에도 derive_session_hop_seed()의 HMAC-SHA256 구조 자체는 그대로 재사용
+ * 가능하도록(키 소스만 교체) 설계했다. */
+static uint8_t s_secret_seed[4] = {0x4B, 0x43, 0x43, 0x49};
+
+extern const uint8_t secret_seed_txt_start[] asm("_binary_secret_seed_txt_start");
+extern const uint8_t secret_seed_txt_end[] asm("_binary_secret_seed_txt_end");
+
+/* secret_seed_txt_start를 8자리 16진수로 파싱한다(gateway-ota
+ * core/hopseed.cpp의 parseHexSecretSeed()와 동일 규칙). EMBED_TXTFILES는
+ * 파일 뒤에 널 종단자를 붙여 넣어주므로 C 문자열처럼 다룰 수 있다. */
+static bool decode_secret_seed_from_embedded_txt(uint8_t out[4])
+{
+    const char *text = (const char *)secret_seed_txt_start;
+    const size_t raw_len = (size_t)(secret_seed_txt_end - secret_seed_txt_start);
+
+    char trimmed[16];
+    size_t trimmed_len = 0U;
+    for (size_t i = 0U; i < raw_len && text[i] != '\0'; ++i) {
+        if (isspace((unsigned char)text[i])) {
+            continue;
+        }
+        if (trimmed_len >= sizeof(trimmed) - 1U) {
+            return false; /* 8자리 16진수보다 김 — 형식 오류 */
+        }
+        trimmed[trimmed_len++] = text[i];
+    }
+    trimmed[trimmed_len] = '\0';
+
+    const char *digits = trimmed;
+    if (trimmed_len >= 2U && trimmed[0] == '0' &&
+        (trimmed[1] == 'x' || trimmed[1] == 'X')) {
+        digits += 2U;
+        trimmed_len -= 2U;
+    }
+    if (trimmed_len != 8U) {
+        return false;
+    }
+    for (size_t i = 0U; i < 8U; ++i) {
+        if (!isxdigit((unsigned char)digits[i])) {
+            return false;
+        }
+    }
+    for (size_t i = 0U; i < 4U; ++i) {
+        const char byte_str[3] = {digits[i * 2U], digits[i * 2U + 1U], '\0'};
+        out[i] = (uint8_t)strtol(byte_str, NULL, 16);
+    }
+    return true;
+}
+
+#define SHA256_BLOCK_SIZE 64U
+#define SHA256_DIGEST_SIZE 32U
+
+/* ota_writer.c와 동일하게 psa_hash_*를 쓴다 — 이 ESP-IDF(mbedtls 4.x)
+ * 빌드에서 mbedtls_md_hmac()/mbedtls_sha256() 같은 옛 API는 "private"
+ * 식별자로 막혀 있어(md.h/sha256.h가 MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS
+ * 뒤에 선언됨) 직접 호출할 수 없고, PSA Crypto API가 공개된 경로다. */
+static bool sha256_compute(
+    const uint8_t *chunk_a, size_t chunk_a_len,
+    const uint8_t *chunk_b, size_t chunk_b_len,
+    uint8_t out_digest[SHA256_DIGEST_SIZE]
+)
+{
+    psa_hash_operation_t operation = PSA_HASH_OPERATION_INIT;
+    size_t out_length = 0U;
+    if (psa_hash_setup(&operation, PSA_ALG_SHA_256) != PSA_SUCCESS ||
+        psa_hash_update(&operation, chunk_a, chunk_a_len) != PSA_SUCCESS ||
+        psa_hash_update(&operation, chunk_b, chunk_b_len) != PSA_SUCCESS ||
+        psa_hash_finish(&operation, out_digest, SHA256_DIGEST_SIZE,
+                         &out_length) != PSA_SUCCESS) {
+        (void)psa_hash_abort(&operation);
+        return false;
+    }
+    return true;
+}
+
+/* 세션마다 새로 생성되는 public_seed(평문, SYNC 패킷으로 전송됨)와
+ * secret_seed를 HMAC-SHA256으로 조합해 그 세션만의 hop_seed를 만든다.
+ * HMAC은 일방향이라 public_seed와 결과값을 모두 알아도 secret_seed를
+ * 역산할 수 없다 — 단순 XOR/덧셈 조합이 가진 역산 위험이 없다.
+ * HMAC(K,m) = SHA256((K' xor opad) || SHA256((K' xor ipad) || m)) —
+ * secret_seed(4바이트)는 블록 크기(64바이트)보다 짧아 그대로 제로패딩한
+ * 게 K'가 된다(RFC 2104). */
+static uint32_t derive_session_hop_seed(uint32_t public_seed, void *context)
+{
+    (void)context;
+
+    const uint8_t message[4] = {
+        (uint8_t)((public_seed >> 24) & 0xFFU),
+        (uint8_t)((public_seed >> 16) & 0xFFU),
+        (uint8_t)((public_seed >> 8) & 0xFFU),
+        (uint8_t)(public_seed & 0xFFU),
+    };
+
+    uint8_t ipad[SHA256_BLOCK_SIZE];
+    uint8_t opad[SHA256_BLOCK_SIZE];
+    memset(ipad, 0x36, sizeof(ipad));
+    memset(opad, 0x5CU, sizeof(opad));
+    for (size_t i = 0U; i < sizeof(s_secret_seed); ++i) {
+        ipad[i] ^= s_secret_seed[i];
+        opad[i] ^= s_secret_seed[i];
+    }
+
+    uint8_t inner_digest[SHA256_DIGEST_SIZE];
+    uint8_t outer_digest[SHA256_DIGEST_SIZE];
+    const bool ok =
+        sha256_compute(ipad, sizeof(ipad), message, sizeof(message),
+                        inner_digest) &&
+        sha256_compute(opad, sizeof(opad), inner_digest, sizeof(inner_digest),
+                        outer_digest);
+    if (!ok) {
+        /* HMAC 실패는 빌드 설정 오류 등 프로그래밍 실수 상황이지, 정상
+         * 운용 중 발생할 일이 아니다 — 그래도 무전 자체는 끊기지 않도록
+         * 양쪽이 항상 같은 값을 계산할 수 있는 고정 상수로 폴백한다
+         * (public_seed를 그대로 hop_seed로 쓰면 그 세션 홉 패턴이 평문
+         * public_seed만으로 완전히 예측 가능해져 더 나쁘다). */
+        ESP_LOGE(TAG, "HMAC hop_seed derivation failed; using fallback seed");
+        return 0x46485353U;
+    }
+
+    return ((uint32_t)outer_digest[0] << 24) |
+           ((uint32_t)outer_digest[1] << 16) |
+           ((uint32_t)outer_digest[2] << 8) |
+           (uint32_t)outer_digest[3];
+}
+
 typedef struct {
     fhss_service_t service;
     fhss_audio_adapter_config_t config;
@@ -77,6 +217,8 @@ typedef struct {
     bool have_last_rx_end;
     uint16_t last_rx_end_session_id;
     uint16_t last_rx_end_sequence;
+    bool have_last_rx_seed_announce;
+    uint16_t last_rx_seed_announce_session_id;
     bool initialized;
     bool tx_active;
     bool ota_active;
@@ -136,6 +278,20 @@ static fhss_service_data_action_t on_service_data(
         }
         return FHSS_SERVICE_DATA_CONTINUE;
     }
+    fhss_audio_seed_announce_packet_t announce = {0};
+    if (fhss_audio_seed_announce_packet_unpack(data, length, &announce) ==
+        FHSS_AUDIO_PACKET_STATUS_OK) {
+        const bool duplicate = s_adapter.have_last_rx_seed_announce &&
+            announce.session_id == s_adapter.last_rx_seed_announce_session_id;
+        if (!duplicate) {
+            s_adapter.have_last_rx_seed_announce = true;
+            s_adapter.last_rx_seed_announce_session_id = announce.session_id;
+            (void)fhss_service_apply_public_seed(
+                &s_adapter.service, announce.public_seed);
+        }
+        return FHSS_SERVICE_DATA_CONTINUE;
+    }
+
     fhss_audio_end_packet_t end = {0};
     if (fhss_audio_end_packet_unpack(data, length, &end) ==
         FHSS_AUDIO_PACKET_STATUS_OK) {
@@ -245,6 +401,37 @@ static bool send_buffered_frames(uint8_t flags)
     return true;
 }
 
+/* SYNC 패킷(ota_protocol 공유 포맷)엔 public_seed를 실을 자리가 없어서,
+ * 세션 시작 직후 이 별도 announce 패킷으로 알린다 — END 패킷과 같은 이유로
+ * (무선 손실 대비) 반복 전송한다. RX가 이 값을 받아야 slot 1부터 정확한
+ * hop_seed를 쓸 수 있으므로 TX 역할 전환 직후 최우선으로 큐에 넣는다. */
+static bool send_seed_announce_packets(uint32_t public_seed)
+{
+    const fhss_audio_seed_announce_packet_t announce = {
+        .session_id = s_adapter.tx_session_id,
+        .public_seed = public_seed,
+    };
+    uint8_t packet[FHSS_AUDIO_SEED_ANNOUNCE_PACKET_SIZE] = {0};
+    size_t packet_length = 0U;
+    if (fhss_audio_seed_announce_packet_pack(
+            &announce, packet, sizeof(packet), &packet_length) !=
+        FHSS_AUDIO_PACKET_STATUS_OK) {
+        return false;
+    }
+    for (uint32_t i = 0U; i < FHSS_AUDIO_SEED_ANNOUNCE_REPEAT_COUNT; ++i) {
+        if (!fhss_service_send_data(
+                &s_adapter.service, packet, packet_length)) {
+            ESP_LOGW(TAG, "seed announce TX queue full: copy=%lu",
+                     (unsigned long)(i + 1U));
+            return false;
+        }
+    }
+    ESP_LOGI(TAG, "SEED_ANNOUNCE TX: session=%u public_seed=%lu copies=%u",
+             announce.session_id, (unsigned long)public_seed,
+             FHSS_AUDIO_SEED_ANNOUNCE_REPEAT_COUNT);
+    return true;
+}
+
 static bool send_end_packets(void)
 {
     const fhss_audio_end_packet_t end = {
@@ -278,6 +465,12 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
 {
     if (config == NULL || config->rx_frame_callback == NULL) {
         return false;
+    }
+    if (!decode_secret_seed_from_embedded_txt(s_secret_seed)) {
+        /* s_secret_seed는 이미 컴파일 시점 기본값(KCCI)으로 초기화돼
+         * 있으므로 그대로 둔다 — 무전 자체는 계속 동작하되, 팀 공유값과
+         * 다를 수 있어 다른 기기와 홉이 안 맞을 수 있다는 것만 알린다. */
+        ESP_LOGE(TAG, "secret_seed.txt 형식이 올바르지 않음 — 내장 기본값 사용");
     }
     memset(&s_adapter, 0, sizeof(s_adapter));
     s_adapter.config = *config;
@@ -320,10 +513,16 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
         },
         .channels = s_hop_channels,
         .channel_count = configured_channel_count,
-        /* Channel 0 belongs to OTA. Both peers use this shared seed to derive
-         * the same deterministic audio hopping order. */
+        /* Channel 0 belongs to OTA. 이 값은 세션이 시작되기 전(RX가 랑데부
+         * 채널에서 첫 SYNC를 기다리는 동안)의 초기값일 뿐이다 — 랑데부
+         * 채널(index 0)은 시드와 무관하게 고정이라 실제로 쓰이지 않는다.
+         * 세션이 시작되면 TX가 생성한 public_seed로부터 매번 새로
+         * 파생된다(derive_hop_seed/public_seed 참고) — OTA 설정으로 온
+         * seed는 그 파생이 일어나기 전까지의 초기값으로만 재사용한다. */
         .hop_seed = have_active_config
             ? active_config.seed : OTA_FHSS_DEFAULT_SEED,
+        .public_seed = 0U,
+        .derive_hop_seed = derive_session_hop_seed,
         .generation = have_active_config ? active_config.generation : 0U,
         .reserved_channel = have_active_config
             ? active_config.reserved_channel : 0U,
@@ -391,11 +590,29 @@ bool fhss_audio_adapter_begin_tx(void)
     if (s_adapter.tx_session_id == 0U) {
         s_adapter.tx_session_id = 1U;
     }
+
+    /* 이번 PTT 세션 전용 public_seed를 새로 뽑고, secret_seed와 HMAC으로
+     * 조합해 이번 세션의 hop_seed를 만든다 — fhss_service_set_role()이
+     * reset_controller()를 거쳐 이 값으로 hop_sequence를 새로 구성하므로
+     * 역할 전환 전에 미리 채워둬야 한다. RX는 SYNC가 아니라 별도 announce
+     * 패킷(아래 send_seed_announce_packets())으로 이 값을 받아 동일하게
+     * 파생한다 — SYNC는 ota_protocol 공유 포맷이라 필드를 못 늘림. */
+    const uint32_t public_seed = esp_random();
+    s_adapter.service.config.public_seed = public_seed;
+    s_adapter.service.config.hop_seed =
+        derive_session_hop_seed(public_seed, NULL);
+
     if (!fhss_service_set_role(&s_adapter.service, FHSS_SERVICE_ROLE_TX)) {
         return false;
     }
+    /* SYNC(slot=0)보다 먼저 큐에 넣어 같은 슬롯 드레인 창에서 최대한 일찍
+     * 나가게 한다 — RX가 slot=1 채널을 계산하기 전에 도착해야 한다. */
+    if (!send_seed_announce_packets(public_seed)) {
+        ESP_LOGW(TAG, "seed announce send failed; RX may miss hop pattern");
+    }
     s_adapter.tx_active = true;
-    ESP_LOGI(TAG, "TX session started");
+    ESP_LOGI(TAG, "TX session started: public_seed=%lu",
+             (unsigned long)public_seed);
     return true;
 }
 
@@ -496,7 +713,16 @@ esp_err_t fhss_audio_adapter_activate_ota_fhss(
     }
     s_adapter.service.config.channels = s_hop_channels;
     s_adapter.service.config.channel_count = config->channel_count;
-    s_adapter.service.config.hop_seed = config->seed;
+    /* 통일(2026-08-24): OTA로 받은 config->seed를 hop_seed로 직접 쓰지 않고
+     * public_seed로 재해석해 secret_seed와 HMAC-SHA256으로 조합한다 —
+     * 이렇게 하면 ota_protocol 와이어 포맷을 하나도 안 바꾸고도(게이트웨이가
+     * 이미 매번 새로 생성해 보내는 값이라 public_seed 역할에 그대로 맞음)
+     * OTA 홉도 오디오와 같은 HMAC 파생 경로를 탄다. 단, 게이트웨이/커널
+     * 드라이버도 이 값을 hop_seed로 직접 안 쓰고 같은 HMAC을 거치도록
+     * 맞춰야 실제로 동기가 맞는다 — 그쪽은 아직 이 변경을 모른다(후속 과제). */
+    s_adapter.service.config.hop_seed =
+        derive_session_hop_seed(config->seed, NULL);
+    s_adapter.service.config.public_seed = config->seed;
     s_adapter.service.config.generation = config->generation;
     s_adapter.service.config.reserved_channel = config->reserved_channel;
     s_adapter.service.config.slot_duration_us = config->slot_duration_us;

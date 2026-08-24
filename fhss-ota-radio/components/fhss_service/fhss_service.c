@@ -83,6 +83,10 @@ static bool reset_controller(fhss_service_t *service)
                              FHSS_CONTROLLER_STATUS_OK;
     if (initialized) {
         service->test_tracking_sync_count = 0U;
+        /* hop_sequence가 방금 config.hop_seed 기준으로 다시 만들어졌으니,
+         * receive_one()의 재파생 로직이 이전 세션의 public_seed를 "이미
+         * 반영됨"으로 착각해 건너뛰지 않도록 추적값도 같이 초기화한다. */
+        service->have_derived_public_seed = false;
     }
     return initialized;
 }
@@ -1131,6 +1135,37 @@ bool fhss_service_wait_tx_idle(
 
     return uxQueueMessagesWaiting((QueueHandle_t)service->tx_queue) == 0U &&
            !service->tx_in_flight;
+}
+
+bool fhss_service_apply_public_seed(
+    fhss_service_t *service,
+    uint32_t public_seed
+)
+{
+    if (service == NULL || service->config.derive_hop_seed == NULL) {
+        return false;
+    }
+    if (service->have_derived_public_seed &&
+        public_seed == service->last_derived_public_seed) {
+        return true;
+    }
+    const uint32_t derived_hop_seed = service->config.derive_hop_seed(
+        public_seed, service->config.event_context);
+    if (fhss_hop_sequence_init_seeded(
+            &service->controller.core.hop_sequence,
+            service->config.channels,
+            service->config.channel_count,
+            derived_hop_seed,
+            service->config.reserved_channel) != FHSS_HOP_STATUS_OK) {
+        ESP_LOGE(TAG, "hop_sequence reinit failed for public_seed=%lu",
+                 (unsigned long)public_seed);
+        return false;
+    }
+    service->last_derived_public_seed = public_seed;
+    service->have_derived_public_seed = true;
+    ESP_LOGI(TAG, "hop_seed re-derived: public_seed=%lu",
+             (unsigned long)public_seed);
+    return true;
 }
 
 fhss_fsm_state_t fhss_service_get_state(const fhss_service_t *service)

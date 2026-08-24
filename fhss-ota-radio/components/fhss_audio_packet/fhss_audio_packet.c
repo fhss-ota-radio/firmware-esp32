@@ -186,3 +186,58 @@ fhss_audio_packet_status_t fhss_audio_end_packet_unpack(
         (uint16_t)packet[6] | ((uint16_t)packet[7] << 8U);
     return FHSS_AUDIO_PACKET_STATUS_OK;
 }
+
+fhss_audio_packet_status_t fhss_audio_seed_announce_packet_pack(
+    const fhss_audio_seed_announce_packet_t *announce,
+    uint8_t *out_packet,
+    size_t out_capacity,
+    size_t *out_length
+)
+{
+    if (announce == NULL || out_packet == NULL || out_length == NULL) {
+        return FHSS_AUDIO_PACKET_STATUS_INVALID_ARGUMENT;
+    }
+    if (out_capacity < FHSS_AUDIO_SEED_ANNOUNCE_PACKET_SIZE) {
+        return FHSS_AUDIO_PACKET_STATUS_BUFFER_TOO_SMALL;
+    }
+
+    const uint8_t packet[FHSS_AUDIO_SEED_ANNOUNCE_PACKET_SIZE] = {
+        FHSS_AUDIO_PACKET_MAGIC,
+        FHSS_AUDIO_PACKET_VERSION,
+        FHSS_AUDIO_SEED_ANNOUNCE_PACKET_TYPE,
+        (uint8_t)(announce->session_id & 0xFFU),
+        (uint8_t)(announce->session_id >> 8U),
+        (uint8_t)(announce->public_seed & 0xFFU),
+        (uint8_t)((announce->public_seed >> 8U) & 0xFFU),
+        (uint8_t)((announce->public_seed >> 16U) & 0xFFU),
+        (uint8_t)((announce->public_seed >> 24U) & 0xFFU),
+    };
+    memcpy(out_packet, packet, sizeof(packet));
+    *out_length = sizeof(packet);
+    return FHSS_AUDIO_PACKET_STATUS_OK;
+}
+
+fhss_audio_packet_status_t fhss_audio_seed_announce_packet_unpack(
+    const uint8_t *packet,
+    size_t packet_length,
+    fhss_audio_seed_announce_packet_t *out_announce
+)
+{
+    if (packet == NULL || out_announce == NULL) {
+        return FHSS_AUDIO_PACKET_STATUS_INVALID_ARGUMENT;
+    }
+    if (packet_length != FHSS_AUDIO_SEED_ANNOUNCE_PACKET_SIZE ||
+        packet[0] != FHSS_AUDIO_PACKET_MAGIC ||
+        packet[1] != FHSS_AUDIO_PACKET_VERSION ||
+        packet[2] != FHSS_AUDIO_SEED_ANNOUNCE_PACKET_TYPE) {
+        return FHSS_AUDIO_PACKET_STATUS_INVALID_FORMAT;
+    }
+
+    out_announce->session_id = (uint16_t)packet[3] | ((uint16_t)packet[4] << 8U);
+    out_announce->public_seed =
+        (uint32_t)packet[5] |
+        ((uint32_t)packet[6] << 8U) |
+        ((uint32_t)packet[7] << 16U) |
+        ((uint32_t)packet[8] << 24U);
+    return FHSS_AUDIO_PACKET_STATUS_OK;
+}
