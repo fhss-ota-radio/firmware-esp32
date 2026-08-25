@@ -515,6 +515,12 @@ bool fhss_audio_adapter_begin_ota(void)
         ESP_LOGE(TAG, "failed to enter fixed-channel OTA mode");
         return false;
     }
+    /* [2026-08-25] OTA 진행 중에만 rf_transport의 wait_until_ready()
+     * busy-poll 루프에 yield를 켠다 — 음성은 이 호출을 안 타므로 항상
+     * 꺼진 채(기존 동작 그대로) 남는다. 상세: rf_transport.h 주석,
+     * gateway-ota design-notes 70절(gap-tuning 이후 interrupt wdt
+     * timeout 크래시 원인 추정). */
+    rf_transport_set_ota_mode(true);
     ESP_LOGI(TAG, "OTA mode started on CHANNR=%u", OTA_FIXED_CHANNEL);
     return true;
 }
@@ -581,6 +587,9 @@ bool fhss_audio_adapter_end_ota(void)
     if (!s_adapter.initialized || !s_adapter.ota_active) {
         return true;
     }
+    /* begin_ota()에서 켠 걸 되돌림 — 음성으로 완전히 돌아가는 시점에
+     * 바로 꺼서, OTA 관련 상태가 하나도 안 남게 한다. */
+    rf_transport_set_ota_mode(false);
     if (xSemaphoreTake(s_adapter.radio_mutex, portMAX_DELAY) != pdTRUE) {
         return false;
     }

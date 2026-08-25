@@ -137,6 +137,13 @@ rf_transport_status_t rf_transport_wait_rx_timestamp(
     int64_t *out_timestamp_us
 );
 
+/* [2026-08-25, fix/fhss-interrupt-wdt-timeout] OTA 진행 중에만 켠다
+ * (fhss_audio_adapter_begin_ota()/_end_ota()가 각각 호출). 켜지면
+ * wait_until_ready()의 busy-poll 루프가 주기적으로 taskYIELD()한다 —
+ * 기본값(false)에서는 음성 경로에 아무 영향이 없다. 상세는
+ * rf_transport.c의 wait_until_ready() 주석 참고. */
+void rf_transport_set_ota_mode(bool enabled);
+
 
 #ifdef __cplusplus
 }
