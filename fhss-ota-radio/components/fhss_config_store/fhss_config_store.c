@@ -116,6 +116,30 @@ esp_err_t fhss_config_store_load_active(ota_fhss_config_fields_t *config)
 
 esp_err_t fhss_config_store_activate(uint32_t generation)
 {
+    /* [2026-08-25, fix/fhss-config-store-resync] 이미 이 generation이
+     * active로 승격되어 있으면 그대로 성공 처리한다 (멱등, idempotent —
+     * 몇 번을 호출해도 결과가 같음을 뜻함).
+     *
+     * 왜 필요한가: fsm.c의 on_fhss_audio_event()는 SYNC_ACQUIRED
+     * 이벤트를 받을 때마다(최초 동기화든, OTA_RECEIVING 도중 SYNC_LOST 후
+     * 재동기화든 구분 없이) 매번 이 함수를 호출한다. 그런데 이 함수는
+     * "pending" NVS 키를 "active"로 옮긴 뒤 pending을 지우는 1회성
+     * 승격이라, 최초 승격 이후에는 pending이 이미 없어서 재호출 시 항상
+     * ESP_ERR_INVALID_STATE를 반환했다. fsm.c는 이 에러를 무조건
+     * 치명적으로 취급해 FSM_EVENT_ERROR -> ERROR 상태로 세션을 강제
+     * 종료시켰다 — 재동기화 유예(resync grace, 10초)가 재동기화 자체는
+     * 성공적으로 기다려줬는데도, 재동기화가 "성공하는" 바로 그 순간
+     * 이 버그 때문에 세션이 죽는 구조였다.
+     * (실기기 로그 artifacts/fhss5_slot_error2: SYNC_LOST 후 1.5초 만에
+     * SYNC_ACQUIRED 성공 → 그 직후 "failed to promote synchronized FHSS
+     * generation: ESP_ERR_INVALID_STATE" → OTA aborted at 18%)
+     */
+    ota_fhss_config_fields_t active = {0};
+    if (fhss_config_store_load_active(&active) == ESP_OK &&
+        active.generation == generation) {
+        return ESP_OK;
+    }
+
     ota_fhss_config_fields_t pending = {0};
     esp_err_t err = fhss_config_store_load_pending(&pending);
     if (err != ESP_OK || pending.generation != generation) {
