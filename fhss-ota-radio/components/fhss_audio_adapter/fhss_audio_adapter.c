@@ -359,8 +359,34 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
         .search_dwell_ms = 400U,
         .receive_timeout_ms = 80U,
         .acquire_count = 3U,
-        .loss_count = 5U,
-        .recovery_entry_miss_count = 2U,
+        /*
+         * [2026-08-25 정정: loss_count 5 -> 12, recovery_entry_miss_count
+         *  2 -> 4] 연속 몇 번 SYNC를 놓치면 동기화를 "완전히 잃었다"고
+         * 판정할지의 임계값.
+         *
+         * 이 값들은 음성(FHSS 오디오) 기준으로 정해졌다 — 그쪽은 이쪽이
+         * 송신하는 시간이 PTT를 누른 동안뿐이라 SYNC 수신을 방해할 일이
+         * 거의 없다. 그런데 OTA 전송 중에는 상황이 정반대다: DATA를 받을
+         * 때마다 곧바로 ACK를 송신하는데, CC1101은 반이중이라 그 송신
+         * 시간(실측 121ms) 동안은 귀가 닫힌다. 슬롯이 300ms이므로 ACK
+         * 송신 타이밍이 슬롯 경계(=SYNC 도착 시점)와 겹치면 그 슬롯의
+         * SYNC를 통째로 놓친다. 트래픽이 몰리면 이게 연속으로 발생할 수
+         * 있고, 5회(=1.5초)면 너무 쉽게 하드 로스로 넘어간다.
+         *
+         * 하드 로스가 나면 스케줄러 기준점을 버리고 랑데부 채널로 돌아가
+         * 재획득에 최악 3.3초가 걸리는데, 그 사이 Gateway의 재전송이 다시
+         * 획득을 방해해서 세션째로 날아간다(148 실기기 2026-08-24,
+         * 1036청크에서 발생). 애초에 하드 로스로 잘 안 넘어가게 하는 것이
+         * 훨씬 싸게 먹힌다.
+         *
+         * 12회 = 3.6초. 진짜로 링크가 끊긴 경우라면 이 시간 안에 다른
+         * 신호도 전혀 없을 것이므로 판정이 늦어져서 생기는 손해는 없다.
+         * Gateway 쪽에도 "연속 무응답이면 잠시 송신을 멈춰 재동기화를
+         * 양보"하는 처리를 함께 넣었다(kQuietTriggerSends/kResyncQuietMs).
+         * 상세: gateway-ota/docs/note/design-notes-gateway-ota-es.md 58절.
+         */
+        .loss_count = 12U,
+        .recovery_entry_miss_count = 4U,
         .diagnostics_interval_ms = 5000U,
         .event_callback = on_service_event,
         .data_callback = on_service_data,
