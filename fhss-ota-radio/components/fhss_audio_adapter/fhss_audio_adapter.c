@@ -397,6 +397,10 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
          * 되돌린다 — 이유는 FHSS_SYNC_LOSS_COUNT_VOICE 주석 참고. */
         .loss_count = FHSS_SYNC_LOSS_COUNT_VOICE,
         .recovery_entry_miss_count = FHSS_RECOVERY_ENTRY_MISS_VOICE,
+        /* 음성은 본문 읽기 타임아웃을 예전처럼 무선 오류로 취급한다
+         * (=기존 동작 100% 유지). OTA에서만 완화 — 자세한 이유는
+         * fhss_service.h의 treat_body_timeout_as_radio_error 주석 참고. */
+        .treat_body_timeout_as_radio_error = true,
         .diagnostics_interval_ms = 5000U,
         .event_callback = on_service_event,
         .data_callback = on_service_data,
@@ -544,6 +548,9 @@ esp_err_t fhss_audio_adapter_activate_ota_fhss(
     s_adapter.service.config.loss_count = FHSS_SYNC_LOSS_COUNT_OTA;
     s_adapter.service.config.recovery_entry_miss_count =
         FHSS_RECOVERY_ENTRY_MISS_OTA;
+    /* OTA에서만 본문 읽기 타임아웃 완화를 켠다 — 이게 켜져야 ACK가 다음
+     * 홉 채널로 밀려 유실되는 문제가 풀린다(design-notes 50절). */
+    s_adapter.service.config.treat_body_timeout_as_radio_error = false;
     if (s_adapter.ota_rx_queue != NULL) {
         xQueueReset(s_adapter.ota_rx_queue);
     }
@@ -586,6 +593,7 @@ bool fhss_audio_adapter_end_ota(void)
     s_adapter.service.config.loss_count = FHSS_SYNC_LOSS_COUNT_VOICE;
     s_adapter.service.config.recovery_entry_miss_count =
         FHSS_RECOVERY_ENTRY_MISS_VOICE;
+    s_adapter.service.config.treat_body_timeout_as_radio_error = true;
     const bool ok = fhss_service_set_role(
         &s_adapter.service, FHSS_SERVICE_ROLE_RX);
     xSemaphoreGive(s_adapter.radio_mutex);
