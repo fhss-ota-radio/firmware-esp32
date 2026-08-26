@@ -8,7 +8,6 @@
 
 #define OTA_CONSUMER_TASK_STACK_SIZE 4096U
 #define OTA_CONSUMER_TASK_PRIORITY   (tskIDLE_PRIORITY + 3U)
-#define OTA_BATCH_ACK_GAP_MS         5U
 
 static const char *TAG = "ota_consumer";
 
@@ -114,34 +113,37 @@ static esp_err_t ota_consumer_send_nack(
     );
 }
 
-static void ota_consumer_send_batch_acks(
+static esp_err_t ota_consumer_send_batch_ack(
     ota_client_context_t *context,
     uint32_t session_id,
     uint32_t base_sequence,
-    uint8_t chunk_count
+    uint8_t chunk_count,
+    uint8_t received_mask,
+    ota_result_t result
 )
 {
+    const ota_batch_ack_fields_t fields = {
+        .session_id = session_id,
+        .base_sequence = base_sequence,
+        .chunk_count = chunk_count,
+        .received_mask = received_mask,
+        .result_code = (uint8_t)result,
+    };
+    uint8_t packet[OTA_BATCH_ACK_PACKET_SIZE];
+    const size_t packet_length = ota_protocol_encode_batch_ack(
+        packet, sizeof(packet), &fields);
+    if (packet_length == 0U) {
+        return ESP_FAIL;
+    }
     ESP_LOGI(
         TAG,
-        "batch Flash commit complete; sending %u deferred DATA ACKs from seq=%" PRIu32,
-        (unsigned)chunk_count,
-        base_sequence
+        "TX BATCH_ACK: session=%" PRIu32 ", base=%" PRIu32
+        ", count=%u, mask=0x%02X, result=%u",
+        session_id, base_sequence, (unsigned)chunk_count,
+        received_mask, (unsigned)result
     );
-
-    for (uint8_t offset = 0U; offset < chunk_count; ++offset) {
-        (void)ota_consumer_send_ack(
-            context,
-            session_id,
-            OTA_PKT_DATA,
-            base_sequence + offset
-        );
-
-        /* CC1101은 반이중이다. Gateway가 RX로 전환한 뒤 ACK들을 안정적으로
-         * 큐에 담을 수 있게 하되, 마지막 ACK 뒤에는 불필요하게 쉬지 않는다. */
-        if (offset + 1U < chunk_count) {
-            vTaskDelay(pdMS_TO_TICKS(OTA_BATCH_ACK_GAP_MS));
-        }
-    }
+    return context->config.send_callback(
+        packet, packet_length, context->config.callback_context);
 }
 
 static void ota_consumer_handle_discover(ota_client_context_t *context)
@@ -449,57 +451,26 @@ static void ota_consumer_handle_data(
     const bool exact_length = decoded &&
         packet_length == OTA_DATA_HEADER_SIZE + payload_length;
     if (!exact_length) {
-        if (packet_length >= 9U) {
-            ota_consumer_send_nack(
-                context,
-                ota_read_u32_le(&packet[1]),
-                OTA_PKT_DATA,
-                ota_read_u32_le(&packet[5]),
-                ota_consumer_data_decode_error(packet, packet_length)
-            );
-        }
+        ESP_LOGW(TAG, "DATA dropped before BATCH_END: decode result=%u",
+                 (unsigned)ota_consumer_data_decode_error(packet, packet_length));
         return;
     }
     if (payload_length == 0U) {
-        ota_consumer_send_nack(
-            context,
-            header.session_id,
-            OTA_PKT_DATA,
-            header.sequence,
-            OTA_RESULT_INVALID_SIZE
-        );
+        ESP_LOGW(TAG, "DATA dropped before BATCH_END: zero payload seq=%" PRIu32,
+                 header.sequence);
         return;
     }
 
     if (context->state != OTA_CLIENT_STATE_RECEIVING) {
-        ota_consumer_send_nack(
-            context,
-            header.session_id,
-            OTA_PKT_DATA,
-            header.sequence,
-            OTA_RESULT_BUSY
-        );
+        ESP_LOGW(TAG, "DATA dropped: receiver busy seq=%" PRIu32,
+                 header.sequence);
         return;
     }
     if (header.session_id != context->session_id) {
-        ota_consumer_send_nack(
-            context,
-            header.session_id,
-            OTA_PKT_DATA,
-            header.sequence,
-            OTA_RESULT_INVALID_SESSION
-        );
+        ESP_LOGW(TAG, "DATA dropped: invalid session seq=%" PRIu32,
+                 header.sequence);
         return;
     }
-
-    /* 현재 배치 정보는 ota_client_write_chunk()가 마지막 slot에서 Flash
-     * commit한 직후 다음 배치로 갱신한다. 호출 전에 snapshot을 잡아 두면
-     * commit 성공 시 방금 기록한 5개(마지막 배치는 1~4개)의 ACK을 기존
-     * OTA_ACK(sequence) 형식 그대로 한꺼번에 보낼 수 있다. */
-    const bool was_already_committed =
-        header.sequence < context->expected_sequence;
-    const uint32_t batch_base = context->batch_cache.base_sequence;
-    const uint8_t batch_chunk_count = context->batch_cache.chunk_count;
 
     const esp_err_t err = ota_client_write_chunk(
         header.session_id,
@@ -508,19 +479,8 @@ static void ota_consumer_handle_data(
         payload_length
     );
     if (err != ESP_OK) {
-        ota_consumer_send_nack(
-            context,
-            header.session_id,
-            OTA_PKT_DATA,
-            header.sequence,
-            err == ESP_ERR_INVALID_STATE
-                ? OTA_RESULT_BUSY
-                : (err == ESP_ERR_INVALID_SIZE
-                    ? OTA_RESULT_INVALID_SIZE
-                : (err == ESP_ERR_INVALID_ARG
-                    ? OTA_RESULT_INVALID_SEQUENCE
-                    : OTA_RESULT_WRITE_FAILED))
-        );
+        ESP_LOGW(TAG, "DATA store failed before BATCH_END: seq=%" PRIu32
+                 ", error=%s", header.sequence, esp_err_to_name(err));
         return;
     }
 
@@ -532,36 +492,52 @@ static void ota_consumer_handle_data(
         (unsigned)payload_length
     );
 
-    if (was_already_committed) {
-        /* 이전 배치의 ACK만 유실돼 DATA가 다시 온 경우에는 Flash에 다시 쓰지
-         * 않고 해당 sequence만 즉시 ACK해서 Gateway를 복구시킨다. */
-        (void)ota_consumer_send_ack(
-            context,
-            header.session_id,
-            OTA_PKT_DATA,
-            header.sequence
-        );
-    } else if (context->expected_sequence > batch_base) {
-        /* 마지막 DATA가 RAM batch를 완성했고 Flash commit까지 성공했다.
-         * DATA 수신 중에는 TX하지 않았으므로 Gateway의 5-frame burst와
-         * 반이중 ACK 송신이 충돌하지 않는다. */
-        ota_consumer_send_batch_acks(
-            context,
-            header.session_id,
-            batch_base,
-            batch_chunk_count
-        );
-    } else {
-        ESP_LOGI(
-            TAG,
-            "DATA ACK deferred: batch_base=%" PRIu32 ", seq=%" PRIu32
-            ", received=0x%02X, missing=0x%02X",
-            batch_base,
-            header.sequence,
-            context->batch_cache.received_mask,
-            ota_batch_cache_missing_mask(&context->batch_cache)
-        );
+    /* DATA에는 즉시 응답하지 않는다. 명시적 BATCH_END를 받은 뒤 현재
+     * received_mask 하나로 답해야 반이중 ACK TX가 다음 DATA RX와 겹치지
+     * 않고, 마지막 DATA 유실도 배치 경계와 분리해 판단할 수 있다. */
+    ESP_LOGI(TAG, "DATA response deferred until BATCH_END: seq=%" PRIu32,
+             header.sequence);
+}
+
+static void ota_consumer_handle_batch_end(
+    ota_client_context_t *context,
+    const uint8_t *packet,
+    size_t packet_length)
+{
+    ota_batch_end_fields_t fields;
+    if (!ota_protocol_decode_batch_end(packet, packet_length, &fields)) {
+        return;
     }
+
+    uint8_t received_mask = 0U;
+    ota_result_t result = OTA_RESULT_OK;
+    const uint8_t required_mask =
+        ota_protocol_batch_required_mask(fields.chunk_count);
+
+    if (context->state != OTA_CLIENT_STATE_RECEIVING) {
+        result = OTA_RESULT_BUSY;
+    } else if (fields.session_id != context->session_id) {
+        result = OTA_RESULT_INVALID_SESSION;
+    } else if (fields.base_sequence > context->total_chunks ||
+               fields.chunk_count > context->total_chunks - fields.base_sequence) {
+        result = OTA_RESULT_INVALID_SEQUENCE;
+    } else if (fields.base_sequence < context->expected_sequence &&
+               fields.base_sequence + fields.chunk_count <=
+                   context->expected_sequence) {
+        /* Flash commit 완료 뒤 BATCH_ACK만 유실된 재요청. 같은 full mask를
+         * 재응답하고 Flash에는 절대 다시 쓰지 않는다. */
+        received_mask = required_mask;
+    } else if (fields.base_sequence == context->batch_cache.base_sequence &&
+               fields.chunk_count == context->batch_cache.chunk_count) {
+        received_mask = (uint8_t)(
+            context->batch_cache.received_mask & required_mask);
+    } else {
+        result = OTA_RESULT_INVALID_SEQUENCE;
+    }
+
+    (void)ota_consumer_send_batch_ack(
+        context, fields.session_id, fields.base_sequence,
+        fields.chunk_count, received_mask, result);
 }
 
 static void ota_consumer_handle_end(
@@ -686,6 +662,11 @@ static void ota_consumer_process_packet(
                 context, queued_packet->data, queued_packet->length
             );
             break;
+        case OTA_PKT_BATCH_END:
+            ota_consumer_handle_batch_end(
+                context, queued_packet->data, queued_packet->length
+            );
+            break;
         case OTA_PKT_END:
             ota_consumer_handle_end(
                 context, queued_packet->data, queued_packet->length
@@ -705,6 +686,7 @@ static void ota_consumer_process_packet(
         case OTA_PKT_ACK:
         case OTA_PKT_NACK:
         case OTA_PKT_DISCOVER_ACK:
+        case OTA_PKT_BATCH_ACK:
         default:
             /* 이 방향의 패킷은 Gateway가 소비한다. */
             break;

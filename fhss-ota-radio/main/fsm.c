@@ -221,6 +221,11 @@ static void ota_radio_task(void *arg)
                 OTA_RADIO_RX_TIMEOUT_MS);
         if (status == FHSS_AUDIO_ADAPTER_OTA_RX_OK) {
             consecutive_timeouts = 0U;
+            ota_packet_type_t incoming_type = (ota_packet_type_t)0;
+            const bool have_type = ota_protocol_peek_type(
+                packet, packet_length, &incoming_type);
+            const bool response_expected =
+                !have_type || incoming_type != OTA_PKT_DATA;
             if (s_ota_response_done != NULL) {
                 (void)xSemaphoreTake(s_ota_response_done, 0U);
             }
@@ -229,10 +234,11 @@ static void ota_radio_task(void *arg)
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "OTA RX queue submit failed: %s",
                          esp_err_to_name(err));
-            } else if (s_ota_response_done != NULL) {
+            } else if (response_expected && s_ota_response_done != NULL) {
                 /* Do not re-enter RX before the lower-priority consumer has
-                 * encoded and transmitted ACK/NACK on the same half-duplex
-                 * radio. Malformed packets legitimately time out here. */
+                 * encoded and transmitted the response on the same half-duplex
+                 * radio. DATA deliberately has no immediate response: RX must
+                 * re-arm at once for the rest of the five-frame burst. */
                 (void)xSemaphoreTake(
                     s_ota_response_done,
                     pdMS_TO_TICKS(OTA_RESPONSE_WAIT_MS));

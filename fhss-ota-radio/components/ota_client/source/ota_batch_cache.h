@@ -6,8 +6,7 @@
 
 #include "esp_err.h"
 
-/* TEST: stop-and-wait 검증용. Gateway batchSize와 반드시 같은 값이어야 한다. */
-#define OTA_CLIENT_BATCH_SIZE 1U
+#define OTA_CLIENT_BATCH_SIZE 5U
 /* ota-protocol v0.2 (9d2aa2b): RF body 60B - DATA header 12B. */
 #define OTA_CLIENT_DATA_MAX_PAYLOAD_SIZE 48U
 

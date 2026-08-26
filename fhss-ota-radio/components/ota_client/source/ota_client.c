@@ -218,8 +218,9 @@ esp_err_t ota_client_write_chunk(
         ota_batch_cache_missing_mask(&s_ota_client.batch_cache)
     );
 
-    /* Wire protocol에는 BATCH_CHECK가 없다. 각 DATA는 개별 ACK/NACK 대상이며,
-     * 현재 고정 배치가 완성되면 연속된 최대 240B를 Flash에 한 번 기록한다. */
+    /* 현재 고정 배치가 완성되면 연속된 최대 240B를 Flash에 한 번 기록한다.
+     * 응답은 consumer가 뒤이어 수신한 BATCH_END에 대해 BATCH_ACK bitmap
+     * 하나로 보낸다. */
     if (!ota_batch_cache_is_complete(&s_ota_client.batch_cache)) {
         return ESP_OK;
     }

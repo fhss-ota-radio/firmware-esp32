@@ -20,6 +20,8 @@ static const char *packet_type_name(ota_packet_type_t type)
     case OTA_PKT_FHSS_CONFIG: return "FHSS_CONFIG";
     case OTA_PKT_FHSS_ACTIVATE: return "FHSS_ACTIVATE";
     case OTA_PKT_FHSS_SYNC: return "FHSS_SYNC";
+    case OTA_PKT_BATCH_END: return "BATCH_END";
+    case OTA_PKT_BATCH_ACK: return "BATCH_ACK";
     default: return "UNKNOWN";
     }
 }
