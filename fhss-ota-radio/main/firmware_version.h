@@ -8,5 +8,5 @@
  * ota-protocol v0.2 결정에 따라 사용하지 않는다.
  */
 #define FIRMWARE_VERSION_MAJOR 0
-#define FIRMWARE_VERSION_MINOR 1
+#define FIRMWARE_VERSION_MINOR 2
 #define FIRMWARE_VERSION_PATCH 0

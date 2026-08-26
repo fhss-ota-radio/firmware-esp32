@@ -16,6 +16,9 @@ void display_ui_init(void);
 /* 프레임버퍼 전체를 지우고 화면에 반영한다. */
 void display_ui_clear(void);
 
+/* OLED header에 표시할 펌웨어 버전을 설정한다. 화면 방향/상태 API와 독립적이다. */
+void display_ui_set_firmware_version(uint8_t major, uint8_t minor, uint8_t patch);
+
 /* row: 0 ~ (DISPLAY_UI_TEXT_ROWS-1). 해당 행을 text로 덮어쓰고 즉시 화면에 반영한다.
  * DISPLAY_UI_TEXT_COLS(16자)를 넘는 부분은 잘린다.
  * 참고: 물리(가로) 좌표 기준 API라 display_ui_draw_menu()의 회전된 화면과는

@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "display_ui.h"
 #include "fsm.h"
 #include "firmware_version.h"
 #include "rf_transport.h"
@@ -189,6 +190,10 @@ void app_main(void)
              FIRMWARE_VERSION_MINOR,
              FIRMWARE_VERSION_PATCH);
     ESP_LOGI(MAIN_TAG, "========================================");
+    display_ui_set_firmware_version(
+        FIRMWARE_VERSION_MAJOR,
+        FIRMWARE_VERSION_MINOR,
+        FIRMWARE_VERSION_PATCH);
 
 #if CC1101_STANDALONE_DIAGNOSTIC
     cc1101_standalone_diagnostic();

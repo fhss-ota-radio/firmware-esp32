@@ -15,6 +15,9 @@ static const char *TAG = "display_ui";
 static i2c_master_bus_handle_t s_bus;
 static i2c_master_dev_handle_t s_dev;
 static uint8_t s_framebuf[DISPLAY_UI_PAGES][DISPLAY_UI_WIDTH];
+static uint8_t s_firmware_version_major;
+static uint8_t s_firmware_version_minor;
+static uint8_t s_firmware_version_patch;
 
 /* 표준 SSD1306 128x64 init 시퀀스 (page addressing mode, charge pump on). */
 static const uint8_t s_init_cmds[] = {
@@ -248,6 +251,13 @@ void display_ui_clear(void)
     flush_all_pages("clear");
 }
 
+void display_ui_set_firmware_version(uint8_t major, uint8_t minor, uint8_t patch)
+{
+    s_firmware_version_major = major;
+    s_firmware_version_minor = minor;
+    s_firmware_version_patch = patch;
+}
+
 void oled_update_text(uint8_t row, const char *text)
 {
     if (row >= DISPLAY_UI_TEXT_ROWS || text == NULL) {
@@ -294,38 +304,28 @@ void oled_update_text_fmt(uint8_t row, const char *fmt, ...)
 }
 
 /*
- * 메뉴 화면 레이아웃 상수. 논리 캔버스는 64(=DISPLAY_UI_HEIGHT, 가로) x
- * 128(=DISPLAY_UI_WIDTH, 세로).
- *
- * 2026-08-12(2차): 항목을 둥근 사각형(MENU_ITEM_RADIUS)으로 바꾸고, 헤더/상태
- * 영역 사이에 얇은 구분선(rule)을 넣어 구획을 분명히 함 — 그전엔 진한 사각형
- * 블록이 화면에 꽉 차서(항목 3개가 거의 이어붙은 느낌) 딱딱해 보였음.
- * 항목 자체의 좌우 폭은 여전히 0~64(전체 폭) 그대로 둠 — "COMM"/"IDLE"이
- * scale2(글자당 16px)에서 정확히 4*16=64px을 채워야 해서 좌우 여백을 주면
- * 텍스트가 카드 밖으로 삐져나간다(실측 확인). 대신 세로 리듬(줄 간격,
- * 구분선)과 모서리 둥글림만으로 카드 느낌을 낸다.
- */
-#define MENU_HEADER_X    4
-#define MENU_HEADER_Y    4
+/* 논리 캔버스는 기존과 동일하게 64(가로) x 128(세로)이다. 화면 방향은
+ * 유지하고, 상단 식별 영역/메뉴 카드/상태 영역을 명확히 나눈다. */
+#define MENU_HEADER_X       3
+#define MENU_TITLE_Y        2
+#define MENU_VERSION_Y      10
+#define RULE_X              3
+#define RULE_W              (DISPLAY_UI_HEIGHT - 2 * RULE_X)
+#define HEADER_RULE_Y       20
 
-/* 헤더/구획 구분선. 항목과 달리 텍스트 폭 제약이 없어서 좌우로 살짝
- * 인셋해서(RULE_X) 화면 가장자리에 딱 붙지 않게 — 이 여백이 "카드" 느낌의
- * 시각적 단서가 된다. */
-#define RULE_X           4
-#define RULE_W           (DISPLAY_UI_HEIGHT - 2 * RULE_X)
-#define HEADER_RULE_Y    14
-
-#define MENU_ITEM_X      0
-#define MENU_ITEM_W      DISPLAY_UI_HEIGHT
-#define MENU_ITEM_START_Y 18
-#define MENU_ITEM_H      24
-#define MENU_ITEM_GAP    6
-#define MENU_ITEM_RADIUS 3
-#define MENU_TEXT_SCALE  2
+#define MENU_ITEM_X         2
+#define MENU_ITEM_W         (DISPLAY_UI_HEIGHT - 2 * MENU_ITEM_X)
+#define MENU_ITEM_START_Y   24
+#define MENU_ITEM_H         20
+#define MENU_ITEM_GAP       3
+#define MENU_ITEM_RADIUS    3
+#define MENU_TEXT_X         11
+#define MENU_TEXT_W         (DISPLAY_UI_HEIGHT - MENU_TEXT_X - 2)
+#define MENU_TEXT_SCALE     1
 
 #define MENU_BLOCK_BOTTOM (MENU_ITEM_START_Y + DISPLAY_UI_MENU_COUNT * MENU_ITEM_H \
                             + (DISPLAY_UI_MENU_COUNT - 1) * MENU_ITEM_GAP)
-#define STATUS_RULE_Y     (MENU_BLOCK_BOTTOM + 4)
+#define STATUS_RULE_Y        (MENU_BLOCK_BOTTOM + 5)
 
 /*
  * 상태 메시지 영역(구분선 아래, 화면 끝까지). scale1 폰트라 한 글자 8px,
@@ -370,6 +370,7 @@ void oled_update_text_fmt(uint8_t row, const char *fmt, ...)
 #define STATUS_SCROLL_GAP_PX      16
 
 static const char *const s_menu_labels[DISPLAY_UI_MENU_COUNT] = { "COMM", "IDLE", "OTA" };
+static const char *const s_menu_numbers[DISPLAY_UI_MENU_COUNT] = { "01", "02", "03" };
 
 /* display_ui_draw_menu()/display_ui_set_status*()가 공유하는 현재 화면 상태.
  * 각 API는 이 중 자기 관련 필드만 갱신하고 항상 render_screen()으로 전체를
@@ -414,7 +415,13 @@ static void render_screen(void)
 {
     memset(s_framebuf, 0, sizeof(s_framebuf));
 
-    draw_text(MENU_HEADER_X, MENU_HEADER_Y, "mode", 1, false);
+    char version_text[16];
+    snprintf(version_text, sizeof(version_text), "v%u.%u.%u",
+             s_firmware_version_major, s_firmware_version_minor,
+             s_firmware_version_patch);
+
+    draw_text(MENU_HEADER_X, MENU_TITLE_Y, "FHSS", 1, false);
+    draw_text(MENU_HEADER_X, MENU_VERSION_Y, version_text, 1, false);
     draw_hline(RULE_X, HEADER_RULE_Y, RULE_W, true);
 
     for (int i = 0; i < DISPLAY_UI_MENU_COUNT; i++) {
@@ -425,12 +432,13 @@ static void render_screen(void)
         if (is_selected) {
             fill_rounded_rect(MENU_ITEM_X, item_y, MENU_ITEM_W, MENU_ITEM_H, MENU_ITEM_RADIUS, true);
         }
-        draw_text_centered(MENU_ITEM_X, item_y, MENU_ITEM_W, MENU_ITEM_H,
-                            s_menu_labels[i], MENU_TEXT_SCALE, is_selected);
+        draw_rounded_rect_outline(MENU_ITEM_X, item_y, MENU_ITEM_W, MENU_ITEM_H,
+                                   MENU_ITEM_RADIUS, !is_selected);
+        draw_text(MENU_ITEM_X + 4, item_y + 6, s_menu_numbers[i], 1, is_selected);
+        draw_text_centered(MENU_TEXT_X, item_y, MENU_TEXT_W, MENU_ITEM_H,
+                           s_menu_labels[i], MENU_TEXT_SCALE, is_selected);
 
         if (is_hovered) {
-            /* selected(흰 배경)와 겹치면 테두리는 검은색으로, 아니면(검은
-             * 배경) 흰색으로 — 배경과 항상 대비되게. */
             draw_rounded_rect_outline(MENU_ITEM_X, item_y, MENU_ITEM_W, MENU_ITEM_H,
                                        MENU_ITEM_RADIUS, !is_selected);
         }
