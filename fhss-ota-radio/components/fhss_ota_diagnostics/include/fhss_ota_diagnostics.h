@@ -11,6 +11,11 @@ extern "C" {
 /* Monitor-friendly wire diagnostics.  These helpers never mutate packets and
  * intentionally use one log tag (OTA_DIAG) so a captured monitor log can be
  * filtered without losing the RF -> protocol timeline. */
+/* Returns true only for packets owned by ota_protocol. Audio and seed
+ * announce packets share the FHSS transport but must not be hex-dumped on
+ * the real-time voice path: synchronous UART logging can starve its queue. */
+bool fhss_ota_diag_should_log_packet(const uint8_t *packet, size_t length);
+
 void fhss_ota_diag_log_packet(
     const char *direction,
     const char *path,

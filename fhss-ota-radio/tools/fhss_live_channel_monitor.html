@@ -3,84 +3,134 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="icon" href="data:,">
   <title>FHSS Live Channel Monitor</title>
   <style>
-    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
-    body { margin: 0; background: #0f172a; color: #f8fafc; }
-    header { padding: 18px 28px; border-bottom: 1px solid #334155; display:flex; justify-content:space-between; align-items:center; }
-    h1 { margin:0; font-size:24px; } .sub { color:#94a3b8; font-size:13px; }
-    main { padding:22px 28px; max-width:1400px; margin:auto; }
-    .controls,.cards { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px; }
-    .panel,.card { background:#172033; border:1px solid #334155; border-radius:12px; padding:16px; }
-    button { border:0; border-radius:8px; padding:10px 16px; font-weight:700; cursor:pointer; color:#07111f; }
-    .tx button { background:#38bdf8; } .rx button { background:#fb7185; }
-    .status { margin-left:12px; color:#94a3b8; }
-    .value { font:700 38px ui-monospace,monospace; margin:7px 0; }
-    .tx .value { color:#38bdf8; } .rx .value { color:#fb7185; }
-    .match { text-align:center; font-size:22px; font-weight:800; padding:12px; border-radius:10px; margin-bottom:16px; }
-    .ok { background:#14532d; color:#86efac; } .bad { background:#7f1d1d; color:#fecaca; } .waiting { background:#334155; color:#cbd5e1; }
-    canvas { width:100%; height:440px; background:#0b1220; border-radius:12px; border:1px solid #334155; }
-    pre { max-height:150px; overflow:auto; color:#94a3b8; font-size:11px; white-space:pre-wrap; }
-    .legend span { margin-right:20px; } .dot { display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px; }
-    @media(max-width:800px){.controls,.cards{grid-template-columns:1fr}}
+    :root { color-scheme:dark; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; --bg:#0f172a;--panel:#172033;--plot:#0b1220;--border:#475569;--text:#f8fafc;--muted:#cbd5e1;--tx:#38bdf8;--rx:#fb7185;--sync:#4ade80;--desync:#fbbf24; }
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text)}
+    header{padding:18px 28px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:16px} h1,h2{margin:0} h1{font-size:clamp(20px,3vw,26px)} h2{font-size:16px;margin-bottom:10px}
+    .sub,.muted,.status{color:var(--muted);font-size:13px} main{padding:22px 28px 36px;max-width:1500px;margin:auto}
+    .controls,.device-cards,.metrics,.plots,.logs{display:grid;gap:14px;margin-bottom:16px}.controls,.device-cards,.logs{grid-template-columns:repeat(2,minmax(0,1fr))}.metrics{grid-template-columns:repeat(5,minmax(0,1fr))}.plots{grid-template-columns:2fr 1fr}
+    .panel,.card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:15px;min-width:0}.actions,.toolbar,.legend{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.toolbar{margin-bottom:16px}.legend{gap:18px;margin:8px 0 10px;color:var(--muted);font-size:13px}
+    button{border:2px solid transparent;border-radius:8px;padding:9px 14px;font-weight:750;cursor:pointer;color:#07111f;min-height:42px}button:focus-visible{outline:3px solid #fff;outline-offset:2px}button:disabled{opacity:.45;cursor:not-allowed}.tx-button{background:var(--tx)}.rx-button{background:var(--rx)}.secondary{background:#e2e8f0}.warning{background:var(--desync)}
+    .value{font:750 34px ui-monospace,SFMono-Regular,monospace;margin:5px 0}.tx-value{color:var(--tx)}.rx-value{color:var(--rx)}.metric-value{font:750 25px ui-monospace,SFMono-Regular,monospace;margin-top:7px}.parse-warning{color:var(--desync)}
+    .match{text-align:center;font-size:clamp(16px,2.4vw,22px);font-weight:800;padding:12px;border:2px solid transparent;border-radius:10px;margin-bottom:16px}.ok{background:#14532d;color:#bbf7d0;border-color:var(--sync)}.bad{background:#713f12;color:#fef3c7;border-color:var(--desync)}.waiting{background:#334155;color:#f1f5f9;border-color:#64748b}
+    .mark{display:inline-block;width:12px;height:12px;margin-right:6px;vertical-align:-1px}.dot{border-radius:50%}.square{border-radius:2px}canvas{display:block;width:100%;height:var(--height,420px);background:var(--plot);border-radius:10px;border:1px solid var(--border)}
+    pre{height:180px;overflow:auto;color:#dbeafe;font-size:11px;line-height:1.4;white-space:pre-wrap;overflow-wrap:anywhere;margin:0}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+    @media(max-width:1050px){.metrics{grid-template-columns:repeat(3,1fr)}.plots{grid-template-columns:1fr}}@media(max-width:720px){header{padding:14px 16px;align-items:flex-start}main{padding:16px}.controls,.device-cards,.logs{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}}@media(max-width:440px){.metrics{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
-<header><div><h1>FHSS Live Channel Monitor</h1><div class="sub">ESP32-S3 + CC1101 · 실시간 slot/channel 시각화</div></div><div id="clock"></div></header>
+<header><div><h1>FHSS Live Channel Monitor</h1><div class="sub">ESP32-S3 + CC1101 · 실제 slot/channel 로그 기반</div></div><div id="clock" aria-label="현재 시각"></div></header>
 <main>
-  <section class="controls">
-    <div class="panel tx"><button id="connectTx">TX 포트 연결</button><span id="txStatus" class="status">연결 안 됨</span></div>
-    <div class="panel rx"><button id="connectRx">RX 포트 연결</button><span id="rxStatus" class="status">연결 안 됨</span></div>
+  <section class="controls" aria-label="시리얼 포트 연결">
+    <div class="panel"><h2 style="color:var(--tx)">TX 장치</h2><div class="actions"><button id="connectTx" class="tx-button">TX 포트 연결</button><button id="disconnectTx" class="secondary" disabled>연결 해제</button><span id="txStatus" class="status">연결 안 됨</span></div></div>
+    <div class="panel"><h2 style="color:var(--rx)">RX 장치</h2><div class="actions"><button id="connectRx" class="rx-button">RX 포트 연결</button><button id="disconnectRx" class="secondary" disabled>연결 해제</button><span id="rxStatus" class="status">연결 안 됨</span></div></div>
   </section>
-  <section class="cards">
-    <div class="card tx"><div>TX 현재 채널</div><div id="txChannel" class="value">--</div><div id="txSlot" class="sub">slot --</div></div>
-    <div class="card rx"><div>RX 현재 채널</div><div id="rxChannel" class="value">--</div><div id="rxSlot" class="sub">slot --</div></div>
+  <div class="toolbar"><button id="mockToggle" class="warning">Demo 시작</button><button id="exportCsv" class="secondary">CSV 내보내기</button><button id="clearData" class="secondary">데이터 초기화</button><span class="status">Demo는 약 10% slot에 의도적 RX offset을 생성합니다.</span></div>
+  <section class="device-cards">
+    <div class="card"><div>TX 현재 채널</div><div id="txChannel" class="value tx-value">--</div><div id="txSlot" class="muted">slot -- · hop -- ms</div></div>
+    <div class="card"><div>RX 현재 채널</div><div id="rxChannel" class="value rx-value">--</div><div id="rxSlot" class="muted">slot -- · hop -- ms</div></div>
   </section>
-  <div id="match" class="match waiting">두 포트를 연결하면 동기 상태를 비교합니다</div>
-  <div class="legend"><span><i class="dot" style="background:#38bdf8"></i>TX</span><span><i class="dot" style="background:#fb7185"></i>RX</span></div>
-  <canvas id="chart" width="1300" height="440"></canvas>
-  <section class="controls" style="margin-top:16px"><pre id="txLog" class="panel"></pre><pre id="rxLog" class="panel"></pre></section>
+  <div id="match" class="match waiting" role="status" aria-live="polite">동일 slot의 TX/RX 로그를 기다립니다</div>
+  <section class="metrics" aria-label="FHSS 핵심 지표">
+    <div class="card"><div class="muted">동기화 성공률</div><div id="syncRate" class="metric-value">--</div><div id="pairedSlots" class="muted">0 paired slots</div></div>
+    <div class="card"><div class="muted">현재 연속 동기</div><div id="syncStreak" class="metric-value">0 slots</div><div class="muted">연속 일치한 paired slot</div></div>
+    <div class="card"><div class="muted">마지막 Desync</div><div id="lastDesync" class="metric-value">없음</div><div id="desyncCount" class="muted">0회</div></div>
+    <div class="card"><div class="muted">동일 slot 로그 도착차</div><div id="arrivalDelta" class="metric-value">--</div><div class="muted">RF 지연이 아닌 PC 관측값</div></div>
+    <div class="card"><div class="muted">파싱 실패</div><div id="parseFailures" class="metric-value">0</div><div id="parseDetail" class="muted">TX 0 · RX 0</div></div>
+  </section>
+  <section class="panel"><h2>채널 호핑 궤적</h2><div class="legend"><span><i class="mark dot" style="background:var(--tx)"></i>TX</span><span><i class="mark dot" style="background:var(--rx)"></i>RX</span><span><i class="mark square" style="background:var(--sync)"></i>동일 channel</span><span><i class="mark square" style="background:var(--desync)"></i>불일치 X</span></div><canvas id="channelChart" style="--height:430px" role="img" aria-label="TX와 RX의 slot별 CC1101 채널 그래프"></canvas></section>
+  <section class="plots"><div class="panel"><h2>TX−RX 채널 offset</h2><canvas id="offsetChart" style="--height:260px" role="img" aria-label="동일 slot의 TX와 RX 채널 차이"></canvas></div><div class="panel"><h2>채널 사용 빈도</h2><canvas id="histogram" style="--height:260px" role="img" aria-label="채널별 사용 빈도"></canvas></div></section>
+  <section class="logs"><div class="panel"><h2>TX 로그</h2><pre id="txLog"></pre></div><div class="panel"><h2>RX 로그</h2><pre id="rxLog"></pre></div></section>
+  <div id="announcer" class="sr-only" aria-live="assertive"></div>
 </main>
 <script>
-const devices = { tx:{color:'#38bdf8',points:[],slot:null,channel:null}, rx:{color:'#fb7185',points:[],slot:null,channel:null} };
-const pattern = /(?:channel selected:|SYNC RX:.*)\s*(?:state=\S+\s+)?slot=(\d+)\s+channel=(\d+)/;
-const canvas=document.getElementById('chart'), ctx=canvas.getContext('2d');
+'use strict';
+const COLORS={tx:'#38bdf8',rx:'#fb7185',sync:'#4ade80',desync:'#fbbf24',grid:'#334155',text:'#cbd5e1',zero:'#94a3b8'};
+const MAX_POINTS=60,BAUD_RATE=115200,SERIAL_BUFFER_SIZE=1048576,ANIMATION_MS=220,LOG_FLUSH_MS=100,LINE_BATCH_SIZE=200,MAX_PENDING_LINES=4000;
+// FHSS_MON is deliberately one compact line per hop so monitoring does not
+// add enough UART traffic to disturb the real-time audio queue. Legacy
+// patterns remain supported for previously flashed firmware.
+const patterns=[/FHSS_MON:\s*(?:TX|RX)\s+slot=(\d+)\s+channel=(\d+)/i,/channel selected:\s*slot=(\d+)\s+channel=(\d+)/i,/SYNC RX:.*?\bslot=(\d+)\s+channel=(\d+)/i];
+const devices={tx:{port:null,reader:null,connected:false,points:[],lastAt:null,hopMs:null,parseFailures:0,logLines:[],logTimer:null,pendingLines:[],lineTimer:null,droppedLines:0,recoveries:0},rx:{port:null,reader:null,connected:false,points:[],lastAt:null,hopMs:null,parseFailures:0,logLines:[],logTimer:null,pendingLines:[],lineTimer:null,droppedLines:0,recoveries:0}};
+// Keep chart data bounded to 60 slots, but retain lightweight paired summaries so
+// the success rate and CSV represent the complete monitoring session.
+const slots=new Map(),sessionPairs=[];let mockTimer=null,mockSlot=0,dirty=true,animationUntil=0;
+const charts={channel:document.getElementById('channelChart'),offset:document.getElementById('offsetChart'),hist:document.getElementById('histogram')};
 
-function update(role, line) {
-  const m=line.match(pattern); if(!m) return;
-  const d=devices[role]; d.slot=Number(m[1]); d.channel=Number(m[2]);
-  d.points.push({slot:d.slot,channel:d.channel,time:performance.now()});
-  if(d.points.length>60)d.points.shift();
-  document.getElementById(role+'Channel').textContent='CH '+d.channel;
-  document.getElementById(role+'Slot').textContent='slot '+d.slot;
-  updateMatch(); draw();
+function parseLine(line){for(const pattern of patterns){const m=line.match(pattern);if(m)return{slot:Number(m[1]),channel:Number(m[2])};}return null;}
+function looksLikeFhssLine(line){return /(?:channel selected|SYNC RX|\bslot=|\bchannel=)/i.test(line);}
+function flushLog(role){const d=devices[role];d.logTimer=null;if(!d.logLines.length)return;const log=document.getElementById(role+'Log'),batch=d.logLines.splice(0).reverse().join('\n')+'\n';log.textContent=(batch+log.textContent).slice(0,8000);}
+function appendLog(role,line,parsed,parseCandidate){const d=devices[role],prefix=!parsed&&parseCandidate?'[UNPARSED] ':'';d.logLines.push(prefix+line);if(d.logLines.length>300)d.logLines.splice(0,d.logLines.length-300);if(d.logTimer===null)d.logTimer=setTimeout(()=>flushLog(role),LOG_FLUSH_MS);}
+function processPendingLines(role){const d=devices[role];d.lineTimer=null;const batch=d.pendingLines.splice(0,LINE_BATCH_SIZE);for(const line of batch)ingest(role,line);if(d.pendingLines.length)d.lineTimer=setTimeout(()=>processPendingLines(role),0);}
+function queueLines(role,lines){const d=devices[role];d.pendingLines.push(...lines);if(d.pendingLines.length>MAX_PENDING_LINES){const dropped=d.pendingLines.length-MAX_PENDING_LINES;d.pendingLines.splice(0,dropped);d.droppedLines+=dropped;d.logLines.push(`[DROPPED] ${dropped} display lines (serial capture continued)`);}if(d.lineTimer===null)d.lineTimer=setTimeout(()=>processPendingLines(role),0);}
+function ingest(role,line,source='serial'){
+  if(!line.trim())return;const d=devices[role],parsed=parseLine(line),parseCandidate=looksLikeFhssLine(line);appendLog(role,line,!!parsed,parseCandidate);if(!parsed){if(parseCandidate){d.parseFailures++;updateMetrics();}return;}
+  const now=performance.now();if(d.lastAt!==null){const interval=now-d.lastAt;d.hopMs=d.hopMs===null?interval:d.hopMs*.75+interval*.25;}d.lastAt=now;
+  const point={slot:parsed.slot,channel:parsed.channel,at:now,wall:new Date().toISOString(),source},old=d.points.findIndex(p=>p.slot===point.slot);if(old>=0)d.points[old]=point;else d.points.push(point);d.points.sort((a,b)=>a.slot-b.slot);if(d.points.length>MAX_POINTS)d.points.splice(0,d.points.length-MAX_POINTS);
+  const pair=slots.get(point.slot)||{slot:point.slot,evaluated:false};pair[role]=point;if(pair.tx&&pair.rx&&!pair.evaluated){pair.evaluated=true;pair.match=pair.tx.channel===pair.rx.channel;pair.evaluatedWall=new Date().toISOString();sessionPairs.push({slot:pair.slot,tx:pair.tx,rx:pair.rx,match:pair.match,evaluatedWall:pair.evaluatedWall});}slots.set(point.slot,pair);trimSlots();
+  document.getElementById(role+'Channel').textContent='CH '+point.channel;document.getElementById(role+'Slot').textContent=`slot ${point.slot} · hop ${d.hopMs===null?'--':d.hopMs.toFixed(1)} ms`;animationUntil=now+ANIMATION_MS;dirty=true;updateMetrics();
 }
-function updateMatch(){
-  const a=devices.tx,b=devices.rx,el=document.getElementById('match');
-  if(a.slot===null||b.slot===null){el.className='match waiting';return;}
-  const same=a.slot===b.slot&&a.channel===b.channel;
-  el.className='match '+(same?'ok':'bad');
-  el.textContent=same?'SYNCHRONIZED — 같은 slot / channel':'DIFFERENT — TX '+a.slot+'/'+a.channel+' · RX '+b.slot+'/'+b.channel;
+function trimSlots(){const keys=[...slots.keys()].sort((a,b)=>a-b);while(keys.length>MAX_POINTS)slots.delete(keys.shift());}
+function paired(){return[...slots.values()].filter(p=>p.tx&&p.rx&&p.evaluated).sort((a,b)=>a.slot-b.slot);}
+function updateMetrics(){
+  const pairs=sessionPairs,matches=pairs.filter(p=>p.match).length,rate=pairs.length?matches/pairs.length*100:null;let streak=0,expected=null;for(let i=pairs.length-1;i>=0;i--){const p=pairs[i];if(!p.match||(expected!==null&&p.slot!==expected-1))break;streak++;expected=p.slot;}const bad=pairs.filter(p=>!p.match),lastBad=bad.at(-1),lastPair=pairs.at(-1);
+  document.getElementById('syncRate').textContent=rate===null?'--':rate.toFixed(1)+'%';document.getElementById('pairedSlots').textContent=`${pairs.length} paired slots (session)`;document.getElementById('syncStreak').textContent=`${streak} slots`;document.getElementById('lastDesync').textContent=lastBad?`${new Date(lastBad.evaluatedWall).toLocaleTimeString()} · slot ${lastBad.slot}`:'없음';document.getElementById('desyncCount').textContent=`${bad.length}회`;document.getElementById('arrivalDelta').textContent=lastPair?Math.abs(lastPair.tx.at-lastPair.rx.at).toFixed(1)+' ms':'--';
+  const failures=devices.tx.parseFailures+devices.rx.parseFailures;document.getElementById('parseFailures').textContent=String(failures);document.getElementById('parseDetail').textContent=`TX ${devices.tx.parseFailures} · RX ${devices.rx.parseFailures}`;document.getElementById('parseFailures').className='metric-value'+(failures?' parse-warning':'');
+  const el=document.getElementById('match');if(!lastPair){el.className='match waiting';el.textContent='동일 slot의 TX/RX 로그를 기다립니다';}else if(lastPair.match){el.className='match ok';el.textContent=`SYNCHRONIZED — slot ${lastPair.slot} / CH ${lastPair.tx.channel}`;}else{el.className='match bad';el.textContent=`DESYNC — slot ${lastPair.slot}: TX CH ${lastPair.tx.channel} / RX CH ${lastPair.rx.channel}`;}
 }
-function draw(){
-  const w=canvas.width,h=canvas.height,L=58,R=22,T=20,B=42; ctx.clearRect(0,0,w,h);ctx.fillStyle='#0b1220';ctx.fillRect(0,0,w,h);
-  ctx.font='12px system-ui';ctx.strokeStyle='#334155';ctx.fillStyle='#94a3b8';ctx.lineWidth=1;
-  for(let c=0;c<=100;c+=20){const y=T+(100-c)/100*(h-T-B);ctx.beginPath();ctx.moveTo(L,y);ctx.lineTo(w-R,y);ctx.stroke();ctx.fillText(c,22,y+4)}
-  const all=[...devices.tx.points,...devices.rx.points], maxSlot=all.length?Math.max(...all.map(p=>p.slot)):60, minSlot=Math.max(0,maxSlot-59), range=Math.max(1,maxSlot-minSlot);
-  for(let s=Math.ceil(minSlot/10)*10;s<=maxSlot;s+=10){const x=L+(s-minSlot)/range*(w-L-R);ctx.beginPath();ctx.moveTo(x,T);ctx.lineTo(x,h-B);ctx.stroke();ctx.fillText(s,x-8,h-17)}
-  ctx.fillText('CC1101 CHANNR',8,13);ctx.fillText('slot',w-45,h-17);
-  for(const role of ['tx','rx']){const d=devices[role], pts=d.points.filter(p=>p.slot>=minSlot);ctx.strokeStyle=d.color;ctx.fillStyle=d.color;ctx.lineWidth=3;ctx.beginPath();pts.forEach((p,i)=>{const x=L+(p.slot-minSlot)/range*(w-L-R),y=T+(100-p.channel)/100*(h-T-B);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke();pts.forEach(p=>{const x=L+(p.slot-minSlot)/range*(w-L-R),y=T+(100-p.channel)/100*(h-T-B);ctx.beginPath();ctx.arc(x,y,4,0,Math.PI*2);ctx.fill()})}
+function setConnectionUi(role,on,message){devices[role].connected=on;const suffix=role==='tx'?'Tx':'Rx';document.getElementById('connect'+suffix).disabled=on;document.getElementById('disconnect'+suffix).disabled=!on;document.getElementById(role+'Status').textContent=message;}
+async function connect(role){if(!('serial'in navigator)){alert('Chrome 또는 Edge에서 localhost로 여세요.');return;}if(devices[role].connected)return;const port=await navigator.serial.requestPort();await port.open({baudRate:BAUD_RATE,bufferSize:SERIAL_BUFFER_SIZE});devices[role].port=port;setConnectionUi(role,true,`${BAUD_RATE} baud · 1MB direct reader`);readLoop(role).catch(e=>handleReadEnd(role,e));}
+function isRecoverableSerialError(error){return['BufferOverrunError','BreakError','FramingError','ParityError'].includes(error?.name);}
+async function readLoop(role){
+  const d=devices[role],decoder=new TextDecoder();let buffer='';
+  while(d.connected&&d.port){
+    if(!d.port.readable)throw new Error('시리얼 장치가 분리되었습니다');
+    let recoverableError=null,streamEnded=false;
+    try{
+      d.reader=d.port.readable.getReader();
+      while(d.connected){
+        const{value,done}=await d.reader.read();if(done){streamEnded=true;break;}
+        buffer+=decoder.decode(value,{stream:true});const lines=buffer.split(/\r?\n/);buffer=lines.pop()||'';if(lines.length)queueLines(role,lines);
+        if(d.recoveries)document.getElementById(role+'Status').textContent=`${BAUD_RATE} baud · recovered ${d.recoveries} overrun`;
+      }
+    }catch(error){
+      if(!isRecoverableSerialError(error))throw error;
+      recoverableError=error;d.recoveries++;
+      document.getElementById(role+'Status').textContent=`버퍼 오버런 자동 복구 중 (${d.recoveries})`;
+      console.warn(`${role} recoverable serial error`,error);
+    }finally{
+      try{d.reader?.releaseLock();}catch{}d.reader=null;
+    }
+    if(!d.connected)break;
+    if(recoverableError){await new Promise(resolve=>setTimeout(resolve,20));continue;}
+    if(streamEnded)throw new Error('시리얼 스트림 종료');
+    if(!d.port.readable)throw new Error('시리얼 스트림 종료');
+    await new Promise(resolve=>setTimeout(resolve,10));
+  }
+  if(buffer.trim())queueLines(role,[buffer]);
 }
-async function connect(role){
-  if(!('serial' in navigator)){alert('Chrome 또는 Edge에서 localhost로 여세요. Web Serial API가 필요합니다.');return;}
-  const port=await navigator.serial.requestPort(); await port.open({baudRate:115200});
-  document.getElementById(role+'Status').textContent='115200 baud 연결됨';
-  const decoder=new TextDecoderStream(); port.readable.pipeTo(decoder.writable); const reader=decoder.readable.getReader(); let buf='';
-  try{while(true){const {value,done}=await reader.read();if(done)break;buf+=value;const lines=buf.split(/\r?\n/);buf=lines.pop();for(const line of lines){update(role,line);const log=document.getElementById(role+'Log');log.textContent=(line+'\n'+log.textContent).slice(0,5000)}}}finally{reader.releaseLock()}
-}
-document.getElementById('connectTx').onclick=()=>connect('tx').catch(e=>alert(e));
-document.getElementById('connectRx').onclick=()=>connect('rx').catch(e=>alert(e));
-setInterval(()=>document.getElementById('clock').textContent=new Date().toLocaleTimeString(),1000);draw();
+async function disconnect(role,message='사용자가 연결 해제'){const d=devices[role];d.connected=false;try{if(d.reader)await d.reader.cancel();}catch{}try{if(d.port)await d.port.close();}catch{}if(d.lineTimer!==null){clearTimeout(d.lineTimer);d.lineTimer=null;}if(d.pendingLines.length)processPendingLines(role);if(d.logTimer!==null){clearTimeout(d.logTimer);d.logTimer=null;}flushLog(role);d.reader=null;d.port=null;setConnectionUi(role,false,message);}
+async function handleReadEnd(role,error){await disconnect(role,'연결 끊김 — 다시 연결하세요');document.getElementById('announcer').textContent=`${role.toUpperCase()} 연결이 끊겼습니다.`;console.warn(role,error);}
+if('serial'in navigator)navigator.serial.addEventListener('disconnect',event=>{const lostPort=event.port||event.target;for(const role of['tx','rx'])if(devices[role].port===lostPort)handleReadEnd(role,new Error('USB disconnect'));});
+
+function startMock(){if(mockTimer)return;mockSlot=0;document.getElementById('mockToggle').textContent='Demo 중지';const tick=()=>{const slot=mockSlot++,base=((slot*37+11)%100)+1,rx=slot%10===7?((base+11)%100)+1:base;ingest('tx',`I (demo) channel selected: slot=${slot} channel=${base}`,'mock');setTimeout(()=>ingest('rx',`I (demo) SYNC RX: state=TRACKING slot=${slot} channel=${rx}`,'mock'),55+Math.random()*55);};tick();mockTimer=setInterval(tick,300);}
+function stopMock(){if(mockTimer){clearInterval(mockTimer);mockTimer=null;}document.getElementById('mockToggle').textContent='Demo 시작';}
+function clearData(){stopMock();slots.clear();sessionPairs.length=0;for(const role of['tx','rx']){const d=devices[role];d.points=[];d.lastAt=null;d.hopMs=null;d.parseFailures=0;d.droppedLines=0;d.recoveries=0;d.pendingLines=[];d.logLines=[];if(d.lineTimer!==null){clearTimeout(d.lineTimer);d.lineTimer=null;}if(d.logTimer!==null){clearTimeout(d.logTimer);d.logTimer=null;}document.getElementById(role+'Channel').textContent='--';document.getElementById(role+'Slot').textContent='slot -- · hop -- ms';document.getElementById(role+'Log').textContent='';}dirty=true;updateMetrics();}
+function exportCsv(){const rows=[['slot','tx_channel','rx_channel','synchronized','tx_time_iso','rx_time_iso','serial_arrival_delta_ms']];for(const p of sessionPairs)rows.push([p.slot,p.tx.channel,p.rx.channel,p.match,p.tx.wall,p.rx.wall,Math.abs(p.tx.at-p.rx.at).toFixed(3)]);const csv=rows.map(r=>r.map(v=>'"'+String(v).replaceAll('"','""')+'"').join(',')).join('\r\n'),blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`fhss-monitor-${new Date().toISOString().replaceAll(':','-')}.csv`;a.click();URL.revokeObjectURL(url);}
+
+function fit(c,height){const dpr=Math.min(devicePixelRatio||1,2),w=Math.round(Math.max(320,c.clientWidth)*dpr),h=Math.round(height*dpr);if(c.width!==w||c.height!==h){c.width=w;c.height=h;return true;}return false;}
+function bounds(){const p=[...devices.tx.points,...devices.rx.points],max=p.length?Math.max(...p.map(v=>v.slot)):59;return{min:Math.max(0,max-59),max:Math.max(59,max)};}
+function point(c,slot,channel,b){const L=52,R=18,T=18,B=36;return{x:L+(slot-b.min)/Math.max(1,b.max-b.min)*(c.width-L-R),y:T+(100-channel)/100*(c.height-T-B)};}
+function grid(ctx,c,b,yMin=0,yMax=100,yStep=20){ctx.clearRect(0,0,c.width,c.height);ctx.fillStyle='#0b1220';ctx.fillRect(0,0,c.width,c.height);ctx.font=`${Math.max(11,c.width/115)}px system-ui`;ctx.strokeStyle=COLORS.grid;ctx.fillStyle=COLORS.text;ctx.lineWidth=1;const L=52,R=18,T=18,B=36;for(let y=yMin;y<=yMax;y+=yStep){const py=T+(yMax-y)/(yMax-yMin)*(c.height-T-B);ctx.beginPath();ctx.moveTo(L,py);ctx.lineTo(c.width-R,py);ctx.stroke();ctx.fillText(String(y),8,py+4);}for(let s=Math.ceil(b.min/10)*10;s<=b.max;s+=10){const px=L+(s-b.min)/Math.max(1,b.max-b.min)*(c.width-L-R);ctx.beginPath();ctx.moveTo(px,T);ctx.lineTo(px,c.height-B);ctx.stroke();ctx.fillText(String(s),px-7,c.height-12);}}
+function drawChannel(now){const c=charts.channel;fit(c,430);const ctx=c.getContext('2d'),b=bounds();grid(ctx,c,b);for(const role of['tx','rx']){const pts=devices[role].points.filter(p=>p.slot>=b.min);ctx.strokeStyle=COLORS[role];ctx.fillStyle=COLORS[role];ctx.lineWidth=3;ctx.beginPath();pts.forEach((p,i)=>{let q=point(c,p.slot,p.channel,b);if(i===pts.length-1&&i>0&&now<p.at+ANIMATION_MS&&!matchMedia('(prefers-reduced-motion:reduce)').matches){const prev=point(c,pts[i-1].slot,pts[i-1].channel,b),t=Math.min(1,(now-p.at)/ANIMATION_MS),e=1-Math.pow(1-t,3);q={x:prev.x+(q.x-prev.x)*e,y:prev.y+(q.y-prev.y)*e};}i?ctx.lineTo(q.x,q.y):ctx.moveTo(q.x,q.y);});ctx.stroke();for(const p of pts){const q=point(c,p.slot,p.channel,b);ctx.beginPath();ctx.arc(q.x,q.y,4,0,Math.PI*2);ctx.fill();}}
+  for(const p of paired().filter(p=>p.slot>=b.min)){const a=point(c,p.slot,p.tx.channel,b),r=point(c,p.slot,p.rx.channel,b);if(p.match){ctx.strokeStyle=COLORS.sync;ctx.lineWidth=3;ctx.beginPath();ctx.arc(a.x,a.y,8,0,Math.PI*2);ctx.stroke();}else{ctx.strokeStyle=COLORS.desync;ctx.lineWidth=4;for(const q of[a,r]){ctx.beginPath();ctx.moveTo(q.x-8,q.y-8);ctx.lineTo(q.x+8,q.y+8);ctx.moveTo(q.x+8,q.y-8);ctx.lineTo(q.x-8,q.y+8);ctx.stroke();}}}}
+function drawOffset(){const c=charts.offset;fit(c,260);const ctx=c.getContext('2d'),b=bounds(),values=paired().filter(p=>p.slot>=b.min),limit=Math.max(10,...values.map(p=>Math.abs(p.tx.channel-p.rx.channel)));grid(ctx,c,b,-limit,limit,limit);const L=52,R=18,T=18,B=36,toY=v=>T+(limit-v)/(2*limit)*(c.height-T-B);ctx.strokeStyle=COLORS.zero;ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(L,toY(0));ctx.lineTo(c.width-R,toY(0));ctx.stroke();for(const p of values){const x=L+(p.slot-b.min)/Math.max(1,b.max-b.min)*(c.width-L-R),v=p.tx.channel-p.rx.channel;ctx.fillStyle=v===0?COLORS.sync:COLORS.desync;ctx.beginPath();ctx.arc(x,toY(v),v===0?4:6,0,Math.PI*2);ctx.fill();}}
+function drawHistogram(){const c=charts.hist;fit(c,260);const ctx=c.getContext('2d'),counts={tx:new Array(101).fill(0),rx:new Array(101).fill(0)};for(const role of['tx','rx'])for(const p of devices[role].points)if(p.channel>=0&&p.channel<=100)counts[role][p.channel]++;const max=Math.max(1,...counts.tx,...counts.rx),L=38,R=12,T=18,B=32,w=(c.width-L-R)/101;ctx.clearRect(0,0,c.width,c.height);ctx.fillStyle='#0b1220';ctx.fillRect(0,0,c.width,c.height);ctx.strokeStyle=COLORS.grid;ctx.fillStyle=COLORS.text;ctx.font=`${Math.max(10,c.width/80)}px system-ui`;for(let i=0;i<=4;i++){const y=T+i*(c.height-T-B)/4;ctx.beginPath();ctx.moveTo(L,y);ctx.lineTo(c.width-R,y);ctx.stroke();ctx.fillText(String(Math.round(max*(4-i)/4)),5,y+4);}for(let ch=0;ch<=100;ch++){const x=L+ch*w,txH=counts.tx[ch]/max*(c.height-T-B),rxH=counts.rx[ch]/max*(c.height-T-B);ctx.fillStyle=COLORS.tx;ctx.fillRect(x,c.height-B-txH,Math.max(1,w*.42),txH);ctx.fillStyle=COLORS.rx;ctx.fillRect(x+w*.45,c.height-B-rxH,Math.max(1,w*.42),rxH);}ctx.fillStyle=COLORS.text;for(const ch of[0,25,50,75,100])ctx.fillText(String(ch),L+ch*w-5,c.height-9);}
+function render(now){const resized=fit(charts.channel,430)|fit(charts.offset,260)|fit(charts.hist,260);if(dirty||resized||now<animationUntil){drawChannel(now);drawOffset();drawHistogram();dirty=false;}requestAnimationFrame(render);}
+
+document.getElementById('connectTx').onclick=()=>connect('tx').catch(e=>alert(e.message));document.getElementById('connectRx').onclick=()=>connect('rx').catch(e=>alert(e.message));document.getElementById('disconnectTx').onclick=()=>disconnect('tx');document.getElementById('disconnectRx').onclick=()=>disconnect('rx');document.getElementById('mockToggle').onclick=()=>mockTimer?stopMock():startMock();document.getElementById('exportCsv').onclick=exportCsv;document.getElementById('clearData').onclick=clearData;setInterval(()=>document.getElementById('clock').textContent=new Date().toLocaleTimeString(),1000);addEventListener('resize',()=>dirty=true);updateMetrics();requestAnimationFrame(render);
 </script>
 </body>
 </html>

@@ -24,6 +24,19 @@ static const char *packet_type_name(ota_packet_type_t type)
     }
 }
 
+static bool is_known_ota_type(ota_packet_type_t type)
+{
+    return type >= OTA_PKT_START && type <= OTA_PKT_FHSS_SYNC;
+}
+
+bool fhss_ota_diag_should_log_packet(const uint8_t *packet, size_t length)
+{
+    ota_packet_type_t type = 0;
+    return packet != NULL &&
+        ota_protocol_peek_type(packet, length, &type) &&
+        is_known_ota_type(type);
+}
+
 void fhss_ota_diag_log_packet(
     const char *direction,
     const char *path,
@@ -34,6 +47,12 @@ void fhss_ota_diag_log_packet(
     ota_packet_type_t type = 0;
     const bool have_type = packet != NULL &&
         ota_protocol_peek_type(packet, length, &type);
+    if (!have_type || !is_known_ota_type(type)) {
+        /* FHSS audio and SEED_ANNOUNCE packets are intentionally silent.
+         * Dumping every 40 ms voice packet at 115200 baud filled the TX
+         * queue and caused audible frame loss. */
+        return;
+    }
     ESP_LOGI(TAG, "%s path=%s ch=%u type=%s(%u) bytes=%u",
              direction, path, channel,
              have_type ? packet_type_name(type) : "INVALID",

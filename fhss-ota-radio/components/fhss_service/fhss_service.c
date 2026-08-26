@@ -260,7 +260,10 @@ static bool select_channel(fhss_service_t *service, uint32_t slot)
         return false;
     }
     service->current_channel = channel;
-    ESP_LOGI(TAG, "channel selected: slot=%lu channel=%u",
+    /* One compact line per hop is enough for the browser monitor. Keep this
+     * independent of packet dumps so observing FHSS does not disturb audio. */
+    ESP_LOGI("FHSS_MON", "%s slot=%lu channel=%u",
+             service->config.role == FHSS_SERVICE_ROLE_TX ? "TX" : "RX",
              (unsigned long)slot, channel);
     return true;
 }
@@ -328,14 +331,20 @@ static void drain_tx_data_until(fhss_service_t *service, int64_t deadline_us)
             return;
         }
         service->tx_in_flight = true;
-        fhss_ota_diag_log_packet(
-            "TX", "FHSS_DATA", service->current_channel,
+        const bool log_packet = fhss_ota_diag_should_log_packet(
             item.data, item.length);
+        if (log_packet) {
+            fhss_ota_diag_log_packet(
+                "TX", "FHSS_DATA", service->current_channel,
+                item.data, item.length);
+        }
         const rf_transport_status_t send_status = rf_transport_send_packet(
             &service->radio, item.data, item.length);
-        fhss_ota_diag_log_tx_result(
-            "FHSS_DATA", service->current_channel,
-            (int)send_status, item.length);
+        if (log_packet) {
+            fhss_ota_diag_log_tx_result(
+                "FHSS_DATA", service->current_channel,
+                (int)send_status, item.length);
+        }
         if (send_status != RF_TRANSPORT_STATUS_OK) {
             service->tx_in_flight = false;
             ESP_LOGW(TAG, "audio/data TX failed: length=%u", item.length);
@@ -469,12 +478,16 @@ static receive_result_t receive_one(
             &packet) != RF_TRANSPORT_STATUS_OK) {
         return RECEIVE_RESULT_RADIO_ERROR;
     }
-    fhss_ota_diag_log_rx_result(
-        "FHSS", service->current_channel, 0, packet.crc_ok,
-        packet.rssi_dbm, packet.lqi, packet.length);
-    fhss_ota_diag_log_packet(
-        "RX", "FHSS", service->current_channel,
+    const bool log_packet = fhss_ota_diag_should_log_packet(
         packet.payload, packet.length);
+    if (log_packet) {
+        fhss_ota_diag_log_rx_result(
+            "FHSS", service->current_channel, 0, packet.crc_ok,
+            packet.rssi_dbm, packet.lqi, packet.length);
+        fhss_ota_diag_log_packet(
+            "RX", "FHSS", service->current_channel,
+            packet.payload, packet.length);
+    }
     if (!packet.crc_ok) {
         return RECEIVE_RESULT_CRC_FAIL;
     }
