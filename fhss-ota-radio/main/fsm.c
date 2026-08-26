@@ -240,6 +240,9 @@ static void ota_radio_task(void *arg)
         } else if (status == FHSS_AUDIO_ADAPTER_OTA_RX_CRC_ERROR) {
             consecutive_timeouts = 0U;
             ESP_LOGW(TAG, "OTA RF packet dropped: CC1101 CRC failed");
+        } else if (status == FHSS_AUDIO_ADAPTER_OTA_RX_RECOVERED) {
+            consecutive_timeouts = 0U;
+            ESP_LOGW(TAG, "OTA RF receive recovered; session preserved");
         } else if (status == FHSS_AUDIO_ADAPTER_OTA_RX_ERROR &&
                    !s_ota_radio_should_stop) {
             ESP_LOGE(TAG, "OTA RF receive failed");
@@ -427,6 +430,8 @@ static const fsm_transition_t s_transitions[] = {
 
     { FSM_STATE_MENU_OTA,      FSM_EVENT_MENU_SELECT_COMM, FSM_STATE_MENU_COMM },
     { FSM_STATE_MENU_OTA,      FSM_EVENT_MENU_SELECT_IDLE, FSM_STATE_MENU_IDLE },
+    /* Legacy .148 GUI: fixed channel-0 START without FHSS_CONFIG/ACTIVATE. */
+    { FSM_STATE_MENU_OTA,      FSM_EVENT_OTA_START,        FSM_STATE_OTA_RECEIVING },
     { FSM_STATE_MENU_OTA,      FSM_EVENT_FHSS_CONFIG_READY, FSM_STATE_OTA_FHSS_CONFIGURED },
 
     { FSM_STATE_OTA_FHSS_CONFIGURED, FSM_EVENT_FHSS_CONFIG_READY, FSM_STATE_OTA_FHSS_CONFIGURED },

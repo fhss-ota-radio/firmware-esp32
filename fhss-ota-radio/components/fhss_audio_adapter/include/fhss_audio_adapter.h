@@ -39,6 +39,8 @@ typedef enum {
     FHSS_AUDIO_ADAPTER_OTA_RX_OK = 0,
     FHSS_AUDIO_ADAPTER_OTA_RX_TIMEOUT,
     FHSS_AUDIO_ADAPTER_OTA_RX_CRC_ERROR,
+    /* A fixed-channel transport fault was recovered and RX was re-armed. */
+    FHSS_AUDIO_ADAPTER_OTA_RX_RECOVERED,
     FHSS_AUDIO_ADAPTER_OTA_RX_ERROR,
 } fhss_audio_adapter_ota_rx_status_t;
 

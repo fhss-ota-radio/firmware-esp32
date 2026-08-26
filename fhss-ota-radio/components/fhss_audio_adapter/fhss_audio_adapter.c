@@ -652,6 +652,30 @@ fhss_audio_adapter_ota_rx_status_t fhss_audio_adapter_ota_receive(
         fhss_ota_diag_log_rx_result(
             "FIXED", OTA_FIXED_CHANNEL, (int)status, received.crc_ok,
             received.rssi_dbm, received.lqi, received.length);
+        /* The legacy Gateway GUI sends START/DATA directly on channel 0.  A
+         * transient SPI fault must not discard an otherwise valid OTA writer.
+         * Reapply the bootstrap profile and re-arm RX; report a fatal error
+         * only if this bounded recovery cannot restore the radio. */
+        if (status == RF_TRANSPORT_STATUS_SPI_ERROR &&
+            xSemaphoreTake(s_adapter.radio_mutex, portMAX_DELAY) == pdTRUE) {
+            rf_transport_status_t recovery_status =
+                rf_transport_recover_433mhz(&s_adapter.service.radio);
+            if (recovery_status == RF_TRANSPORT_STATUS_OK) {
+                recovery_status = rf_transport_set_channel(
+                    &s_adapter.service.radio, OTA_FIXED_CHANNEL);
+            }
+            if (recovery_status == RF_TRANSPORT_STATUS_OK) {
+                recovery_status = rf_transport_start_receive(
+                    &s_adapter.service.radio);
+            }
+            xSemaphoreGive(s_adapter.radio_mutex);
+            if (recovery_status == RF_TRANSPORT_STATUS_OK) {
+                ESP_LOGW(TAG, "fixed OTA RX recovered after SPI error");
+                return FHSS_AUDIO_ADAPTER_OTA_RX_RECOVERED;
+            }
+            ESP_LOGE(TAG, "fixed OTA RX recovery failed: status=%d",
+                     (int)recovery_status);
+        }
         return FHSS_AUDIO_ADAPTER_OTA_RX_ERROR;
     }
     fhss_ota_diag_log_rx_result(
