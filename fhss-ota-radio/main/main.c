@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -11,6 +12,7 @@
 #include "freertos/task.h"
 
 #include "fsm.h"
+#include "firmware_version.h"
 #include "rf_transport.h"
 
 /* TEMP(CC1101 단독 진단): 통합 초기화에서 OLED/I2C, 오디오, FSM이 함께
@@ -41,7 +43,8 @@ static void ota_first_boot_validation_task(void *arg)
         return;
     }
 
-    ESP_LOGI(MAIN_TAG, "OTA first-boot self-test passed; image confirmed");
+    ESP_LOGI(MAIN_TAG, "OTA first-boot self-test passed");
+    ESP_LOGI(MAIN_TAG, "OTA image confirmed");
     vTaskDelete(NULL);
 }
 
@@ -140,8 +143,8 @@ static void cc1101_standalone_diagnostic(void)
  * 깨진다. 그래서 실제 Kconfig 매크로도 같이 확인해서, 옵션이 꺼진 로컬
  * 환경에서는 이 블록 전체가 조용히 빠지게 한다(빌드는 되지만 로그는 안 찍힘
  * — 그럴 땐 sdkconfig에서 해당 옵션을 켜야 함). */
-#define TASK_STATS_LOG_ENABLE
-#if defined(TASK_STATS_LOG_ENABLE) && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+#define TASK_STATS_LOG_ENABLE 0
+#if TASK_STATS_LOG_ENABLE && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
 #define TASK_STATS_BUF_LEN     1024
 #define TASK_STATS_INTERVAL_MS 2000
 /* idle+1로는 이 태스크 자신도 스케줄링을 못 받는 게 실측으로 확인됨(부팅
@@ -172,6 +175,21 @@ static void task_stats_task(void *arg)
 
 void app_main(void)
 {
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    ESP_LOGI(MAIN_TAG, "========================================");
+    ESP_LOGI(MAIN_TAG, "OTA DEMO BOOT");
+    if (running != NULL) {
+        ESP_LOGI(MAIN_TAG, "Running partition: %s (offset=0x%" PRIx32 ")",
+                 running->label, running->address);
+    } else {
+        ESP_LOGI(MAIN_TAG, "Running partition: unknown");
+    }
+    ESP_LOGI(MAIN_TAG, "Firmware version: %u.%u.%u",
+             FIRMWARE_VERSION_MAJOR,
+             FIRMWARE_VERSION_MINOR,
+             FIRMWARE_VERSION_PATCH);
+    ESP_LOGI(MAIN_TAG, "========================================");
+
 #if CC1101_STANDALONE_DIAGNOSTIC
     cc1101_standalone_diagnostic();
     /* 진단 중에는 기존 FSM을 시작하지 않는다. 다른 장치 초기화 로그가 섞이면
@@ -194,7 +212,7 @@ void app_main(void)
         return;
     }
 
-#if defined(TASK_STATS_LOG_ENABLE) && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+#if TASK_STATS_LOG_ENABLE && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
     BaseType_t task_stats_ok = xTaskCreate(task_stats_task, "task_stats", 4096, NULL,
                                             TASK_STATS_PRIORITY, NULL);
     if (task_stats_ok != pdPASS) {

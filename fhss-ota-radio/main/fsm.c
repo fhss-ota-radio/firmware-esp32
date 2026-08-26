@@ -32,6 +32,7 @@
 static const char *TAG = "fsm";
 
 #define OTA_DISCOVER_BACKOFF_MAX_MS 100U
+#define OTA_PERIODIC_LISTEN_DIAG_ENABLE 0
 
 static uint32_t ota_discovery_random_callback(void *context);
 static esp_err_t ota_fhss_activate_callback(
@@ -153,7 +154,9 @@ static void ota_reboot_task(void *arg)
 {
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(OTA_REBOOT_DELAY_MS));
-    ESP_LOGI(TAG, "final END ACK sent; restarting into OTA partition");
+    ESP_LOGI(TAG, "END ACK sent");
+    ESP_LOGI(TAG, "Boot partition selected by OTA writer");
+    ESP_LOGI(TAG, "Restarting into OTA partition...");
     esp_restart();
 }
 
@@ -250,7 +253,8 @@ static void ota_radio_task(void *arg)
             break;
         } else {
             consecutive_timeouts++;
-            if ((consecutive_timeouts % 50U) == 0U) {
+            if (OTA_PERIODIC_LISTEN_DIAG_ENABLE &&
+                (consecutive_timeouts % 50U) == 0U) {
                 ESP_LOGI(
                     "OTA_DIAG",
                     "LISTEN no-packet count=%" PRIu32
