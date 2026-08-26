@@ -303,9 +303,8 @@ void oled_update_text_fmt(uint8_t row, const char *fmt, ...)
     oled_update_text(row, buf);
 }
 
-/*
-/* 논리 캔버스는 기존과 동일하게 64(가로) x 128(세로)이다. 화면 방향은
- * 유지하고, 상단 식별 영역/메뉴 카드/상태 영역을 명확히 나눈다. */
+// 논리 캔버스는 기존과 동일하게 64(가로) x 128(세로)이다. 화면 방향은
+// 유지하고, 상단 식별 영역/메뉴 카드/상태 영역을 명확히 나눈다.
 #define MENU_HEADER_X       3
 #define MENU_TITLE_Y        2
 #define MENU_VERSION_Y      10
@@ -439,8 +438,14 @@ static void render_screen(void)
                            s_menu_labels[i], MENU_TEXT_SCALE, is_selected);
 
         if (is_hovered) {
-            draw_rounded_rect_outline(MENU_ITEM_X, item_y, MENU_ITEM_W, MENU_ITEM_H,
-                                       MENU_ITEM_RADIUS, !is_selected);
+            /* 모든 카드가 이미 1px 외곽선을 가지므로 같은 선을 다시 그리면
+             * 로터리 cursor 이동이 전혀 보이지 않는다. hovered 카드에는
+             * 1px 안쪽 테두리를 하나 더 그려 selected(채움)와 cursor(이중선)를
+             * 동시에 구분한다. 회전은 preview, SW 클릭은 FSM 선택이라는 기존
+             * 입력 의미는 그대로 유지한다. */
+            draw_rounded_rect_outline(MENU_ITEM_X + 2, item_y + 2,
+                                       MENU_ITEM_W - 4, MENU_ITEM_H - 4,
+                                       MENU_ITEM_RADIUS - 1, !is_selected);
         }
     }
 
