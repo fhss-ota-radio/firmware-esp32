@@ -8,6 +8,7 @@
 
 #define OTA_CONSUMER_TASK_STACK_SIZE 4096U
 #define OTA_CONSUMER_TASK_PRIORITY   (tskIDLE_PRIORITY + 3U)
+#define OTA_BATCH_ACK_GAP_MS         2U
 
 static const char *TAG = "ota_consumer";
 
@@ -111,6 +112,31 @@ static esp_err_t ota_consumer_send_nack(
         sequence,
         result
     );
+}
+
+static void ota_consumer_send_batch_acks(
+    ota_client_context_t *context,
+    uint32_t session_id,
+    uint32_t base_sequence,
+    uint8_t chunk_count
+)
+{
+    for (uint8_t offset = 0U; offset < chunk_count; ++offset) {
+        (void)ota_consumer_send_ack(
+            context,
+            session_id,
+            OTA_PKT_DATA,
+            base_sequence + offset
+        );
+
+        /* Gateway가 RX queue를 비울 시간을 조금 준다. 마지막 ACK 뒤에는
+         * Gateway가 다음 DATA batch를 보내야 하므로 지연하지 않는다. */
+        if (offset + 1U < chunk_count) {
+            const TickType_t gap_ticks =
+                pdMS_TO_TICKS(OTA_BATCH_ACK_GAP_MS);
+            vTaskDelay(gap_ticks > 0U ? gap_ticks : 1U);
+        }
+    }
 }
 
 static void ota_consumer_handle_discover(ota_client_context_t *context)
@@ -461,6 +487,11 @@ static void ota_consumer_handle_data(
         return;
     }
 
+    const uint32_t batch_base = context->batch_cache.base_sequence;
+    const uint8_t batch_chunk_count = context->batch_cache.chunk_count;
+    const bool already_committed =
+        header.sequence < context->expected_sequence;
+
     const esp_err_t err = ota_client_write_chunk(
         header.session_id,
         header.sequence,
@@ -492,12 +523,35 @@ static void ota_consumer_handle_data(
         (unsigned)payload_length
     );
 
-    ota_consumer_send_ack(
-        context,
-        header.session_id,
-        OTA_PKT_DATA,
-        header.sequence
-    );
+    if (already_committed) {
+        /* 배치 ACK 유실 때문에 이미 Flash에 commit된 DATA가 다시 온 경우다.
+         * 이때는 새 배치를 기다리지 않고 해당 sequence만 바로 확인한다. */
+        (void)ota_consumer_send_ack(
+            context,
+            header.session_id,
+            OTA_PKT_DATA,
+            header.sequence
+        );
+    } else if (context->batch_cache.base_sequence != batch_base) {
+        /* ota_client_write_chunk()가 완성된 RAM batch를 Flash에 한 번에
+         * commit하고 다음 batch로 전진했다. DATA 수신 중에는 TX하지 않고,
+         * commit 성공 뒤에만 기존 개별 ACK packet을 순서대로 보낸다. */
+        ota_consumer_send_batch_acks(
+            context,
+            header.session_id,
+            batch_base,
+            batch_chunk_count
+        );
+    } else {
+        ESP_LOGD(
+            TAG,
+            "DATA ACK deferred: session=%" PRIu32 ", seq=%" PRIu32
+            ", batch_base=%" PRIu32,
+            header.session_id,
+            header.sequence,
+            batch_base
+        );
+    }
 }
 
 static void ota_consumer_handle_end(
@@ -674,17 +728,49 @@ static void ota_consumer_handle_receive_timeout(
         context->batch_cache.base_sequence,
         missing_mask
     );
+    /* 짧은 inter-frame timeout이 배치의 응답 phase 경계다. 이미 RAM에 받은
+     * slot은 ACK해서 Gateway가 다시 보내지 않게 하고, 첫 missing slot만
+     * NACK한다. NACK을 여러 개 연속 보내면 첫 NACK을 본 Gateway의 즉시
+     * 재전송과 뒤 NACK TX가 반이중 링크에서 충돌할 수 있기 때문이다.
+     * missing이 여러 개면 다음 timeout 또는 Gateway 자체 timeout으로
+     * 나머지도 선택적으로 복구된다. */
+    uint8_t response_count = 0U;
+    for (uint8_t offset = 0U;
+         offset < context->batch_cache.chunk_count;
+         ++offset) {
+        const uint8_t bit = (uint8_t)(1U << offset);
+        if ((missing_mask & bit) == 0U) {
+            if (response_count > 0U) {
+                const TickType_t gap_ticks =
+                    pdMS_TO_TICKS(OTA_BATCH_ACK_GAP_MS);
+                vTaskDelay(gap_ticks > 0U ? gap_ticks : 1U);
+            }
+            (void)ota_consumer_send_ack(
+                context,
+                context->session_id,
+                OTA_PKT_DATA,
+                context->batch_cache.base_sequence + offset
+            );
+            ++response_count;
+        }
+    }
     for (uint8_t offset = 0U;
          offset < context->batch_cache.chunk_count;
          ++offset) {
         if ((missing_mask & (uint8_t)(1U << offset)) != 0U) {
-            ota_consumer_send_nack(
+            if (response_count > 0U) {
+                const TickType_t gap_ticks =
+                    pdMS_TO_TICKS(OTA_BATCH_ACK_GAP_MS);
+                vTaskDelay(gap_ticks > 0U ? gap_ticks : 1U);
+            }
+            (void)ota_consumer_send_nack(
                 context,
                 context->session_id,
                 OTA_PKT_DATA,
                 context->batch_cache.base_sequence + offset,
                 OTA_RESULT_TIMEOUT
             );
+            break;
         }
     }
     context->last_packet_tick = now;
