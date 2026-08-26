@@ -73,8 +73,9 @@ static void spk_channel_init(void)
      * LoadProhibited로 재부팅되는 문제가 실기기에서 확인됨(2026-08-10).
      * audio_io_speaker_enable()/disable()로 실제 재생 시점에만 켠다. */
 
-    /* GAIN: 항상 HIGH(VDD) 고정 = 6dB, GPIO로 저항 없이 가능한 것 중 최소 볼륨
-     * (audio_io_config.h 주석 참고). SD는 처음엔 LOW(꺼짐) — enable/disable에서 제어. */
+    /* 시연 환경에서 음성이 작아 GAIN을 LOW(GND)=12dB로 설정한다.
+     * 기존 HIGH(VDD)=6dB보다 출력 gain을 6dB 높인다. SD는 처음엔
+     * LOW(꺼짐)이며 audio_io_speaker_enable()/disable()에서 제어한다. */
     gpio_config_t amp_ctrl_cfg = {
         .pin_bit_mask = (1ULL << AUDIO_IO_SPK_GAIN_GPIO) | (1ULL << AUDIO_IO_SPK_SD_GPIO),
         .mode = GPIO_MODE_OUTPUT,
@@ -83,7 +84,7 @@ static void spk_channel_init(void)
         .intr_type = GPIO_INTR_DISABLE,
     };
     ESP_ERROR_CHECK(gpio_config(&amp_ctrl_cfg));
-    gpio_set_level(AUDIO_IO_SPK_GAIN_GPIO, 1);
+    gpio_set_level(AUDIO_IO_SPK_GAIN_GPIO, 0);
     gpio_set_level(AUDIO_IO_SPK_SD_GPIO, 0);
 }
 
@@ -158,7 +159,7 @@ static void play_tone(uint16_t freq_hz, uint16_t duration_ms, int16_t amplitude)
 
 void audio_io_play_beep(void)
 {
-    /* "말하기 시작" 알림용 짧은 2음 상승 삐빅음. 볼륨은 GAIN(6dB, 하드웨어)에
+    /* "말하기 시작" 알림용 짧은 2음 상승 삐빅음. 볼륨은 GAIN(12dB, 하드웨어)에
      * 더해 AUDIO_IO_BEEP_AMPLITUDE(소프트웨어)로 이중으로 낮춤 — 앰프 실기기
      * 테스트 초기 단계라 과음량 방지가 우선(2026-08-10). */
     play_tone(880, 80, AUDIO_IO_BEEP_AMPLITUDE);   /* A5 */
