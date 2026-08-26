@@ -178,6 +178,17 @@ void app_main(void)
      * CC1101 단독 결과를 판별할 수 없기 때문이다. */
     return;
 #else
+    /* [2026-08-26] OTA_DIAG(fhss_ota_diagnostics.c)가 패킷마다 헥사덤프까지
+     * ESP_LOGI로 찍는데, 콘솔 UART가 115200bps라 패킷 하나 로그 찍는 데만
+     * ~30ms 이상 걸린다 — RF 전송(~15~20ms)보다 로그가 더 오래 걸려서, 실
+     * FHSS 오디오 테스트에서 이게 병목이 돼 TX 큐가 넘치고(오디오 프레임
+     * 드롭), RX도 같은 이유로 슬롯 타이밍을 놓쳐 SYNC_LOST가 반복되는 게
+     * 실기기 로그로 확인됨. OTA 프로토콜 자체를 디버깅할 때만 필요한
+     * 정보라 평소엔 꺼둔다 — 필요하면 이 줄만 지우거나 레벨을 ESP_LOG_INFO로
+     * 되돌리면 됨.
+     */
+    esp_log_level_set("OTA_DIAG", ESP_LOG_WARN);
+
     if (!fsm_init()) {
         ESP_LOGE(MAIN_TAG, "product initialization failed");
         const esp_partition_t *running = esp_ota_get_running_partition();
