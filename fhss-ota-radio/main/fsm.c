@@ -60,10 +60,6 @@ static fsm_state_t s_state = FSM_STATE_BOOT_INIT;
 #define FSM_RX_AUDIO_FRAME_MAX_BYTES AUDIO_CODEC_MAX_ENCODED_BYTES
 #define FSM_RX_AUDIO_QUEUE_DEPTH     32
 
-/* 이 시간 동안 새 프레임이 안 오면 수신이 끝난 것으로 보고 FSM_EVENT_RX_DONE을
- * 스스로 올린다 (무음/타임아웃 기반 종료 — 결정 근거는 docs/fsm-design.md 참고). */
-#define FSM_RX_AUDIO_IDLE_TIMEOUT_MS 1000
-
 typedef struct {
     uint8_t data[FSM_RX_AUDIO_FRAME_MAX_BYTES];
     size_t len;
@@ -660,20 +656,12 @@ static void stop_tx_audio_task(void)
 
 /*
  * RX_AUDIO 동안만 도는 재생 태스크. s_rx_audio_queue에서 프레임을 꺼내
- * audio_io_decode_play()로 재생한다. FSM_RX_AUDIO_IDLE_TIMEOUT_MS(1초) 동안
- * 새 프레임이 안 들어오면 수신이 끝난 것으로 보고 FSM_EVENT_RX_DONE을 스스로
- * 올린 뒤 태스크를 종료한다 — PTT_RELEASE 같은 명시적 종료 신호가 RX 쪽엔
- * 없어서 무음/타임아웃 기반으로 정한 것(값은 1초로 확정, 추후 실측 후 조정 가능).
+ * audio_io_decode_play()로 재생한다. 오디오 프레임이 잠시 끊겨도 상대 PTT가
+ * 해제됐다고 단정하지 않고 무음을 출력하며 RX_AUDIO를 유지한다.
  *
- * s_rx_audio_task를 NULL로 되돌리고 나서 vTaskDelete(NULL)로 자기 자신을
- * 지운다 — on_enter_menu_comm()이 FSM_EVENT_RX_DONE 처리 시 다시 한번
- * s_rx_audio_task를 정리하려 하는데, 이미 NULL이라 아무 일도 안 하고
- * 넘어간다(이중 삭제 방지).
- *
- * 여전히 미정: fsm_post_rx_audio_frame()을 실제로 호출해줄 rf_transport가
- * 아직 없어서, 지금은 이 타임아웃이 "부팅 후 곧바로 RX_AUDIO를 빠져나온다"는
- * 뜻밖에 안 됨 — rf_transport가 생겨서 실제 프레임이 들어오기 시작해야 이
- * 타임아웃이 의미를 가진다.
+ * 정상 종료는 송신 측의 TALKSPURT_END 패킷이 올리는 FSM_EVENT_RX_DONE으로,
+ * 비정상적인 장시간 무선 단절은 FHSS의 FSM_EVENT_SYNC_LOST로 처리한다. DATA
+ * 지연을 세션 종료로 오판해 PTT 유지 중 MENU_COMM으로 떨어지는 일을 막는다.
  */
 static TaskHandle_t s_rx_audio_task;
 /* I2S write 또는 queue wait 도중 RX 태스크를 외부에서 강제 삭제하지 않는다.
@@ -683,8 +671,8 @@ static volatile bool s_rx_audio_should_stop;
 
 /* 새 프레임이 없는 idle 구간에서 xQueueReceive를 짧게 끊어 폴링하며
  * audio_io_write_silence()로 무음을 채워 넣는 주기(ms). 재배정(2026-08-17):
- * 예전엔 FSM_RX_AUDIO_IDLE_TIMEOUT_MS(1초)를 한 번에 블로킹 대기해서 그
- * 동안 I2S write가 전혀 없었는데, I2S TX가 circular DMA라 write가 멈추면
+ * 예전엔 긴 시간 블로킹 대기해서 그동안 I2S write가 전혀 없었는데, I2S TX가
+ * circular DMA라 write가 멈추면
  * 마지막 실제 음성 프레임 파형을 그대로 반복 재생 -> "두두두두" 잡음으로
  * 들리는 문제가 실기기에서 확인됨. 프레임 주기(20ms)와 맞춰 폴링. */
 #define FSM_RX_AUDIO_POLL_MS 20U
@@ -693,20 +681,20 @@ static void rx_audio_task(void *arg)
 {
     fsm_rx_audio_frame_t frame;
 
-    bool timed_out = false;
-    uint32_t idle_ms = 0U;
-
     while (!s_rx_audio_should_stop) {
         if (xQueueReceive(s_rx_audio_queue, &frame, pdMS_TO_TICKS(FSM_RX_AUDIO_POLL_MS)) == pdTRUE) {
-            audio_io_decode_play(frame.data, frame.len);
-            idle_ms = 0U;
-        } else {
-            audio_io_write_silence();
-            idle_ms += FSM_RX_AUDIO_POLL_MS;
-            if (idle_ms >= FSM_RX_AUDIO_IDLE_TIMEOUT_MS) {
-                timed_out = true;
-                break;
+            if (audio_io_decode_play(frame.data, frame.len) != 0) {
+                ESP_LOGW(TAG, "RX audio decode/play failed: length=%u",
+                         (unsigned)frame.len);
             }
+        } else {
+            /* A missing DATA frame does not mean that the peer released PTT.
+             * FHSS channel switching, CRC loss, or recovery can temporarily
+             * leave this queue empty while the talkspurt is still active.
+             * Keep the I2S clock fed with silence, but remain in RX_AUDIO.
+             * Normal termination is driven by the explicit TALKSPURT_END
+             * packet; prolonged radio failure is handled by SYNC_LOST. */
+            audio_io_write_silence();
         }
     }
 
@@ -715,14 +703,11 @@ static void rx_audio_task(void *arg)
      * I2S channel을 다시 enable하는 ESP_ERR_INVALID_STATE가 발생한다. */
     audio_io_speaker_disable();
     s_rx_audio_task = NULL;
-    if (timed_out && !s_rx_audio_should_stop) {
-        fsm_post_event(FSM_EVENT_RX_DONE);
-    }
     vTaskDelete(NULL);
 }
 
 /* SYNC_LOST/ERROR처럼 RX_AUDIO를 외부 이벤트로 벗어날 때도 I2S write 중인
- * 태스크를 vTaskDelete()로 끊지 않는다. 최대 queue timeout(1초) 뒤 태스크가
+ * 태스크를 vTaskDelete()로 끊지 않는다. 최대 queue poll(20ms) 뒤 태스크가
  * speaker를 정상 disable하고 스스로 종료할 때까지 기다린다. */
 static void stop_rx_audio_task(void)
 {
@@ -1170,7 +1155,11 @@ bool fsm_init(void)
 
 void fsm_post_event(fsm_event_t event)
 {
-    xQueueSend(s_event_queue, &event, 0);
+    if (xQueueSend(s_event_queue, &event, 0) != pdTRUE) {
+        /* Event loss used to be silent. In particular, a dropped RX_DONE
+         * leaves the UI and speaker in RX_AUDIO after TALKSPURT_END. */
+        ESP_LOGW(TAG, "event queue full, dropping %s", fsm_event_name(event));
+    }
 }
 
 bool fsm_post_rx_audio_frame(const uint8_t *data, size_t len)
@@ -1188,7 +1177,13 @@ bool fsm_post_rx_audio_frame(const uint8_t *data, size_t len)
         return false;
     }
 
-    fsm_post_event(FSM_EVENT_RX_FRAME);
+    /* RX_FRAME is a state-entry notification, not one event per 20 ms audio
+     * frame. Once RX_AUDIO is active, the dedicated audio queue carries all
+     * subsequent frames. Avoid flooding the 16-entry FSM event queue with
+     * no-op self-loop events that can hide a critical RX_DONE/SYNC_LOST. */
+    if (fsm_get_state() == FSM_STATE_MENU_COMM) {
+        fsm_post_event(FSM_EVENT_RX_FRAME);
+    }
     return true;
 }
 
