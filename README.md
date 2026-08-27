@@ -22,7 +22,3 @@ ESP32-S3 기반 무전기 단말 펌웨어 — FHSS 음성 통신 + RF OTA 수�
 - 설동호 — https://github.com/hiimseoll
 - 조민진 — https://github.com/CHOminjin
 - 김지윤 — https://github.com/JJiiyun
-
-## 기술적 문의
-
-설동호 (theseol16@gmail.com)
