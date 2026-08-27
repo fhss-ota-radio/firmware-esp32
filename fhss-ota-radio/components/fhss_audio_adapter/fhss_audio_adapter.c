@@ -40,6 +40,40 @@
 #define CC1101_SPI_CLOCK_HZ 100000
 
 #define FHSS_AUDIO_TX_DRAIN_TIMEOUT_MS 600U
+
+/*
+ * [2026-08-25 추가] 연속 몇 번 SYNC를 놓치면 "완전히 잃었다"고 판정할지의
+ * 임계값 — 음성용과 OTA용을 분리한다.
+ *
+ * [왜 분리하나] 원래는 하나뿐이었고 값은 음성 기준(5/2)이었다. 음성은
+ * 이쪽이 송신하는 시간이 PTT를 누른 동안뿐이라 자기 SYNC 수신을 방해할
+ * 일이 거의 없어서 이 정도로 충분하다. 오히려 짧아야 좋다 — 상대가
+ * 범위를 벗어나면 빨리 판정하고 고정 채널로 돌아와야 다음 송신을 놓치지
+ * 않기 때문이다.
+ *
+ * 그런데 OTA 전송 중에는 상황이 정반대다. DATA를 받을 때마다 곧바로
+ * ACK를 송신하는데 CC1101은 반이중(half-duplex)이라 그 송신 시간(실측
+ * 121ms) 동안 귀가 닫힌다. 슬롯이 300ms이므로 ACK 송신 타이밍이 슬롯
+ * 경계(=SYNC 도착 시점)와 겹치면 그 슬롯의 SYNC를 통째로 놓치고,
+ * 트래픽이 몰리면 연속으로 발생한다. 5회(=1.5초)면 너무 쉽게 하드
+ * 로스로 넘어간다.
+ *
+ * 하드 로스가 나면 스케줄러 기준점을 버리고 랑데부 채널로 돌아가
+ * 재획득에 최악 3.3초가 걸리는데, 그 사이 Gateway 재전송이 다시 획득을
+ * 방해해서 세션째로 날아간다(148 실기기 2026-08-24, 1036청크).
+ *
+ * 그래서 OTA에서만 12회(=3.6초)로 완화하고, OTA를 벗어나면 음성용 값으로
+ * 되돌린다. 두 값 모두 reset_controller()가 다시 읽어가는데, 이 함수는
+ * fhss_service_set_role() 안에서 호출되고 OTA 진입(activate_ota_fhss)과
+ * 종료(end_ota) 둘 다 set_role을 거치므로 전환 시점이 보장된다.
+ *
+ * 제약: recovery_entry_miss_count < loss_count (fhss_service.c 961행).
+ * 상세: gateway-ota/docs/note/design-notes-gateway-ota-es.md 58절.
+ */
+#define FHSS_SYNC_LOSS_COUNT_VOICE      5U
+#define FHSS_RECOVERY_ENTRY_MISS_VOICE  2U
+#define FHSS_SYNC_LOSS_COUNT_OTA        12U
+#define FHSS_RECOVERY_ENTRY_MISS_OTA    4U
 #define FHSS_AUDIO_END_REPEAT_COUNT 3U
 #define FHSS_AUDIO_SEED_ANNOUNCE_REPEAT_COUNT 3U
 #define OTA_FIXED_CHANNEL 0U
@@ -558,8 +592,14 @@ bool fhss_audio_adapter_init(const fhss_audio_adapter_config_t *config)
         .search_dwell_ms = 400U,
         .receive_timeout_ms = 80U,
         .acquire_count = 3U,
-        .loss_count = 5U,
-        .recovery_entry_miss_count = 2U,
+        /* 음성용 기본값. OTA 진입/종료 시에만 아래 OTA_* 값으로 바꿨다가
+         * 되돌린다 — 이유는 FHSS_SYNC_LOSS_COUNT_VOICE 주석 참고. */
+        .loss_count = FHSS_SYNC_LOSS_COUNT_VOICE,
+        .recovery_entry_miss_count = FHSS_RECOVERY_ENTRY_MISS_VOICE,
+        /* 음성은 본문 읽기 타임아웃을 예전처럼 무선 오류로 취급한다
+         * (=기존 동작 100% 유지). OTA에서만 완화 — 자세한 이유는
+         * fhss_service.h의 treat_body_timeout_as_radio_error 주석 참고. */
+        .treat_body_timeout_as_radio_error = true,
         .diagnostics_interval_ms = 5000U,
         .event_callback = on_service_event,
         .data_callback = on_service_data,
@@ -692,6 +732,12 @@ bool fhss_audio_adapter_begin_ota(void)
         ESP_LOGE(TAG, "failed to enter fixed-channel OTA mode");
         return false;
     }
+    /* [2026-08-25] OTA 진행 중에만 rf_transport의 wait_until_ready()
+     * busy-poll 루프에 yield를 켠다 — 음성은 이 호출을 안 타므로 항상
+     * 꺼진 채(기존 동작 그대로) 남는다. 상세: rf_transport.h 주석,
+     * gateway-ota design-notes 70절(gap-tuning 이후 interrupt wdt
+     * timeout 크래시 원인 추정). */
+    rf_transport_set_ota_mode(true);
     ESP_LOGI(TAG, "OTA mode started on CHANNR=%u", OTA_FIXED_CHANNEL);
     return true;
 }
@@ -728,6 +774,15 @@ esp_err_t fhss_audio_adapter_activate_ota_fhss(
     s_adapter.service.config.slot_duration_us = config->slot_duration_us;
     s_adapter.service.config.channel_switch_guard_us =
         config->channel_switch_guard_us;
+    /* [2026-08-25] OTA는 ACK를 계속 송신하느라 자기 SYNC를 자주 놓치므로
+     * 하드 로스 판정을 완화한다. 아래 set_role()이 reset_controller()를
+     * 거치면서 이 값을 다시 읽어간다. */
+    s_adapter.service.config.loss_count = FHSS_SYNC_LOSS_COUNT_OTA;
+    s_adapter.service.config.recovery_entry_miss_count =
+        FHSS_RECOVERY_ENTRY_MISS_OTA;
+    /* OTA에서만 본문 읽기 타임아웃 완화를 켠다 — 이게 켜져야 ACK가 다음
+     * 홉 채널로 밀려 유실되는 문제가 풀린다(design-notes 50절). */
+    s_adapter.service.config.treat_body_timeout_as_radio_error = false;
     if (s_adapter.ota_rx_queue != NULL) {
         xQueueReset(s_adapter.ota_rx_queue);
     }
@@ -758,11 +813,22 @@ bool fhss_audio_adapter_end_ota(void)
     if (!s_adapter.initialized || !s_adapter.ota_active) {
         return true;
     }
+    /* begin_ota()에서 켠 걸 되돌림 — 음성으로 완전히 돌아가는 시점에
+     * 바로 꺼서, OTA 관련 상태가 하나도 안 남게 한다. */
+    rf_transport_set_ota_mode(false);
     if (xSemaphoreTake(s_adapter.radio_mutex, portMAX_DELAY) != pdTRUE) {
         return false;
     }
     s_adapter.ota_active = false;
     s_adapter.ota_fhss_active = false;
+    /* [2026-08-25] OTA에서만 완화했던 하드 로스 임계값을 음성용으로
+     * 되돌린다 — 음성은 상대가 범위를 벗어났을 때 빨리 판정하고 고정
+     * 채널로 돌아와야 다음 송신을 놓치지 않는다. 아래 set_role()이
+     * reset_controller()를 거치면서 이 값을 다시 읽어간다. */
+    s_adapter.service.config.loss_count = FHSS_SYNC_LOSS_COUNT_VOICE;
+    s_adapter.service.config.recovery_entry_miss_count =
+        FHSS_RECOVERY_ENTRY_MISS_VOICE;
+    s_adapter.service.config.treat_body_timeout_as_radio_error = true;
     const bool ok = fhss_service_set_role(
         &s_adapter.service, FHSS_SERVICE_ROLE_RX);
     xSemaphoreGive(s_adapter.radio_mutex);
@@ -812,6 +878,30 @@ fhss_audio_adapter_ota_rx_status_t fhss_audio_adapter_ota_receive(
         fhss_ota_diag_log_rx_result(
             "FIXED", OTA_FIXED_CHANNEL, (int)status, received.crc_ok,
             received.rssi_dbm, received.lqi, received.length);
+        /* The legacy Gateway GUI sends START/DATA directly on channel 0.  A
+         * transient SPI fault must not discard an otherwise valid OTA writer.
+         * Reapply the bootstrap profile and re-arm RX; report a fatal error
+         * only if this bounded recovery cannot restore the radio. */
+        if (status == RF_TRANSPORT_STATUS_SPI_ERROR &&
+            xSemaphoreTake(s_adapter.radio_mutex, portMAX_DELAY) == pdTRUE) {
+            rf_transport_status_t recovery_status =
+                rf_transport_recover_433mhz(&s_adapter.service.radio);
+            if (recovery_status == RF_TRANSPORT_STATUS_OK) {
+                recovery_status = rf_transport_set_channel(
+                    &s_adapter.service.radio, OTA_FIXED_CHANNEL);
+            }
+            if (recovery_status == RF_TRANSPORT_STATUS_OK) {
+                recovery_status = rf_transport_start_receive(
+                    &s_adapter.service.radio);
+            }
+            xSemaphoreGive(s_adapter.radio_mutex);
+            if (recovery_status == RF_TRANSPORT_STATUS_OK) {
+                ESP_LOGW(TAG, "fixed OTA RX recovered after SPI error");
+                return FHSS_AUDIO_ADAPTER_OTA_RX_RECOVERED;
+            }
+            ESP_LOGE(TAG, "fixed OTA RX recovery failed: status=%d",
+                     (int)recovery_status);
+        }
         return FHSS_AUDIO_ADAPTER_OTA_RX_ERROR;
     }
     fhss_ota_diag_log_rx_result(

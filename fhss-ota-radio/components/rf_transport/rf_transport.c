@@ -95,6 +95,24 @@ static const cc1101_register_setting_t s_433mhz_settings[] = {
     {0x2CU, 0x81U}, {0x2DU, 0x35U}, {0x2EU, 0x09U},
 };
 
+/* [2026-08-25, fix/fhss-interrupt-wdt-timeout] wait_until_ready()의
+ * busy-poll 루프에 yield를 넣을지 여부. 기본값 false — 이 값이 false인
+ * 동안 wait_until_ready()는 이 파일이 원래 하던 동작과 100% 동일하게
+ * 돈다(아래 참고). 음성(fhss_audio_adapter)이 항상 쓰는 기본 경로라
+ * "실질적으로 영향 없을 것"이 아니라 "코드상 아예 안 거친다"를
+ * 보장하려고 별도 플래그로 뺐다 — OTA가 fhss_audio_adapter_begin_ota()/
+ * _end_ota()에서만 켜고 끈다(rf_transport_set_ota_mode()).
+ * 이유: gap-tuning(gateway-ota perf/fhss-slot-gap-tuning) 적용 후
+ * SPI 트랜잭션 빈도가 거의 2배로 늘면서 이 무-yield 루프가 인터럽트
+ * 워치독을 먹일 기회를 뺏어 "Guru Meditation ... interrupt wdt timeout"
+ * 크래시가 발생한 것으로 추정됨(gateway-ota design-notes 70절). */
+static volatile bool s_ota_mode = false;
+
+void rf_transport_set_ota_mode(bool enabled)
+{
+    s_ota_mode = enabled;
+}
+
 static rf_transport_status_t wait_until_ready(
     const rf_transport_t *transport
 )
@@ -102,9 +120,21 @@ static rf_transport_status_t wait_until_ready(
     const int64_t deadline_us =
         esp_timer_get_time() + CC1101_READY_TIMEOUT_US;
 
+    /* s_ota_mode가 false면(음성 기본 경로) 아래 &&의 앞항에서 항상
+     * short-circuit되어 poll_count 증가/taskYIELD() 둘 다 절대 실행되지
+     * 않는다 — 즉 이 while문은 원래 코드(gpio_get_level 확인 + deadline
+     * 확인)와 완전히 동일하게 동작한다. s_ota_mode가 true일 때만(OTA
+     * 진행 중) 32번마다 taskYIELD()로 스케줄러에 짧게 양보 — 정상
+     * 케이스(대부분 몇 마이크로초 안에 ready가 뜸)는 32번을 채우기도
+     * 전에 루프가 끝나므로 OTA 자체 타이밍에도 영향이 없어야 한다.
+     * 실기기 검증 전까지는 가설 단계. */
+    uint32_t poll_count = 0U;
     while (gpio_get_level(transport->miso_gpio) != 0) {
         if (esp_timer_get_time() >= deadline_us) {
             return RF_TRANSPORT_STATUS_TIMEOUT;
+        }
+        if (s_ota_mode && (++poll_count & 0x1FU) == 0U) {
+            taskYIELD();
         }
     }
 

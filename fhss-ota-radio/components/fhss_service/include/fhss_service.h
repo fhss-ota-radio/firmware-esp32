@@ -85,6 +85,31 @@ typedef struct {
     /* Enter bounded N/N-1/N+1 probing at this many consecutive misses.
      * Must be smaller than loss_count, which remains the hard reset limit. */
     uint32_t recovery_entry_miss_count;
+    /*
+     * [2026-08-25 추가] "동기워드는 잡았는데 본문 읽기가 타임아웃"인 경우
+     * (RECEIVE_RESULT_BODY_TIMEOUT)를 진짜 무선 오류로 취급할지 여부.
+     *
+     * true  = 예전과 동일. RECEIVE_RESULT_RADIO_ERROR와 똑같이 다뤄서
+     *         드레인을 즉시 포기하고 tracking에서는
+     *         report_event(FHSS_SERVICE_EVENT_ERROR)까지 올린다
+     *         (음성 쪽은 이 이벤트가 FSM_EVENT_ERROR -> FSM_STATE_ERROR로
+     *          이어져 에러 화면으로 전이된다).
+     * false = TIMEOUT/CRC_FAIL과 동일하게 완화. 드레인을 계속하고
+     *         tracking에서는 handle_miss()만 한다.
+     *
+     * [왜 설정으로 뺐나] 이 처리를 완화해야 OTA의 ACK가 다음 홉 채널로
+     * 밀려 유실되는 문제가 풀린다(design-notes 50절). 그런데 음성과 OTA는
+     * CC1101이 하나뿐이라 같은 fhss_service 인스턴스를 공유하므로, 그냥
+     * 고치면 음성 동작까지 같이 바뀐다. 음성 쪽은 지금 다른 팀원이 맡고
+     * 있어 동작 변화를 임의로 만들지 않기로 해서, 모드별로 고를 수 있게
+     * 설정으로 분리했다.
+     *
+     * 참고: 음성에서도 이 값을 false로 두는 편이 아마 맞다 — 하드웨어는
+     * 멀쩡하고 처리 시간만 빠듯했던 경우인데 기기를 통째로 에러 화면으로
+     * 보내는 건 과하기 때문. 다만 그건 음성 담당자가 판단할 몫이라 기본값을
+     * true(기존 동작)로 두었다.
+     */
+    bool treat_body_timeout_as_radio_error;
     uint32_t diagnostics_interval_ms;
     fhss_service_event_callback_t event_callback;
     fhss_service_data_callback_t data_callback;

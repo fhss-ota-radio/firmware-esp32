@@ -81,8 +81,55 @@ static TimerHandle_t s_ota_fhss_resync_timer;
 #define OTA_RADIO_RX_TIMEOUT_MS 40U
 #define OTA_RESPONSE_WAIT_MS    250U
 #define OTA_REBOOT_DELAY_MS     250U
-#define OTA_FHSS_SYNC_TIMEOUT_MS 5000U
-#define OTA_FHSS_RESYNC_GRACE_MS 3000U
+/*
+ * [2026-08-24 정정: 5000 -> 10000] OTA_FHSS_SYNCING에서 SYNC_ACQUIRED까지
+ * 허용하는 시간. 5초는 최악의 경우 부족하다는 게 실기기 로그로 확인됐다:
+ *
+ *   ACTIVATE 직후 이쪽은 랑데부 채널(보통 1번)에 고정된 채 SYNC를
+ *   기다리는데, Gateway는 이미 8채널을 순회 중이라 1번 채널로 돌아오는
+ *   건 8슬롯(300ms x 8 = 2.4초)마다 한 번뿐이다. 여기에 획득에 필요한
+ *   연속 3 SYNC(0.9초)를 더하면 최악 3.3초. 정상 경로만 따져도 5초에
+ *   여유가 1.7초밖에 없고, 그 사이 Gateway의 DATA가 한 번이라도 SYNC
+ *   수신을 밀어내면(아직 획득 전이라 관용 없이 랑데부로 되돌아감)
+ *   바로 5초를 넘겨 세션이 폐기된다.
+ *
+ *   148 실기기 로그(2026-08-24)에서 정확히 이 순서로 재현됐다 — 타임아웃이
+ *   41711ms에 터졌고, 세션이 폐기되어 DATA가 멈추자마자 42095ms에
+ *   SYNC_ACQUIRED가 떴다. 즉 400ms만 더 버텼으면 성공했을 상황이었다.
+ *   상세: gateway-ota/docs/note/design-notes-gateway-ota-es.md 54절.
+ *
+ * Gateway 쪽에서도 전송 시작 전 대기(kSyncSettleMs)를 2초 -> 4초로 올려서
+ * 근본 원인(동기화 전에 DATA를 쏘는 것)을 같이 막았고, 이 값은 그래도
+ * 남는 지터를 흡수하는 안전망이다.
+ */
+#define OTA_FHSS_SYNC_TIMEOUT_MS 10000U
+/*
+ * [2026-08-24 정정: 3000 -> 10000] 전송 중 SYNC를 잃었을 때 세션을 버리지
+ * 않고 재동기화를 기다려주는 시간.
+ *
+ * 3초는 위 OTA_FHSS_SYNC_TIMEOUT_MS와 정확히 같은 계산 착오였다 —
+ * 재동기화도 최초 획득과 똑같은 경로를 탄다:
+ *
+ *   SYNC_LOST -> 스케줄러 기준점 폐기 -> 랑데부 채널(1번) 고정 대기
+ *   -> Gateway가 8슬롯 만에 그 채널로 돌아옴(300ms x 8 = 2.4초)
+ *   -> 연속 3 SYNC로 획득(0.9초)  =  최악 3.3초
+ *
+ * 3000ms는 이 3.3초보다 짧아서 원리적으로 부족하다. 148 실기기
+ * 로그(2026-08-24)에서 27%(2190청크)까지 17분간 정상 전송하다가
+ * 이것 때문에 중단됐고, 차이는 겨우 30ms였다:
+ *
+ *   1047933  SYNC_LOST                   유예 시작
+ *   1047934~1049944  slot=0 channel=1    랑데부에서 2.0초 대기
+ *   1049976  SYNC RX: state=SEARCHING    첫 SYNC (획득 완료 예상 ~1050900)
+ *   1050933  resync grace expired        30ms 차이로 세션 폐기
+ *
+ * 최악 3.3초에 넉넉한 여유를 두어 SYNC_TIMEOUT과 같은 10초로 맞춘다.
+ * 두 값이 같은 물리적 제약(랑데부 복귀 주기 + 획득 슬롯 수)에서 나오므로
+ * 따로 둘 이유가 없다.
+ *
+ * 관련: gateway-ota/docs/note/design-notes-gateway-ota-es.md 56절
+ */
+#define OTA_FHSS_RESYNC_GRACE_MS 10000U
 
 static void ota_fhss_sync_timeout_callback(TimerHandle_t timer)
 {
@@ -193,6 +240,9 @@ static void ota_radio_task(void *arg)
         } else if (status == FHSS_AUDIO_ADAPTER_OTA_RX_CRC_ERROR) {
             consecutive_timeouts = 0U;
             ESP_LOGW(TAG, "OTA RF packet dropped: CC1101 CRC failed");
+        } else if (status == FHSS_AUDIO_ADAPTER_OTA_RX_RECOVERED) {
+            consecutive_timeouts = 0U;
+            ESP_LOGW(TAG, "OTA RF receive recovered; session preserved");
         } else if (status == FHSS_AUDIO_ADAPTER_OTA_RX_ERROR &&
                    !s_ota_radio_should_stop) {
             ESP_LOGE(TAG, "OTA RF receive failed");
@@ -380,6 +430,8 @@ static const fsm_transition_t s_transitions[] = {
 
     { FSM_STATE_MENU_OTA,      FSM_EVENT_MENU_SELECT_COMM, FSM_STATE_MENU_COMM },
     { FSM_STATE_MENU_OTA,      FSM_EVENT_MENU_SELECT_IDLE, FSM_STATE_MENU_IDLE },
+    /* Legacy .148 GUI: fixed channel-0 START without FHSS_CONFIG/ACTIVATE. */
+    { FSM_STATE_MENU_OTA,      FSM_EVENT_OTA_START,        FSM_STATE_OTA_RECEIVING },
     { FSM_STATE_MENU_OTA,      FSM_EVENT_FHSS_CONFIG_READY, FSM_STATE_OTA_FHSS_CONFIGURED },
 
     { FSM_STATE_OTA_FHSS_CONFIGURED, FSM_EVENT_FHSS_CONFIG_READY, FSM_STATE_OTA_FHSS_CONFIGURED },
@@ -1076,16 +1128,37 @@ static void fsm_task(void *arg)
             fsm_transition_to(FSM_STATE_ERROR);
             continue;
         }
-        if (event == FSM_EVENT_SYNC_ACQUIRED &&
-            s_state == FSM_STATE_OTA_RECEIVING) {
+        /* [2026-08-24 추가] 재동기화 유예(resync grace)를 예전엔
+         * OTA_RECEIVING 상태에서만 적용했다. 그런데 실기기 로그로 확인해보니
+         * (design-notes-gateway-ota-es.md 53절) ota_consumer는 이 상위 FSM이
+         * OTA_FHSS_READY/OTA_RECEIVING으로 넘어가기 전, 아직
+         * OTA_FHSS_SYNCING인 상태에서도 이미 START/DATA를 정상 처리하고
+         * 있었다 — 즉 "이 FSM이 아직 SYNCING이다"가 "실제로 데이터가
+         * 안 오간다"를 의미하지 않는다. 그 상태에서 SYNC_LOST를 만나면
+         * 유예 없이 즉시 MENU_OTA로 강제 복귀해버려서, 이미 진행 중이던
+         * 배치 전송이 통째로 날아가는 문제가 있었다. OTA_FHSS_SYNCING과
+         * OTA_FHSS_READY도 OTA_RECEIVING과 동일하게 유예 대상에 넣는다
+         * (OTA_FHSS_CONFIGURED는 아직 ACTIVATE 전이라 실제 데이터가 오갈 수
+         * 없으므로 제외 — 즉시 복귀가 맞음). */
+        const bool ota_fhss_resync_grace_state =
+            s_state == FSM_STATE_OTA_FHSS_SYNCING ||
+            s_state == FSM_STATE_OTA_FHSS_READY ||
+            s_state == FSM_STATE_OTA_RECEIVING;
+
+        if (event == FSM_EVENT_SYNC_ACQUIRED && ota_fhss_resync_grace_state) {
             if (s_ota_fhss_resync_timer != NULL) {
                 (void)xTimerStop(s_ota_fhss_resync_timer, 0U);
             }
-            ESP_LOGI(TAG, "OTA FHSS synchronization recovered; session preserved");
-            continue;
+            if (s_state == FSM_STATE_OTA_RECEIVING) {
+                ESP_LOGI(TAG, "OTA FHSS synchronization recovered; session preserved");
+                continue;
+            }
+            /* OTA_FHSS_SYNCING/READY는 타이머만 정지하고 아래 상태별 전이표로
+             * 넘긴다 — SYNCING -> READY 같은 정상 전이가 그대로 이어져야
+             * 하기 때문에(유예 중이었다고 정상 진행까지 막을 이유는 없음). */
         }
         if (event == FSM_EVENT_OTA_FHSS_RESYNC_TIMEOUT) {
-            if (s_state == FSM_STATE_OTA_RECEIVING) {
+            if (ota_fhss_resync_grace_state) {
                 ESP_LOGW(TAG, "OTA FHSS resync grace expired; aborting session");
                 if (ota_client_abort() != ESP_OK) {
                     ESP_LOGW(TAG, "failed to abort OTA after resync timeout");
@@ -1102,7 +1175,7 @@ static void fsm_task(void *arg)
                 s_state == FSM_STATE_OTA_FHSS_SYNCING ||
                 s_state == FSM_STATE_OTA_FHSS_READY ||
                 s_state == FSM_STATE_OTA_RECEIVING;
-            if (s_state == FSM_STATE_OTA_RECEIVING) {
+            if (ota_fhss_resync_grace_state) {
                 if (s_ota_fhss_resync_timer == NULL ||
                     xTimerReset(s_ota_fhss_resync_timer, 0U) != pdPASS) {
                     ESP_LOGE(TAG, "failed to arm OTA FHSS resync grace");
@@ -1112,7 +1185,8 @@ static void fsm_task(void *arg)
                     fsm_transition_to(FSM_STATE_MENU_OTA);
                 } else {
                     ESP_LOGW(TAG,
-                             "OTA FHSS SYNC lost; preserving session for %u ms resync grace",
+                             "OTA FHSS SYNC lost in %s; preserving session for %u ms resync grace",
+                             s_state_names[s_state],
                              (unsigned)OTA_FHSS_RESYNC_GRACE_MS);
                 }
                 continue;

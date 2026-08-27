@@ -72,6 +72,11 @@ void app_main(void)
         .acquire_count = 3U,
         .loss_count = 5U,
         .recovery_entry_miss_count = 2U,
+        /* [2026-08-25] 이 예제는 동기화 자체를 보는 테스트라 예전 동작을
+         * 그대로 유지한다 — 지정 초기화라 안 적으면 false(완화)로 들어가서
+         * 조용히 동작이 바뀌므로 명시한다.
+         * 자세한 내용: fhss_service.h의 treat_body_timeout_as_radio_error 주석 */
+        .treat_body_timeout_as_radio_error = true,
         .diagnostics_interval_ms = 5000U,
         .event_callback = on_fhss_event,
         .event_context = NULL,
